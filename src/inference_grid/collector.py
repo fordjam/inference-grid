@@ -203,3 +203,41 @@ def publish_observation(
         "observed_at": normalized["observed_at"],
         "windows": windows,
     }
+
+
+def refresh_collect(ledger, config):
+    """Publish each provider's latest private observation file and report in the agent shape.
+
+    config: {"providers": [{"alias", "provider", "observation_path", "plan"}], "freshness_seconds"}.
+    This publishes observations that native collectors already wrote; it does not fetch from
+    a provider, launch inference or clear a cooldown. Stale or unreadable files report
+    "unknown", refused publications "error"; no file content or exception text is echoed.
+    """
+    import json
+    from pathlib import Path
+
+    from .provider_report import provider_report
+
+    if not isinstance(config, dict) or not isinstance(config.get("providers"), list):
+        raise Refused("providers list required")
+    freshness = config.get("freshness_seconds", 900)
+    reports = []
+    for entry in config["providers"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("provider"), str):
+            raise Refused("provider entries need provider, alias, observation_path and plan")
+        provider = entry["provider"]
+        until = ledger.cooldown_status(entry["alias"], "usage")["until"]
+        try:
+            path = Path(entry["observation_path"])
+            if not path.is_absolute():
+                raise Refused("absolute observation path required")
+            observation = json.loads(path.read_bytes())
+            publish = publish_observation(
+                ledger, entry["alias"], observation, entry["plan"], freshness_seconds=freshness
+            )
+        except Refused:
+            raise
+        except (OSError, ValueError, KeyError, TypeError):
+            publish = None
+        reports.append(provider_report(provider, publish, until, time.time()))
+    return {"providers": reports}

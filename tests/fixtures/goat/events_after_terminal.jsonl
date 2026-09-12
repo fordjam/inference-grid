@@ -1,0 +1,12 @@
+{"type": "event", "event": {"type": "run_start", "sessionId": "e8cba0e4-f6c5-4890-a600-dba11e4412f2"}}
+{"type": "event", "event": {"type": "turn_start", "turnNumber": 1}}
+{"type": "event", "event": {"type": "message_start"}}
+{"type": "event", "event": {"type": "model_request_start", "model": "z-ai/glm-5.3-flash"}}
+{"type": "event", "event": {"type": "text_delta", "delta": "DONE"}}
+{"type": "event", "event": {"type": "message_update", "content": [{"type": "text", "text": "DONE"}]}}
+{"type": "event", "event": {"type": "model_request_end", "model": "z-ai/glm-5.3-flash", "usage": {"inputTokens": 16579, "outputTokens": 3, "cacheReadTokens": 0, "cacheWriteTokens": 0}, "stopReason": "stop", "effort": "low"}}
+{"type": "event", "event": {"type": "message_end", "content": [{"type": "text", "text": "DONE"}]}}
+{"type": "event", "event": {"type": "turn_end", "turnNumber": 1, "hadToolCalls": false, "usage": {"inputTokens": 16579, "outputTokens": 3, "cacheReadTokens": 0, "cacheWriteTokens": 0}}}
+{"type": "event", "event": {"type": "run_end", "result": {"finalText": "DONE", "stopReason": "end_turn", "turnCount": 1, "usage": {"inputTokens": 16579, "outputTokens": 3, "cacheReadTokens": 0, "cacheWriteTokens": 0}, "systemPromptTokens": null, "nextState": {"sessionId": "e8cba0e4-f6c5-4890-a600-dba11e4412f2", "messages": [{"role": "assistant", "content": [{"type": "text", "text": "DONE"}], "meta": {"source": "model", "createdAt": 1789223884811, "messageId": "8e6731c9-a3bf-4cb5-82fd-65798bcebe00"}}], "interrupted": false, "modState": {"workspace": {"cwd": "/private/tmp/grid-goat-effort-canary/attempts2/xxxxxxxx-5f76-4356-8bbe-d7baaee1c082/work", "platform": "darwin", "branch": null, "gitStatus": null, "recentCommits": [], "additionalDirectories": []}, "compaction": {"tokens": 16586, "basis": {"role": "assistant", "content": [{"type": "text", "text": "DONE"}], "meta": {"source": "model", "createdAt": 1789223884811, "messageId": "8e6731c9-a3bf-4cb5-82fd-65798bcebe00"}}}}}}}}
+{"type": "result", "subtype": "success", "sessionId": "e8cba0e4-f6c5-4890-a600-dba11e4412f2", "stopReason": "end_turn", "usage": {"inputTokens": 16579, "outputTokens": 3, "cacheReadTokens": 0, "cacheWriteTokens": 0}, "durationMs": 1947, "finalText": "DONE"}
+{"type": "event", "event": {"type": "telemetry"}}

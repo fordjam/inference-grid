@@ -1,4 +1,6 @@
+import json
 import unittest
+from pathlib import Path
 from inference_grid.goat_outcomes import classify_goat
 
 M = "z-ai/glm-5.3-flash"
@@ -154,3 +156,39 @@ class GoatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FIXTURES = Path(__file__).with_name("fixtures") / "goat"
+
+
+def load_events(path):
+    """Same tolerant loader the trusted adapter uses: a malformed line stays in the stream."""
+    rows = []
+    for line in path.read_bytes().split(b"\n"):
+        if line.strip():
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                rows.append("malformed")
+    return rows
+
+
+class FixtureTests(unittest.TestCase):
+    """Offline NDJSON fixtures were authored by Command Code GOAT through a Grid attempt."""
+
+    def test_fixtures_match_expected_outcomes(self):
+        expected = json.loads((FIXTURES / "expected.json").read_text())
+        self.assertEqual(len(expected), 7)
+        for name, exp in expected.items():
+            r = classify_goat(load_events(FIXTURES / name), OK, M)
+            self.assertEqual({"outcome": r["outcome"], "reason": r["reason"]}, exp, name)
+
+    def test_success_fixture_receipt_and_supervision_override(self):
+        rows = load_events(FIXTURES / "two_requests.jsonl")
+        r = classify_goat(rows, OK, M)
+        self.assertEqual(r["receipt"]["text"], "DONE")
+        self.assertEqual(r["progress"], {"model_requests": 2, "output_tokens_reported": 12})
+        self.assertEqual(
+            classify_goat(rows, {"reason": "wall_deadline", "returncode": -15}, M)["outcome"],
+            "interrupted",
+        )

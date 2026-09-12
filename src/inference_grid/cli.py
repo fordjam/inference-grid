@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 
+from .collector import refresh_collect
 from .ledger import Ledger
 from .queue import hold_abandoned, publish
 from .scheduler import tick
@@ -30,6 +31,7 @@ def main():
             "hold-abandoned",
             "accept",
             "resolve",
+            "refresh-collect",
             "tick",
         ],
     )
@@ -51,6 +53,7 @@ def main():
             "hold-abandoned",
             "accept",
             "resolve",
+            "refresh-collect",
             "defer",
             "cooldown",
         }
@@ -73,6 +76,7 @@ def main():
         "hold-abandoned": lambda **kw: hold_abandoned(ledger, **kw),
         "accept": ledger.accept,
         "resolve": ledger.resolve,
+        "refresh-collect": lambda **kw: refresh_collect(ledger, kw),
     }
     print(json.dumps(commands[args.command](**data), indent=2))
 

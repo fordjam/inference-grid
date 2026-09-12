@@ -1,5 +1,5 @@
 include README.md LICENSE SECURITY.md CONTRIBUTING.md compose.yaml .env.example requirements.lock
 recursive-include docs *.md *.txt
 recursive-include examples *.py *.service *.plist
-recursive-include tests *.py
+recursive-include tests *.py *.jsonl *.json
 recursive-include deployments/capacity *.py *.cjs *.md *.json *.html *.css *.js *.png *.webmanifest Dockerfile .dockerignore

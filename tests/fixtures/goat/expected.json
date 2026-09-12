@@ -1,0 +1,9 @@
+{
+  "success.jsonl": {"outcome": "native_complete", "reason": "verified_native_shape"},
+  "two_requests.jsonl": {"outcome": "native_complete", "reason": "verified_native_shape"},
+  "missing_terminal.jsonl": {"outcome": "unqualified", "reason": "missing_or_multiple_terminals"},
+  "events_after_terminal.jsonl": {"outcome": "unqualified", "reason": "events_after_terminal"},
+  "model_mismatch.jsonl": {"outcome": "unqualified", "reason": "model_unqualified"},
+  "partial_line.jsonl": {"outcome": "unqualified", "reason": "invalid_input"},
+  "max_turns.jsonl": {"outcome": "unqualified", "reason": "native_not_completed"}
+}

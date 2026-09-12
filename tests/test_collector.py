@@ -231,3 +231,67 @@ def test_publish_observation_refuses_unknown_usage_and_stale(ledger):
         publish_observation(
             ledger, "missing", observation(), {"units": {"weekly": 40}, "models": ["m"]}
         )
+
+
+def test_refresh_collect_reports_per_provider_without_leaking(ledger, tmp_path):
+    import json
+
+    from inference_grid.collector import refresh_collect
+
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps(observation()))
+    older = tmp_path / "older.json"
+    older.write_text(json.dumps(observation(-60)))  # out of order once "good" is published
+    broken = tmp_path / "broken.json"
+    broken.write_text("{secret: DO_NOT_SHARE")
+    plan = {"units": {"weekly": 40}, "models": ["m"]}
+    ledger.defer("a", "usage", time.time() + 120)
+    config = {
+        "providers": [
+            {"alias": "alias", "provider": "opencode", "observation_path": str(good), "plan": plan},
+            {"alias": "a", "provider": "codex", "observation_path": str(older), "plan": plan},
+            {"alias": "a", "provider": "claude", "observation_path": str(broken), "plan": plan},
+            {
+                "alias": "a",
+                "provider": "clinepass",
+                "observation_path": str(tmp_path / "none"),
+                "plan": plan,
+            },
+        ]
+    }
+    out = refresh_collect(ledger, config)
+    statuses = {r["provider"]: r["status"] for r in out["providers"]}
+    # The usage cooldown on the shared account wins for every alias; publication still happened.
+    assert statuses == {
+        "opencode": "cooldown",
+        "codex": "cooldown",
+        "claude": "cooldown",
+        "clinepass": "cooldown",
+    }
+    assert all(r["next_eligible_at"] for r in out["providers"])
+    assert "DO_NOT_SHARE" not in json.dumps(out) and "secret" not in json.dumps(out)
+    ledger.defer("a", "usage", 0)
+    with ledger.tx() as con:
+        from sqlalchemy import update
+
+        from inference_grid.ledger import cooldowns
+
+        con.execute(update(cooldowns).values(until=0))
+    statuses = {r["provider"]: r["status"] for r in refresh_collect(ledger, config)["providers"]}
+    assert statuses == {
+        "opencode": "ok",
+        "codex": "error",
+        "claude": "unknown",
+        "clinepass": "unknown",
+    }
+    with pytest.raises(Refused):
+        refresh_collect(
+            ledger,
+            {
+                "providers": [
+                    {"provider": "x", "alias": "a", "observation_path": "relative", "plan": plan}
+                ]
+            },
+        )
+    with pytest.raises(Refused):
+        refresh_collect(ledger, {"providers": "x"})
