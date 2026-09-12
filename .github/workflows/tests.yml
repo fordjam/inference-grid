@@ -30,7 +30,7 @@ jobs:
           node-version: '22'
       - name: Capacity HTTP and browser-state regressions
         run: |
-          (cd deployments/capacity && python -m unittest -v test_cloud)
+          (cd deployments/capacity && python -m unittest -v test_cloud test_refresh_end_to_end)
           node deployments/capacity/test_display.cjs
           node deployments/capacity/test_refresh.cjs
           cmp src/inference_grid/capacity.py deployments/capacity/capacity.py
