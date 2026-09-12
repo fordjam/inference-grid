@@ -10,7 +10,8 @@ from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.engine import make_url
 
 from .collector import collection_claims
-from .ledger import accounts, attempts, cooldowns, outbox, tasks
+from .lane_readiness import lane_readiness
+from .ledger import accounts, attempts, cooldowns, lanes, outbox, tasks
 
 
 def executable_state(spec):
@@ -71,6 +72,7 @@ def diagnose(url, now=None):
             pending = len(
                 list(con.execute(select(outbox.c.attempt).where(outbox.c.sent.is_(None))))
             )
+            lane_rows = list(con.execute(select(lanes.c.record)).scalars())
         result["database"] = "readable"
         result["counts"] = {
             "accounts": len(account_rows),
@@ -88,7 +90,25 @@ def diagnose(url, now=None):
             "unresolved_executables": sum(executable_state(s) == "unresolved" for s in specs),
             "invalid_adapter_specs": sum(executable_state(s) == "invalid" for s in specs),
         }
+        result["lanes"] = []
+        for record in lane_rows:
+            try:
+                classified = lane_readiness(record, now)
+            except ValueError:
+                classified = {
+                    "provider": str(record.get("provider", "?"))[:40]
+                    if isinstance(record, dict)
+                    else "?",
+                    "state": "invalid",
+                    "reason": "invalid_lane_record",
+                    "next_check_at": None,
+                }
+            result["lanes"].append(classified)
         for count, finding in (
+            (
+                sum(lane["state"] not in ("ready",) for lane in result["lanes"]),
+                "provider_lanes_not_ready",
+            ),
             (not account_rows, "no_accounts_configured"),
             (result["counts"]["stuck_collections"], "collection_reconciliation_required"),
             (result["counts"]["inference_cooldowns"], "provider_inference_cooldown_active"),

@@ -92,6 +92,14 @@ events = Table(
     Column("detail", JSON, nullable=False),
     Column("at", Float, nullable=False),
 )
+# Operator-maintained lane readiness facts; doctor classifies them, nothing routes on them yet.
+lanes = Table(
+    "lanes",
+    metadata,
+    Column("provider", String, primary_key=True),
+    Column("record", JSON, nullable=False),
+    Column("updated", Float, nullable=False),
+)
 # Locks cover task/account/workspace namespaces; rows persist to avoid ABA races.
 locks = Table("locks", metadata, Column("id", String, primary_key=True))
 ACTIVE = ("queued", "dispatching", "held")
@@ -507,6 +515,29 @@ class Ledger:
                 update(accounts).where(accounts.c.id == row["account"]).values(windows=windows)
             )
             self.event(con, aid, "native_completed", receipt_digest=digest(receipt))
+
+    def record_lane(self, provider, record):
+        """Store one provider lane's readiness facts after validating them with lane_readiness."""
+        from .lane_readiness import lane_readiness
+
+        if not isinstance(record, dict) or record.get("provider") != provider:
+            raise Refused("record.provider must match provider")
+        try:
+            classified = lane_readiness(record, time.time())
+        except ValueError as exc:
+            raise Refused("invalid lane record: " + str(exc)[:120]) from exc
+        with self.tx() as con:
+            self.lock(con, ["lane:" + provider])
+            existing = con.execute(
+                select(lanes.c.provider).where(lanes.c.provider == provider)
+            ).first()
+            values = dict(record=record, updated=time.time())
+            if existing:
+                con.execute(update(lanes).where(lanes.c.provider == provider).values(**values))
+            else:
+                con.execute(lanes.insert().values(provider=provider, **values))
+            self.event(con, None, "lane_recorded", provider=provider, state=classified["state"])
+        return classified
 
     def resolve(self, aid, outcome, reason, operator, evidence=None):
         """Auditable operator resolution of a held attempt; never a retry or acceptance.

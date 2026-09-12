@@ -32,6 +32,7 @@ def main():
             "accept",
             "resolve",
             "refresh-collect",
+            "lane",
             "tick",
         ],
     )
@@ -54,6 +55,7 @@ def main():
             "accept",
             "resolve",
             "refresh-collect",
+            "lane",
             "defer",
             "cooldown",
         }
@@ -77,6 +79,7 @@ def main():
         "accept": ledger.accept,
         "resolve": ledger.resolve,
         "refresh-collect": lambda **kw: refresh_collect(ledger, kw),
+        "lane": ledger.record_lane,
     }
     print(json.dumps(commands[args.command](**data), indent=2))
 

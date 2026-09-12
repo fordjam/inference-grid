@@ -2,6 +2,8 @@ import json
 import sys
 import time
 
+import pytest
+
 from sqlalchemy import insert
 
 from inference_grid.doctor import diagnose
@@ -97,3 +99,48 @@ def test_doctor_separates_usage_and_inference_cooldowns(tmp_path):
     assert report["counts"]["usage_cooldowns"] == 1
     assert report["counts"]["inference_cooldowns"] == 0
     assert "usage_collection_cooldown_active" in report["findings"]
+
+
+def test_lane_records_are_classified_not_trusted(tmp_path):
+    from inference_grid.ledger import Refused, lanes
+
+    url = "sqlite:///" + str(tmp_path / "ledger.sqlite")
+    ledger = Ledger(url)
+    ledger.initialize()
+    ledger.configure_account("a", 1, {"weekly": 10}, time.time() + 60, ["m"])
+    now = time.time()
+    record = dict(
+        provider="opencode",
+        auth="ok",
+        quota_observed_at=now - 10,
+        quota_freshness_seconds=900,
+        used_percent_max=1.0,
+        admission_limit_percent=80,
+        cooldown_until=None,
+        qualification="qualified",
+        blocked_until=None,
+        blocker=None,
+    )
+    assert ledger.record_lane("opencode", record)["state"] == "ready"
+    blocked = dict(record, provider="clinepass", blocked_until=now + 3600, blocker="weekly reset")
+    assert ledger.record_lane("clinepass", blocked)["state"] == "blocked"
+    with pytest.raises(Refused):
+        ledger.record_lane("codex", dict(record, provider="claude"))
+    with pytest.raises(Refused):
+        ledger.record_lane("codex", dict(record, provider="codex", auth="maybe"))
+    report = diagnose(url)
+    states = {lane["provider"]: (lane["state"], lane["reason"]) for lane in report["lanes"]}
+    assert states == {"opencode": ("ready", "ready"), "clinepass": ("blocked", "weekly reset")}
+    assert "provider_lanes_not_ready" in report["findings"]
+    # A tampered stored record is reported as invalid, never treated as ready.
+    with ledger.tx() as con:
+        from sqlalchemy import update
+
+        con.execute(
+            update(lanes)
+            .where(lanes.c.provider == "opencode")
+            .values(record={"provider": "opencode"})
+        )
+    report = diagnose(url)
+    assert {lane["provider"]: lane["state"] for lane in report["lanes"]}["opencode"] == "invalid"
+    assert json.dumps(report).count("weekly reset") == 1
