@@ -1,0 +1,31 @@
+{
+ "id": "lane-goat",
+ "category": "tests_multi_file",
+ "brief": "grid/briefs/lane-goat.txt",
+ "inputs": [
+  "grid/briefs/lane-goat.txt",
+  "src/inference_grid/lanes/zcode.py",
+  "src/inference_grid/lanes/zai.py",
+  "src/inference_grid/lanes/sandbox.py",
+  "tests/test_lane_zcode.py",
+  "src/inference_grid/goat_outcomes.py"
+ ],
+ "tests": [
+  "grid/tests/test_goat.py"
+ ],
+ "artifacts": [
+  "goat.py",
+  "test_goat.py"
+ ],
+ "lanes": [
+  "zcode"
+ ],
+ "author_family": null,
+ "budget": {
+  "wall_seconds": 900,
+  "output_bytes": 2000000,
+  "thinking_tokens": null
+ },
+ "state": "ready",
+ "blocked_reason": null
+}
