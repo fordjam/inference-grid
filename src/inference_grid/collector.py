@@ -10,6 +10,7 @@ from .ledger import Refused, accounts, aliases, cooldowns
 from .retry_after import retry_deadline
 from .quota_status import classify_quota_status
 from .observation import normalize_observation
+from .remaining_units import remaining_units
 
 _meta = MetaData()
 collection_claims = Table(
@@ -155,3 +156,50 @@ def collect(ledger, alias, collector, *, timeout_seconds=30, fallback_seconds=60
         if changed.rowcount != 1:
             return {"status": "reconciliation_required", "observation": None}
     return result
+
+
+def publish_observation(
+    ledger, alias, observation, plan, *, freshness_seconds=900, capacity=1, alias_names=()
+):
+    """Publish one normalized observation into account capacity under the ledger's rules.
+
+    plan is explicit local configuration: {"units": {window: allowance}, "models": [...]}.
+    Nothing is inferred: a window without a configured allowance or with unknown usage
+    refuses the whole publication, and the ledger's out-of-order/replay checks apply.
+    Returns a status dict; never raises for provider-shaped problems.
+    """
+    if not _number(freshness_seconds) or not 0 < freshness_seconds <= 86400:
+        raise Refused("bounded freshness required")
+    if not isinstance(plan, dict) or not isinstance(plan.get("models"), list) or not plan["models"]:
+        raise Refused("plan models required")
+    try:
+        normalized = normalize_observation(observation, time.time())
+        windows = remaining_units(normalized, plan.get("units"))
+    except ValueError as exc:
+        return {"status": "refused", "reason": type(exc).__name__ + ": " + str(exc)[:120]}
+    observed = normalized["observed_ts"]
+    if observed + freshness_seconds <= time.time():
+        return {"status": "stale", "observed_at": normalized["observed_at"]}
+    with ledger.tx() as con:
+        binding = con.execute(select(aliases).where(aliases.c.id == alias)).mappings().first()
+    if not binding:
+        raise Refused("unknown account")
+    account = binding["account"]
+    try:
+        ledger.configure_account(
+            account,
+            capacity,
+            windows,
+            observed + freshness_seconds,
+            list(plan["models"]),
+            alias_names,
+            observed_at=observed,
+        )
+    except Refused as exc:
+        return {"status": "refused", "reason": str(exc)}
+    return {
+        "status": "published",
+        "account": account,
+        "observed_at": normalized["observed_at"],
+        "windows": windows,
+    }

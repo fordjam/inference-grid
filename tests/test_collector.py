@@ -175,3 +175,59 @@ def test_invalid_429_timestamp_cannot_clear_claim(ledger, received):
     result = collect(ledger, "a", lambda **kw: R(429, retry_after="60", received_at=received))
     assert result["status"] == "reconciliation_required"
     assert collect(ledger, "alias", lambda **kw: pytest.fail("must not repeat"))["status"] == "busy"
+
+
+def observation(offset=0, **changes):
+    from datetime import datetime, timezone
+
+    raw = {
+        "provider": "opencode",
+        "observed_at": datetime.fromtimestamp(time.time() + offset, timezone.utc).isoformat(),
+        "windows": [{"id": "weekly", "used_percent": 25}, {"id": "monthly", "used_percent": None}],
+        "cookie": "secret",
+    }
+    raw.update(changes)
+    return raw
+
+
+def test_publish_observation_updates_capacity(ledger):
+    from sqlalchemy import select
+
+    from inference_grid.collector import publish_observation
+    from inference_grid.ledger import accounts
+
+    plan = {"units": {"weekly": 40}, "models": ["m"]}
+    raw = observation()
+    result = publish_observation(ledger, "alias", raw, plan)
+    assert result["status"] == "published" and result["windows"] == {"weekly": 30.0}
+    assert result["account"] == "a" and "secret" not in str(result)
+    with ledger.engine.connect() as con:
+        row = con.execute(select(accounts).where(accounts.c.id == "a")).mappings().one()
+    assert row["windows"] == {"weekly": 30.0} and row["models"] == ["m"]
+    assert abs(row["expires"] - (time.time() + 900)) < 5
+    # Exact replay is accepted by the ledger; an older observation is refused.
+    assert publish_observation(ledger, "a", raw, plan)["status"] == "published"
+    assert publish_observation(ledger, "a", observation(-60), plan)["status"] == "refused"
+
+
+def test_publish_observation_refuses_unknown_usage_and_stale(ledger):
+    from inference_grid.collector import publish_observation
+
+    unknown = publish_observation(
+        ledger, "a", observation(), {"units": {"monthly": 60}, "models": ["m"]}
+    )
+    assert unknown["status"] == "refused" and "unknown" in unknown["reason"]
+    stale = publish_observation(
+        ledger, "a", observation(-1000), {"units": {"weekly": 40}, "models": ["m"]}
+    )
+    assert stale["status"] == "stale"
+    invalid = publish_observation(
+        ledger, "a", {"secret": "x"}, {"units": {"weekly": 40}, "models": ["m"]}
+    )
+    assert invalid["status"] == "refused" and "secret" not in invalid["reason"]
+    with pytest.raises(Refused):
+        publish_observation(ledger, "a", observation(), {"units": {"weekly": 40}})
+    with pytest.raises(Refused):
+        publish_observation(
+            ledger, "missing", observation(), {"units": {"weekly": 40}, "models": ["m"]}
+        )
