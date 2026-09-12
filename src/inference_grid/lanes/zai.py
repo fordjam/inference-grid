@@ -261,6 +261,9 @@ def run(
         # A reply-only task publishes the response itself as its artifact.
         (work / "reply.txt").write_bytes(text.strip().encode())
         names = ["reply.txt"]
+    if "reply.txt" in names and not (work / "reply.txt").is_file():
+        # A task may ask for the response itself under its conventional name.
+        (work / "reply.txt").write_bytes(text.strip().encode())
     missing = [n for n in names if not (work / n).is_file()]
     if missing:
         verdict["refusal"] = "expected artifacts missing: " + ", ".join(missing)
