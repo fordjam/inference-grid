@@ -116,7 +116,10 @@ def run(request, lane, attempt_dir, *, cli=DEFAULT_CLI, db_path=None, home=None,
     staged = stage_inputs(request, work)
     prompt = (work / "brief.txt").read_text().strip()
     profile = sandbox.write_profile(
-        work, attempt_dir / "zcode.sb", extra_write_roots=(home / ".zcode",)
+        work,
+        attempt_dir / "zcode.sb",
+        extra_write_roots=(home / ".zcode",),
+        deny_read_roots=sandbox.deny_read_roots(),
     )
     sandbox.probe(profile, work)
     argv = sandbox.command(

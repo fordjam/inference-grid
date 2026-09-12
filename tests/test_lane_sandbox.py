@@ -16,6 +16,8 @@ BASE = pathlib.Path("/private/tmp")
 def setUpModule():
     if not os.path.exists("/usr/bin/sandbox-exec") or not BASE.is_dir():
         raise unittest.SkipTest("macOS sandbox-exec and /private/tmp required")
+
+
 # The module only allows workspaces under /private/tmp or ~/.grid-workspaces.
 TEST_BASE = BASE
 
@@ -121,3 +123,48 @@ class CommandBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DenyReadTests(unittest.TestCase):
+    def test_denied_root_is_unreadable_inside_sandbox(self):
+        work = temp_dir()
+        secret_dir = temp_dir()
+        secret = secret_dir / "saved.db"
+        secret.write_text("private")
+        profile = sandbox.write_profile(
+            work, work.parent / (work.name + ".sb"), deny_read_roots=(secret_dir,)
+        )
+        try:
+            sandbox.probe(profile, work)
+            denied = subprocess.run(
+                sandbox.command(profile, ["/bin/cat", str(secret)]), capture_output=True, timeout=10
+            )
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertNotIn(b"private", denied.stdout)
+            allowed = subprocess.run(
+                sandbox.command(profile, ["/bin/cat", str(profile)]),
+                capture_output=True,
+                timeout=10,
+            )
+            self.assertEqual(allowed.returncode, 0)
+            with self.assertRaises(ValueError):
+                sandbox.write_profile(
+                    work, work.parent / "x.sb", deny_read_roots=("relative/path",)
+                )
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+            shutil.rmtree(secret_dir, ignore_errors=True)
+            profile.unlink(missing_ok=True)
+
+    def test_deny_list_file(self):
+        base = temp_dir()
+        try:
+            listing = base / "deny-read.json"
+            self.assertEqual(sandbox.deny_read_roots(listing), ())
+            listing.write_text(json.dumps(["/Users/example/private", "/tmp/x"]))
+            self.assertEqual(sandbox.deny_read_roots(listing), ("/Users/example/private", "/tmp/x"))
+            listing.write_text(json.dumps(["relative"]))
+            with self.assertRaises(ValueError):
+                sandbox.deny_read_roots(listing)
+        finally:
+            shutil.rmtree(base, ignore_errors=True)

@@ -177,7 +177,12 @@ def run(
     if problem:
         verdict["refusal"] = problem
         return None, verdict
-    profile = sandbox.write_profile(work, attempt_dir / "claude.sb", extra_write_roots=(home,))
+    profile = sandbox.write_profile(
+        work,
+        attempt_dir / "claude.sb",
+        extra_write_roots=(home,),
+        deny_read_roots=sandbox.deny_read_roots(),
+    )
     sandbox.probe(profile, work)
     argv = sandbox.command(
         profile,
