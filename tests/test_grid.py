@@ -359,14 +359,16 @@ def test_delayed_new_observation_cannot_erase_later_completion(grid):
 @pytest.mark.parametrize("already_running", [False, True])
 def test_refreshed_capacity_holds_queued_without_disturbing_running(grid, already_running):
     ledger, account, _ = grid
-    ledger.configure_account(account, 2, {"five_hour": 10, "weekly": 20},
-                             time.time() + 300, ["synthetic"])
+    ledger.configure_account(
+        account, 2, {"five_hour": 10, "weekly": 20}, time.time() + 300, ["synthetic"]
+    )
     first = claim(grid, submit(grid, "capacity-first"))
     second = claim(grid, submit(grid, "capacity-second"))
     if already_running:
         assert ledger.start(*first) is not None
-    ledger.configure_account(account, 1, {"five_hour": 10, "weekly": 20},
-                             time.time() + 300, ["synthetic"])
+    ledger.configure_account(
+        account, 1, {"five_hour": 10, "weekly": 20}, time.time() + 300, ["synthetic"]
+    )
     assert ledger.start(*second) is None
     if not already_running:
         assert ledger.start(*first) is None
@@ -377,3 +379,130 @@ def test_refreshed_capacity_holds_queued_without_disturbing_running(grid, alread
     # Holds retain the reservations; a refresh must not silently release them.
     with pytest.raises(Refused, match="account busy"):
         claim(grid, submit(grid, "capacity-third"))
+
+
+def test_cooldown_max_survives_alias_refresh_and_restart(grid):
+    ledger, account, _ = grid
+    deadline = time.time() + 200
+    assert ledger.defer(account + "-alias", "inference", deadline)["until"] == deadline
+    assert ledger.defer(account, "inference", deadline - 100)["until"] == deadline
+    ledger.configure_account(
+        account, 1, {"five_hour": 10, "weekly": 20}, time.time() + 300, ["synthetic"]
+    )
+    other = Ledger(ledger.engine.url)
+    assert other.cooldown_status(account, "inference")["until"] == deadline
+    assert other.cooldown_status(account + "-alias", "inference")["blocked"]
+    with pytest.raises(Refused, match="cooldown"):
+        claim(grid, submit(grid), alias=True)
+
+
+def test_usage_cooldown_does_not_pause_inference(grid):
+    ledger, account, _ = grid
+    ledger.defer(account, "usage", time.time() + 200)
+    aid, gen = claim(grid, submit(grid))
+    assert ledger.start(aid, gen) is not None
+    assert ledger.cooldown_status(account, "usage")["blocked"]
+    assert not ledger.cooldown_status(account, "inference")["blocked"]
+
+
+def test_new_cooldown_holds_queued_and_preserves_reservation(grid):
+    ledger, account, _ = grid
+    aid, gen = claim(grid, submit(grid))
+    ledger.defer(account, "inference", time.time() + 200)
+    assert ledger.start(aid, gen) is None
+    row = next(r for r in ledger.status() if r["id"] == aid)
+    assert row["state"] == "held"
+    assert "cooldown" in row["reason"]
+    assert ledger.start(aid, gen) is None
+
+
+def test_cooldown_does_not_cancel_started_work(grid):
+    ledger, account, _ = grid
+    aid, gen = claim(grid, submit(grid))
+    assert ledger.start(aid, gen) is not None
+    ledger.defer(account, "inference", time.time() + 200)
+    assert next(r for r in ledger.status() if r["id"] == aid)["state"] == "dispatching"
+
+
+def test_expired_cooldown_allows_new_work_without_releasing_held(grid, monkeypatch):
+    ledger, account, _ = grid
+    now = time.time()
+    aid, gen = claim(grid, submit(grid))
+    ledger.defer(account, "inference", now + 10)
+    assert ledger.start(aid, gen) is None
+    monkeypatch.setattr("inference_grid.ledger.time.time", lambda: now + 20)
+    assert not ledger.cooldown_status(account, "inference")["blocked"]
+    with pytest.raises(Refused, match="account busy"):
+        claim(grid, submit(grid, "another"))
+    assert next(r for r in ledger.status() if r["id"] == aid)["state"] == "held"
+
+
+def test_concurrent_cooldowns_keep_longest_deadline(grid):
+    ledger, account, _ = grid
+    now = time.time()
+
+    def record(delay):
+        return Ledger(ledger.engine.url).defer(account + "-alias", "inference", now + delay)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(record, [100, 300, 150, 250]))
+    assert ledger.cooldown_status(account, "inference")["until"] == now + 300
+
+
+@pytest.mark.parametrize("until", [True, -1, None, float("nan"), float("inf"), 10**400])
+def test_invalid_cooldown_deadlines_refused(grid, until):
+    ledger, account, _ = grid
+    with pytest.raises(Refused):
+        ledger.defer(account, "inference", until)
+    assert ledger.cooldown_status(account, "inference")["until"] is None
+
+
+def test_unknown_cooldown_account_and_endpoint_refused(grid):
+    ledger, account, _ = grid
+    with pytest.raises(Refused, match="unknown account"):
+        ledger.defer(account + "-unknown", "inference", time.time() + 1)
+    with pytest.raises(Refused, match="endpoint"):
+        ledger.defer(account, "typo", time.time() + 1)
+
+
+@pytest.mark.parametrize("first_operation", ["cooldown", "start"])
+def test_cooldown_and_start_serialize_under_account_lock(grid, monkeypatch, first_operation):
+    import threading
+
+    ledger, account, _ = grid
+    aid, gen = claim(grid, submit(grid))
+    entered, release = threading.Event(), threading.Event()
+    local = threading.local()
+    original = ledger.lock
+
+    def lock(con, keys):
+        original(con, keys)
+        if getattr(local, "first", False):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test synchronization timed out")
+
+    monkeypatch.setattr(ledger, "lock", lock)
+
+    def operation(name, first):
+        local.first = first
+        return (
+            ledger.defer(account, "inference", time.time() + 100)
+            if name == "cooldown"
+            else ledger.start(aid, gen)
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(operation, first_operation, True)
+        try:
+            assert entered.wait(5)
+            second = pool.submit(
+                operation, "start" if first_operation == "cooldown" else "cooldown", False
+            )
+        finally:
+            release.set()
+        first_result, second_result = first.result(timeout=10), second.result(timeout=10)
+    started = first_result if first_operation == "start" else second_result
+    assert (started is not None) == (first_operation == "start")
+    state = next(r for r in ledger.status() if r["id"] == aid)["state"]
+    assert state == ("dispatching" if first_operation == "start" else "held")

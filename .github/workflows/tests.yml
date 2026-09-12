@@ -34,6 +34,13 @@ jobs:
           node deployments/capacity/test_display.cjs
           node deployments/capacity/test_refresh.cjs
           cmp src/inference_grid/capacity.py deployments/capacity/capacity.py
+      - name: Build and install release wheel
+        run: |
+          python -m pip wheel --no-deps . -w dist
+          python -m venv /tmp/grid-install
+          /tmp/grid-install/bin/pip install dist/*.whl
+          /tmp/grid-install/bin/inference-grid --help
+          /tmp/grid-install/bin/python examples/demo.py
       - name: Capacity deployment build
         run: docker build -t grid-capacity-test deployments/capacity
       - run: pytest -q

@@ -9,7 +9,7 @@ import time
 from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.engine import make_url
 
-from .ledger import accounts, attempts, outbox, tasks
+from .ledger import accounts, attempts, cooldowns, outbox, tasks
 
 
 def executable_state(spec):
@@ -47,11 +47,14 @@ def diagnose(url, now=None):
         connect_args = {"connect_timeout": 5} if parsed.get_backend_name() == "postgresql" else {}
         engine = create_engine(url, connect_args=connect_args)
         with engine.connect() as con:
-            required = {t.name for t in (accounts, attempts, outbox, tasks)}
+            required = {t.name for t in (accounts, attempts, cooldowns, outbox, tasks)}
             if not required.issubset(inspect(con).get_table_names()):
                 result["findings"].append("schema_missing_run_init")
                 return result
             # Never print stored argv, URLs, credentials or exception text.
+            active_cooldowns = list(
+                con.execute(select(cooldowns.c.endpoint).where(cooldowns.c.until > now)).scalars()
+            )
             account_rows = list(con.execute(select(accounts.c.expires)).scalars())
             states = list(con.execute(select(attempts.c.state)).scalars())
             specs = list(con.execute(select(tasks.c.spec)).scalars())
@@ -61,6 +64,8 @@ def diagnose(url, now=None):
         result["database"] = "readable"
         result["counts"] = {
             "accounts": len(account_rows),
+            "inference_cooldowns": active_cooldowns.count("inference"),
+            "usage_cooldowns": active_cooldowns.count("usage"),
             "stale_accounts": sum(not math.isfinite(x) or x <= now for x in account_rows),
             "queued": states.count("queued"),
             "dispatching": states.count("dispatching"),
@@ -72,6 +77,8 @@ def diagnose(url, now=None):
         }
         for count, finding in (
             (not account_rows, "no_accounts_configured"),
+            (result["counts"]["inference_cooldowns"], "provider_inference_cooldown_active"),
+            (result["counts"]["usage_cooldowns"], "usage_collection_cooldown_active"),
             (result["counts"]["stale_accounts"], "refresh_stale_account_observations"),
             (result["counts"]["held"], "native_reconciliation_required_do_not_retry_blindly"),
             (result["counts"]["missing_executables"], "adapter_executable_unavailable"),

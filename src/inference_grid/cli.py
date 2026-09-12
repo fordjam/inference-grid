@@ -19,6 +19,8 @@ def main():
         choices=[
             "init",
             "doctor",
+            "defer",
+            "cooldown",
             "account",
             "submit",
             "claim",
@@ -38,10 +40,18 @@ def main():
         report = diagnose(args.database)
         print(json.dumps(report, indent=2))
         raise SystemExit(0 if report["status"] == "checks_passed" else 1)
+    if (
+        args.command
+        in {"account", "submit", "claim", "run", "hold-abandoned", "accept", "defer", "cooldown"}
+        and not args.json
+    ):
+        parser.error("this command requires --json")
     ledger = Ledger(args.database)
     data = json.load(open(args.json)) if args.json else {}
     commands = {
         "init": ledger.initialize,
+        "defer": ledger.defer,
+        "cooldown": ledger.cooldown_status,
         "account": ledger.configure_account,
         "tick": lambda: tick(ledger),
         "submit": ledger.submit,

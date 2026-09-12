@@ -85,3 +85,15 @@ def test_relative_executable_is_not_qualified_from_doctor_directory(tmp_path, mo
     assert executable_state({"argv": [str(script)]}) == "present"
     assert executable_state(None) == "invalid"
     assert executable_state({"argv": []}) == "invalid"
+
+
+def test_doctor_separates_usage_and_inference_cooldowns(tmp_path):
+    url = "sqlite:///" + str(tmp_path / "ledger.sqlite")
+    ledger = Ledger(url)
+    ledger.initialize()
+    ledger.configure_account("a", 1, {"weekly": 10}, time.time() + 60, ["m"])
+    ledger.defer("a", "usage", time.time() + 30)
+    report = diagnose(url)
+    assert report["counts"]["usage_cooldowns"] == 1
+    assert report["counts"]["inference_cooldowns"] == 0
+    assert "usage_collection_cooldown_active" in report["findings"]

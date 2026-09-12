@@ -47,3 +47,7 @@ Delivery stages in SPEC.md remain qualification gates. This roadmap sets priorit
 ## First hardening slices, 2026-09-12
 
 Implemented: read-only `doctor` diagnostics, pure Retry-After deadline/key policy, and conservative Cline terminal normalization. One small Go task completed through the real Grid ledger/worker; its derivative required local corrections before integration. See [scope and evidence](CLOUD-HARDENING.md). Full supervised lifecycle, durable cooldown enforcement and native adapter qualification remain open.
+
+## 0.1.0a2 progress
+
+Durable canonical-account cooldowns now preserve maximum deadlines and gate inference claim/start; doctor reports usage and inference cooldowns separately. Structured JSON decoding handles one exact code fence without relaxing schema checks. These changes advance CLOUD-02/CLOUD-04; external collector wiring, automatic held resolution and supervised lifecycle remain open.

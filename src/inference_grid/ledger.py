@@ -36,6 +36,13 @@ accounts = Table(
     Column("expires", Float, nullable=False),
     Column("models", JSON, nullable=False),
 )
+cooldowns = Table(
+    "cooldowns",
+    metadata,
+    Column("account", String, primary_key=True),
+    Column("endpoint", String, primary_key=True),
+    Column("until", Float, nullable=False),
+)
 observations = Table(
     "observations",
     metadata,
@@ -274,6 +281,66 @@ class Ledger:
                 return
             con.execute(tasks.insert().values(id=task, project=project, spec=spec))
 
+    def defer(self, alias, endpoint, until):
+        """Persist a lower bound, never permission to retry an uncertain attempt."""
+        import math
+
+        if endpoint not in ("usage", "inference"):
+            raise Refused("endpoint must be usage or inference")
+        try:
+            valid = type(until) in (int, float) and math.isfinite(until) and until >= 0
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise Refused("finite nonnegative deadline required")
+        with self.tx() as con:
+            binding = con.execute(select(aliases).where(aliases.c.id == alias)).mappings().first()
+            if not binding:
+                raise Refused("unknown account")
+            account = binding["account"]
+            self.lock(con, ["account:" + account])
+            condition = (cooldowns.c.account == account) & (cooldowns.c.endpoint == endpoint)
+            old = con.execute(select(cooldowns.c.until).where(condition)).scalar_one_or_none()
+            deadline = max(old or 0, until)
+            if old is None:
+                con.execute(
+                    cooldowns.insert().values(account=account, endpoint=endpoint, until=deadline)
+                )
+            elif deadline > old:
+                con.execute(update(cooldowns).where(condition).values(until=deadline))
+            self.event(
+                con, None, "cooldown_observed", account=account, endpoint=endpoint, until=deadline
+            )
+            return {"account": account, "endpoint": endpoint, "until": deadline}
+
+    def cooldown_status(self, alias, endpoint):
+        if endpoint not in ("usage", "inference"):
+            raise Refused("endpoint must be usage or inference")
+        with self.engine.connect() as con:
+            binding = con.execute(select(aliases).where(aliases.c.id == alias)).mappings().first()
+            if not binding:
+                raise Refused("unknown account")
+            deadline = con.execute(
+                select(cooldowns.c.until).where(
+                    cooldowns.c.account == binding["account"], cooldowns.c.endpoint == endpoint
+                )
+            ).scalar_one_or_none()
+        return {
+            "account": binding["account"],
+            "endpoint": endpoint,
+            "until": deadline,
+            "blocked": deadline is not None and deadline > time.time(),
+        }
+
+    @staticmethod
+    def inference_paused(con, account):
+        deadline = con.execute(
+            select(cooldowns.c.until).where(
+                cooldowns.c.account == account, cooldowns.c.endpoint == "inference"
+            )
+        ).scalar_one_or_none()
+        return deadline is not None and deadline > time.time()
+
     def claim(self, task, alias, estimate):
         import math
 
@@ -290,6 +357,8 @@ class Ledger:
             workspace = job["spec"]["workspace"]
             self.lock(con, ["account:" + account, "task:" + task, "workspace:" + workspace])
             acct = con.execute(select(accounts).where(accounts.c.id == account)).mappings().one()
+            if self.inference_paused(con, account):
+                raise Refused("provider inference cooldown active")
             if acct["expires"] <= time.time() or job["spec"]["model"] not in acct["models"]:
                 raise Refused("quota stale or model ineligible")
             rows = list(con.execute(select(attempts)).mappings())
@@ -349,6 +418,7 @@ class Ledger:
             over_budget = any(
                 sum(e.get(k, 0) for e in reserved) > v for k, v in acct["windows"].items()
             )
+            paused = self.inference_paused(con, prior["account"])
             changed_windows = any(set(e) != set(acct["windows"]) for e in reserved)
             if (
                 acct["expires"] <= time.time()
@@ -356,13 +426,18 @@ class Ledger:
                 or over_budget
                 or len(reserved) > acct["capacity"]
                 or changed_windows
+                or paused
             ):
                 con.execute(
                     update(attempts)
                     .where(attempts.c.id == aid, attempts.c.state == "queued")
                     .values(
                         state="held",
-                        reason="admission observation expired or model, quota windows, or capacity changed",
+                        reason=(
+                            "provider inference cooldown requires reconciliation"
+                            if paused
+                            else "admission observation expired or model, quota windows, or capacity changed"
+                        ),
                     )
                 )
                 self.event(con, aid, "reconciliation_required", reason="stale or changed admission")

@@ -28,7 +28,8 @@ Today you can:
 - Reserve capacity across multiple usage windows and prevent duplicate queued deliveries from starting the same attempt again.
 - Record outputs, check their identity and contents, and hold uncertain results instead of silently retrying them.
 - Run a demonstration without calling a model or spending inference capacity.
-- Use a capacity dashboard with a separately supplied usage feed, and inspect local configuration with `inference-grid doctor` on `main`.
+- Use a capacity dashboard with a separately supplied usage feed, and inspect local configuration with `inference-grid doctor`.
+- Persist account cooldowns and stop new inference from starting before its deadline.
 
 **Connecting your subscriptions is not yet a plug-and-play setup.** Native collectors and complete provider adapters are not bundled. Automatic recovery, a unified background service and routing based on measured task quality remain [roadmap work](docs/ROADMAP.md). Small external-provider trials help test the design, but do not establish a complete integration.
 
@@ -82,6 +83,8 @@ celery -A inference_grid.queue:app worker --concurrency=2 --loglevel=INFO
 In another terminal, activate the same virtual environment and export the same `GRID_DATABASE_URL` and `GRID_BROKER_URL` values before submitting work. These exports are shell-local; `.env` supplies Docker Compose settings but is not automatically loaded by the CLI. Otherwise the CLI can use a different SQLite ledger and the default broker port.
 
 Submit account/task JSON files with `inference-grid account --json account.json` and `inference-grid submit --json task.json`. Run `inference-grid tick` to admit ready tasks and `inference-grid publish` to flush the transactional outbox. A service manager may run these commands periodically; each tick rechecks durable admission. A duplicate publish cannot restart an already-started attempt. A crashed dispatch is held, not automatically repeated.
+
+When upgrading an existing ledger, run `inference-grid init` before resuming workers; 0.1.0a2 adds persistent cooldown state. See [cooldown behavior](docs/CLOUD-HARDENING.md).
 
 Account arguments: `name`, `capacity`, `windows` (remaining quota by explicitly named unit/window), `expires` (Unix freshness deadline), `models`, optional `alias_names` and `observed_at` (the original Unix collection timestamp). Native collectors must supply `observed_at`; omission means a new local operator observation. Replayed observations do not restore locally debited capacity. Run `inference-grid init` after updating an existing prototype database to add the observation table. Task arguments: `task`, `project`, `spec`. See [the specification](docs/SPEC.md) for the task contract, gates and roadmap.
 
