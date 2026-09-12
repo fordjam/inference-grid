@@ -11,6 +11,11 @@ import unittest
 from inference_grid.lanes import sandbox
 
 BASE = pathlib.Path("/private/tmp")
+
+
+def setUpModule():
+    if not os.path.exists("/usr/bin/sandbox-exec") or not BASE.is_dir():
+        raise unittest.SkipTest("macOS sandbox-exec and /private/tmp required")
 # The module only allows workspaces under /private/tmp or ~/.grid-workspaces.
 TEST_BASE = BASE
 
@@ -19,7 +24,6 @@ def temp_dir():
     return pathlib.Path(tempfile.mkdtemp(prefix="sandbox-test-", dir=str(TEST_BASE)))
 
 
-@unittest.skipUnless(os.path.exists("/usr/bin/sandbox-exec"), "macOS sandbox-exec required")
 class WriteProfileTests(unittest.TestCase):
     def setUp(self):
         self.scratch = temp_dir()
