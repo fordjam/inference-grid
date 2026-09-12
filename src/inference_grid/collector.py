@@ -9,6 +9,7 @@ from sqlalchemy import Column, Float, MetaData, String, Table, select, update
 from .ledger import Refused, accounts, aliases, cooldowns
 from .retry_after import retry_deadline
 from .quota_status import classify_quota_status
+from .observation import normalize_observation
 
 _meta = MetaData()
 collection_claims = Table(
@@ -116,17 +117,27 @@ def collect(ledger, alias, collector, *, timeout_seconds=30, fallback_seconds=60
             elif finished > deadline:
                 result["status"] = "deadline_exceeded"
             elif action == "validate":
-                # Normalization/admission belongs to a caller-supplied provider adapter.
-                # Do not return raw observations that might include credentials.
+                # Only a strictly normalized observation leaves here; raw payloads that
+                # might include credentials or unknown fields are never returned.
                 observed_status = (
                     response.observation.get("status")
                     if isinstance(response.observation, dict)
                     else None
                 )
-                result["status"] = {"unknown": "unknown", "error": "provider_error"}.get(
-                    observed_status if isinstance(observed_status, str) else "",
-                    "response_ok_unvalidated",
-                )
+                if response.observation is None:
+                    result["status"] = "response_ok_unvalidated"
+                elif observed_status in ("unknown", "error"):
+                    result["status"] = {"unknown": "unknown", "error": "provider_error"}[
+                        observed_status
+                    ]
+                else:
+                    try:
+                        result["observation"] = normalize_observation(
+                            response.observation, finished
+                        )
+                        result["status"] = "observation"
+                    except ValueError:
+                        result["status"] = "invalid_observation"
             else:
                 result["status"] = action
     except Exception:

@@ -26,3 +26,11 @@ The following native attempts were dispatched but did **not** deliver accepted r
 No automatic retries or fallback were used. Local coordinator checks found and fixed missing deployment files in the source archive and misleading quickstart environment instructions. These fixes must not be credited to a successful native review. Future qualification must measure reasoning/output allocation and retain bounded native progress events; repeatedly increasing wall-clock limits is not evidence of a usable adapter.
 
 A separate local Codex review of ledger/queue/worker reproduced the capacity-shrink dispatch defect. The fix and two regression cases were independently checked; no other blocker was found within that limited trusted-operator review scope. This is not an Opus or Go approval.
+
+## Post-a3 distribution round, 2026-09-12 (coordinator: Claude Code after Codex credit exhaustion)
+
+| Provider | Bounded assignment | Grid evidence | Outcome |
+| --- | --- | --- | --- |
+| OpenCode Go / GLM 5.3 Flash | Strict `normalize_observation(raw, now)` provider observation normalizer (allowlisted provider/window ids, aware timestamps, future tolerance, None-preserving usage, ordered sanitized output) | Task `observation-normalizer-1`, attempt `66423216…`, receipt completed/stop/actual model `glm-5.3-flash`; 317 input / 1,762 output tokens reported | Accepted: 4 locally authored unittest cases (23 boundary/refusal assertions) passed with no code repairs; integrated as `inference_grid.observation` and wired into `collect()`'s validate branch. Deviation: 52 lines against a requested 40, cosmetic |
+
+Learning: Go handled a tightly specified pure validator with a complete ruleset on the first attempt, as it did for the status classifier. The brief's line budget was ignored while every behavioral rule held; treat size hints as advisory and test behavior instead. Tests were written locally before dispatch so acceptance did not depend on provider-authored tests.

@@ -50,10 +50,32 @@ def test_auth_and_unvalidated_success(ledger):
         "status": "auth_required",
         "observation": None,
     }
-    assert collect(ledger, "a", lambda **kw: R(200, observation={"secret": "token"})) == {
+    assert collect(ledger, "a", lambda **kw: R(200)) == {
         "status": "response_ok_unvalidated",
         "observation": None,
     }
+    r = collect(ledger, "a", lambda **kw: R(200, observation={"secret": "token"}))
+    assert r == {"status": "invalid_observation", "observation": None}
+
+
+def test_normalized_observation_returned_without_extra_fields(ledger):
+    raw = {
+        "provider": "claude",
+        "observed_at": "2026-09-12T14:00:00Z",
+        "windows": [{"id": "weekly", "used_percent": 40, "cookie": "secret"}],
+        "cookie": "secret",
+    }
+    r = collect(ledger, "a", lambda **kw: R(200, observation=raw))
+    assert r["status"] == "observation"
+    assert r["observation"]["windows"] == [
+        {"id": "weekly", "used_percent": 40.0, "resets_at": None}
+    ]
+    assert "secret" not in str(r)
+    future = {**raw, "observed_at": "2999-01-01T00:00:00Z"}
+    assert (
+        collect(ledger, "a", lambda **kw: R(200, observation=future))["status"]
+        == "invalid_observation"
+    )
 
 
 def test_error_not_leaked(ledger):
