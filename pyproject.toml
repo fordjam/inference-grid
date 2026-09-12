@@ -18,6 +18,7 @@ test = ["pytest>=8,<9"]
 
 [project.scripts]
 inference-grid = "inference_grid.cli:main"
+inference-grid-lane = "inference_grid.lanes.runner:main"
 inference-grid-service = "inference_grid.service:main"
 inference-grid-capacity = "inference_grid.capacity:main"
 
