@@ -31,3 +31,22 @@ Alpha freeze: 56 PostgreSQL tests passed, three broker tests separately passed (
 ## GitHub publication qualification
 
 Candidate `0ed2b9b` passed [Linux CI](https://github.com/fordjam/inference-grid/actions/runs/34695750001), including dashboard HTTP/display/refresh tests, Docker build, SQLite and PostgreSQL suites, and the three real-broker tests including container restart. A subsequent local review found a capacity decrease after queue admission was not rechecked at dispatch; two regressions and a conservative hold fix bring the local suite to 61 passed, three broker-only skips. The repaired candidate must pass CI before tagging.
+
+## Model scorecard from Grid ledgers, 2026-09-12
+
+Generated with `inference-grid scorecard` over every packet ledger used today (`outcome` records were added per attempt after resolution; missing usage stays blank rather than zero).
+
+| Family | Model | Category | Attempts | Completed | Accepted | Resolved (held → failed/abandoned) | Input / output tokens (attempts reporting) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| deepseek | deepseek-v4-flash | independent_review | 2 | 0 | 0 | 2 | — / — (0) |
+| glm | glm-5.3-flash | pure_function | 7 | 6 | 6 | 1 | 2641 / 10773 (7) |
+| glm | glm-5.3-flash | unrecorded | 2 | 1 | 0 | 0 | — / — (0) |
+| glm | z-ai/glm-5.3-flash | canary | 2 | 1 | 1 | 1 | 33153 / 6 (2) |
+| glm | z-ai/glm-5.3-flash | fixtures_multi_file | 1 | 1 | 1 | 0 | 100843 / 6691 (1) |
+| grok | grok-4.6 | independent_review | 1 | 0 | 0 | 1 | — / — (0) |
+| kimi | kimi-k3 | independent_review | 1 | 0 | 0 | 1 | 2567 / 6000 (1) |
+| qwen | cline-pass/qwen3.8-max | tests_multi_file | 1 | 0 | 0 | 1 | — / 6014 (1) |
+
+Reading this: GLM-5.3-Flash on Go is 6/7 accepted for tightly specified pure functions at roughly 400 input / 1,500 output tokens each; the one miss was an output-format slip. GOAT (same model behind Command Code) completed a multi-file tool job at ~100k input tokens. The independent-review category is 0/4 across three model families, for three unrelated reasons that a capability registry must capture separately: hosting policy (`deepseek-v4-flash` needs a China-hosting opt-in the workspace disables), protocol (`grok-4.6` refuses the OpenAI-compatible endpoint), and reasoning allocation (`kimi-k3` spent its whole 6,000-token budget in a `reasoning` field and returned no content). None of these is a quality signal about the model; all are permission or budget facts to record before routing. No independent acceptance (`accepted` state via a different-family reviewer) has been demonstrated yet.
+
+Selection policy until evals exist: route pure functions to Go/GLM-5.3-Flash with the output format restated last; reserve GOAT for multi-file work; give reasoning models a review budget of at least 16k output tokens and verify `content` is non-empty before any verdict is read; record every provider/model/protocol refusal as a lane fact.

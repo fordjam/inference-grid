@@ -568,3 +568,32 @@ def test_resolve_refuses_non_held_states(grid):
         ledger.resolve(aid, "released", "dispatching is not held", "operator")
     with pytest.raises(Refused, match="unknown attempt"):
         ledger.resolve("missing", "released", "x", "operator")
+
+
+def test_outcome_records_feed_scorecard_without_inventing_usage(grid):
+    ledger, account, _ = grid
+    aid, gen = claim(grid, submit(grid))
+    with pytest.raises(Refused, match="terminal"):
+        ledger.record_outcome(aid, "extraction", True)
+    assert execute(ledger, aid, gen) == "completed"
+    with pytest.raises(Refused):
+        ledger.record_outcome(aid, "extraction", "yes")
+    with pytest.raises(Refused):
+        ledger.record_outcome(aid, "extraction", True, usage={"output": float("nan")})
+    ledger.record_outcome(aid, "extraction", True, usage={"input": 300, "output": 1200}, repairs=0)
+    held, gen2 = claim(
+        grid, submit(grid, "two", argv=[sys.executable, "-c", "raise SystemExit(1)"], timeout=1)
+    )
+    assert execute(ledger, held, gen2) == "held"
+    with pytest.raises(Refused, match="terminal"):
+        ledger.record_outcome(held, "extraction", False)
+    ledger.resolve(held, "released", "no provider call", "operator")
+    with pytest.raises(Refused, match="completed work"):
+        ledger.record_outcome(held, "extraction", True)
+    ledger.record_outcome(held, "extraction", False, note="adapter exited early")
+    card = ledger.scorecard()
+    assert [
+        (e["model"], e["category"], e["attempts"], e["completed"], e["accepted"], e["resolved"])
+        for e in card
+    ] == [("synthetic", "extraction", 2, 1, 1, 1)]
+    assert card[0]["usage"] == {"input": 300, "output": 1200} and card[0]["usage_reported"] == 1

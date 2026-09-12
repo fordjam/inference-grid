@@ -618,6 +618,93 @@ class Ledger:
                 receipt_digest=receipt_digest,
             )
 
+    def record_outcome(self, aid, category, accepted, usage=None, repairs=0, note=None):
+        """Attach one evaluation record to a terminal attempt; feeds scorecard, never routing."""
+        import math
+
+        if not isinstance(category, str) or not category.strip() or len(category) > 60:
+            raise Refused("bounded task category required")
+        if type(accepted) is not bool:
+            raise Refused("accepted must be a boolean")
+        if usage is not None and (
+            not isinstance(usage, dict)
+            or any(
+                type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in usage.values()
+            )
+            or any(not isinstance(k, str) for k in usage)
+        ):
+            raise Refused("usage must map names to finite nonnegative numbers or be absent")
+        if type(repairs) is not int or repairs < 0:
+            raise Refused("repairs must be a nonnegative integer")
+        if note is not None and (not isinstance(note, str) or len(note) > 300):
+            raise Refused("bounded note required")
+        with self.tx() as con:
+            row = con.execute(select(attempts).where(attempts.c.id == aid)).mappings().first()
+            if not row:
+                raise Refused("unknown attempt")
+            if row["state"] in ACTIVE:
+                raise Refused("outcome requires a terminal attempt")
+            if accepted and row["state"] not in ("completed", "accepted"):
+                raise Refused("only completed work can be marked accepted")
+            self.event(
+                con,
+                aid,
+                "outcome_recorded",
+                category=category,
+                accepted=accepted,
+                usage=usage,
+                repairs=repairs,
+                note=note,
+            )
+        return {"attempt": aid, "category": category, "accepted": accepted}
+
+    def scorecard(self):
+        """Per model/family/category evidence from this ledger; missing usage stays absent."""
+        with self.engine.connect() as con:
+            rows = list(con.execute(select(attempts)).mappings())
+            specs = {t["id"]: t["spec"] for t in con.execute(select(tasks)).mappings()}
+            outcomes = {}
+            for e in con.execute(
+                select(events).where(events.c.kind == "outcome_recorded").order_by(events.c.at)
+            ).mappings():
+                outcomes[e["attempt"]] = e["detail"]
+        card = {}
+        for row in rows:
+            spec = specs.get(row["task"], {})
+            outcome = outcomes.get(row["id"], {})
+            key = (
+                spec.get("family", "?"),
+                spec.get("model", "?"),
+                outcome.get("category", "unrecorded"),
+            )
+            entry = card.setdefault(
+                "|".join(key),
+                {
+                    "family": key[0],
+                    "model": key[1],
+                    "category": key[2],
+                    "attempts": 0,
+                    "completed": 0,
+                    "accepted": 0,
+                    "held": 0,
+                    "resolved": 0,
+                    "repairs": 0,
+                    "usage": {},
+                    "usage_reported": 0,
+                },
+            )
+            entry["attempts"] += 1
+            entry["completed"] += row["state"] in ("completed", "accepted")
+            entry["accepted"] += bool(outcome.get("accepted")) or row["state"] == "accepted"
+            entry["held"] += row["state"] == "held"
+            entry["resolved"] += row["state"] in ("abandoned", "failed")
+            entry["repairs"] += outcome.get("repairs", 0) or 0
+            if isinstance(outcome.get("usage"), dict):
+                entry["usage_reported"] += 1
+                for name, value in outcome["usage"].items():
+                    entry["usage"][name] = entry["usage"].get(name, 0) + value
+        return sorted(card.values(), key=lambda e: (e["family"], e["model"], e["category"]))
+
     def status(self):
         with self.engine.connect() as con:
             return [dict(r) for r in con.execute(select(attempts)).mappings()]

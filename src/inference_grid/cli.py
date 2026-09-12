@@ -33,6 +33,8 @@ def main():
             "resolve",
             "refresh-collect",
             "lane",
+            "outcome",
+            "scorecard",
             "tick",
         ],
     )
@@ -56,6 +58,7 @@ def main():
             "resolve",
             "refresh-collect",
             "lane",
+            "outcome",
             "defer",
             "cooldown",
         }
@@ -80,6 +83,8 @@ def main():
         "resolve": ledger.resolve,
         "refresh-collect": lambda **kw: refresh_collect(ledger, kw),
         "lane": ledger.record_lane,
+        "outcome": ledger.record_outcome,
+        "scorecard": ledger.scorecard,
     }
     print(json.dumps(commands[args.command](**data), indent=2))
 
