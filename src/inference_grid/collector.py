@@ -175,8 +175,9 @@ def publish_observation(
     try:
         normalized = normalize_observation(observation, time.time())
         windows = remaining_units(normalized, plan.get("units"))
-    except ValueError as exc:
-        return {"status": "refused", "reason": type(exc).__name__ + ": " + str(exc)[:120]}
+    except ValueError:
+        # Fixed reason codes only: normalizer messages must never reach a caller.
+        return {"status": "refused", "reason": "invalid_or_unconvertible_observation"}
     observed = normalized["observed_ts"]
     if observed + freshness_seconds <= time.time():
         return {"status": "stale", "observed_at": normalized["observed_at"]}
@@ -195,8 +196,8 @@ def publish_observation(
             alias_names,
             observed_at=observed,
         )
-    except Refused as exc:
-        return {"status": "refused", "reason": str(exc)}
+    except Refused:
+        return {"status": "refused", "reason": "ledger_refused"}
     return {
         "status": "published",
         "account": account,
@@ -226,7 +227,13 @@ def refresh_collect(ledger, config):
         if not isinstance(entry, dict) or not isinstance(entry.get("provider"), str):
             raise Refused("provider entries need provider, alias, observation_path and plan")
         provider = entry["provider"]
-        until = ledger.cooldown_status(entry["alias"], "usage")["until"]
+        try:
+            until = ledger.cooldown_status(entry["alias"], "usage")["until"]
+        except Refused:
+            # An unknown alias is one provider's configuration error, not a reason to
+            # blank every other provider's report.
+            reports.append(provider_report(provider, {"status": "refused"}, None, time.time()))
+            continue
         try:
             path = Path(entry["observation_path"])
             if not path.is_absolute():
@@ -236,7 +243,7 @@ def refresh_collect(ledger, config):
                 ledger, entry["alias"], observation, entry["plan"], freshness_seconds=freshness
             )
         except Refused:
-            raise
+            publish = {"status": "refused"}
         except (OSError, ValueError, KeyError, TypeError):
             publish = None
         reports.append(provider_report(provider, publish, until, time.time()))

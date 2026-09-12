@@ -216,7 +216,7 @@ def test_publish_observation_refuses_unknown_usage_and_stale(ledger):
     unknown = publish_observation(
         ledger, "a", observation(), {"units": {"monthly": 60}, "models": ["m"]}
     )
-    assert unknown["status"] == "refused" and "unknown" in unknown["reason"]
+    assert unknown == {"status": "refused", "reason": "invalid_or_unconvertible_observation"}
     stale = publish_observation(
         ledger, "a", observation(-1000), {"units": {"weekly": 40}, "models": ["m"]}
     )
@@ -224,7 +224,7 @@ def test_publish_observation_refuses_unknown_usage_and_stale(ledger):
     invalid = publish_observation(
         ledger, "a", {"secret": "x"}, {"units": {"weekly": 40}, "models": ["m"]}
     )
-    assert invalid["status"] == "refused" and "secret" not in invalid["reason"]
+    assert invalid == {"status": "refused", "reason": "invalid_or_unconvertible_observation"}
     with pytest.raises(Refused):
         publish_observation(ledger, "a", observation(), {"units": {"weekly": 40}})
     with pytest.raises(Refused):
@@ -284,14 +284,20 @@ def test_refresh_collect_reports_per_provider_without_leaking(ledger, tmp_path):
         "claude": "unknown",
         "clinepass": "unknown",
     }
-    with pytest.raises(Refused):
-        refresh_collect(
-            ledger,
-            {
-                "providers": [
-                    {"provider": "x", "alias": "a", "observation_path": "relative", "plan": plan}
-                ]
-            },
-        )
+    per_provider = refresh_collect(
+        ledger,
+        {
+            "providers": [
+                {"provider": "x", "alias": "a", "observation_path": "relative", "plan": plan},
+                {"provider": "y", "alias": "ghost", "observation_path": str(good), "plan": plan},
+                {"provider": "z", "alias": "a", "observation_path": str(good), "plan": plan},
+            ]
+        },
+    )
+    assert [(r["provider"], r["status"]) for r in per_provider["providers"]] == [
+        ("x", "error"),
+        ("y", "error"),
+        ("z", "ok"),
+    ]
     with pytest.raises(Refused):
         refresh_collect(ledger, {"providers": "x"})
