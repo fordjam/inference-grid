@@ -145,6 +145,20 @@ class ZcodeLaneTests(unittest.TestCase):
         )
         self.assertEqual(verdict["refusal"], "request served by an unexpected model")
 
+    def test_artifact_names_cannot_escape(self):
+        # Found by an independent Z.ai review: "../native.out" and absolute names must be refused.
+        self.rows("stop")
+        for name in ("../native.out", "/tmp/escape.txt", "sub/../../x"):
+            request, attempt = self.attempt("reply please", expected=[name])
+            receipt, verdict = zcode.run(
+                request, self.lane, attempt, cli=str(self.cli), db_path=self.db, home=self.home
+            )
+            self.assertIsNone(receipt, name)
+            self.assertEqual(
+                verdict["refusal"], "expected.json must list safe relative artifact names", name
+            )
+            self.assertFalse((attempt / "native.out.copy").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

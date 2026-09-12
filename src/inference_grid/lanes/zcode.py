@@ -14,6 +14,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from ..receipts import safe_path
 from . import sandbox
 
 DEFAULT_CLI = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
@@ -39,8 +40,10 @@ def expected_artifacts(work, staged):
     listing = work / "expected.json"
     if listing.is_file():
         names = json.loads(listing.read_text())
-        if not isinstance(names, list) or not all(isinstance(n, str) and n for n in names):
-            raise ValueError("expected.json must list artifact names")
+        if not isinstance(names, list) or not all(
+            isinstance(n, str) and safe_path(n) for n in names
+        ):
+            raise ValueError("expected.json must list safe relative artifact names")
         return names
     return sorted(
         p.name
@@ -200,8 +203,14 @@ def run(request, lane, attempt_dir, *, cli=DEFAULT_CLI, db_path=None, home=None,
     artifacts = []
     output = Path(request["output_directory"])
     for name in names:
-        data = (work / name).read_bytes()
-        (output / name).write_bytes(data)
+        source = (work / name).resolve()
+        target = (output / name).resolve()
+        if not source.is_relative_to(work.resolve()) or not target.is_relative_to(output.resolve()):
+            verdict["refusal"] = "artifact path escapes the workspace or output directory"
+            return None, verdict
+        data = source.read_bytes()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
         artifacts.append({"path": name, "sha256": sandbox_digest(data)})
     receipt = {
         "status": "completed",
