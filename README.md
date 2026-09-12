@@ -4,7 +4,7 @@ A small, project-independent control plane for bounded inference jobs. PostgreSQ
 
 **Status: 0.1.0a1 public-alpha candidate.** Local failure tests run with SQLite. PostgreSQL and RabbitMQ are the production target and have separate integration checks. This is not yet a production service, a credential broker, or a security sandbox. No live provider account is configured in this repository.
 
-## Quick start (offline)
+## Quick start (no provider calls)
 
 ```sh
 python3.12 -m venv .venv
@@ -13,6 +13,8 @@ pip install -e '.[test]'
 pytest -q
 python examples/demo.py
 ```
+
+Installing dependencies requires network access unless they are already cached. The tests and demo below use no provider credentials.
 
 The demo creates a temporary ledger, account and workspace, admits one synthetic task, produces an artifact, then demonstrates duplicate-message suppression. It uses no API and spends nothing. `completed` does not mean reviewed or accepted.
 
@@ -28,7 +30,9 @@ inference-grid init
 celery -A inference_grid.queue:app worker --concurrency=2 --loglevel=INFO
 ```
 
-In another terminal, submit account/task JSON files with `inference-grid account --json account.json` and `inference-grid submit --json task.json`. Run `inference-grid tick` to admit ready tasks and `inference-grid publish` to flush the transactional outbox. A service manager may run these commands periodically; each tick rechecks durable admission. A duplicate publish cannot restart an already-started attempt. A crashed dispatch is held, not automatically repeated.
+In another terminal, activate the same virtual environment and export the same `GRID_DATABASE_URL` and `GRID_BROKER_URL` values before submitting work. These exports are shell-local; `.env` supplies Docker Compose settings but is not automatically loaded by the CLI. Otherwise the CLI can use a different SQLite ledger and the default broker port.
+
+Submit account/task JSON files with `inference-grid account --json account.json` and `inference-grid submit --json task.json`. Run `inference-grid tick` to admit ready tasks and `inference-grid publish` to flush the transactional outbox. A service manager may run these commands periodically; each tick rechecks durable admission. A duplicate publish cannot restart an already-started attempt. A crashed dispatch is held, not automatically repeated.
 
 Account arguments: `name`, `capacity`, `windows` (remaining quota by explicitly named unit/window), `expires` (Unix freshness deadline), `models`, optional `alias_names` and `observed_at` (the original Unix collection timestamp). Native collectors must supply `observed_at`; omission means a new local operator observation. Replayed observations do not restore locally debited capacity. Run `inference-grid init` after updating an existing prototype database to add the observation table. Task arguments: `task`, `project`, `spec`. See [the specification](docs/SPEC.md) for the task contract, gates and roadmap.
 
@@ -49,7 +53,7 @@ External exactly-once execution is **not** guaranteed. Database fencing prevents
 
 `ledger.py`: transactions and admission; `scheduler.py`: priority and authorized candidate order; `queue.py`: outbox and Celery; `worker.py`: bounded process and verification; `receipts.py`: strict receipt shape; `aliases.py`: alias resolution; `quota.py`: timestamp/usage validation; `native_receipts.py`: native response structural checks; `tests/`: adverse-path evaluations.
 
-[Decision and implementation spec](docs/SPEC.md) · [Failure policy](docs/FAILURE_POLICY.md) · [Evaluation record](docs/EVALUATION.md) · [Provider contribution record](docs/CONTRIBUTIONS.md)
+[Cloud-first roadmap](docs/ROADMAP.md) · [Decision and implementation spec](docs/SPEC.md) · [Failure policy](docs/FAILURE_POLICY.md) · [Evaluation record](docs/EVALUATION.md) · [Provider contribution record](docs/CONTRIBUTIONS.md)
 
 ## Alpha release scope
 
@@ -57,4 +61,4 @@ This repository is useful for evaluating durable local admission and trusted ada
 
 ## Local capacity app
 
-An installable, read-only [capacity PWA](docs/CAPACITY-PWA.md) displays provider headroom and freshness from a sanitized local feed. Start it with `inference-grid-capacity`; the default URL is http://127.0.0.1:8040.
+An installable, read-only [capacity PWA](docs/CAPACITY-PWA.md) displays provider headroom and freshness from a sanitized local feed. A separately running sanitized quota feed is required for live data; no native collector is bundled. Start it with `inference-grid-capacity`; the default URL is http://127.0.0.1:8040. Without the feed, the shell can load but live capacity is unavailable.

@@ -31,6 +31,22 @@ class Tests(unittest.TestCase):
   for attr in ['Secure','HttpOnly','SameSite=Strict']:self.assertIn(attr,headers['Set-Cookie'])
   cookie=headers['Set-Cookie'].split(';')[0]
   self.assertEqual(self.request('/api/usage',headers={'Cookie':cookie})[0],200)
+ def test_browser_login_without_origin(self):
+  import re
+  status,headers,page=self.request('/login')
+  self.assertEqual(status,200)
+  self.assertEqual(headers['Referrer-Policy'],'same-origin')
+  csrf=re.search(rb'name="csrf" value="([^"]+)"',page).group(1).decode()
+  cookie=headers['Set-Cookie'].split(';')[0]
+  form=urlencode(dict(username='owner',password='test-password',csrf=csrf))
+  for origin in (None,'null'):
+   h={'Cookie':cookie}
+   if origin is not None:h['Origin']=origin
+   self.assertEqual(self.request('/login','POST',form,h)[0],303)
+  self.assertEqual(self.request('/login','POST',form,{'Cookie':cookie,'Origin':'https://evil.test'})[0],403)
+  self.assertEqual(self.request('/login','POST',form,{'Origin':'null'})[0],403)
+  self.assertEqual(self.request('/login','POST',form.replace(csrf,'invalid'),{'Cookie':cookie})[0],403)
+  self.assertEqual(self.request('/logout','POST','',{'Cookie':cookie})[0],403)
  def test_upload_token_separate_from_login(self):
   payload=json.dumps(self.sample())
   self.assertEqual(self.request('/api/snapshot','POST',payload)[0],401)

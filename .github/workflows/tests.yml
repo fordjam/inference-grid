@@ -1,8 +1,11 @@
 name: tests
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   evaluate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:17
@@ -22,6 +25,17 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.lock && pip install --no-deps -e .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Capacity HTTP and browser-state regressions
+        run: |
+          (cd deployments/capacity && python -m unittest -v test_cloud)
+          node deployments/capacity/test_display.cjs
+          node deployments/capacity/test_refresh.cjs
+          cmp src/inference_grid/capacity.py deployments/capacity/capacity.py
+      - name: Capacity deployment build
+        run: docker build -t grid-capacity-test deployments/capacity
       - run: pytest -q
       - run: pytest -q
         env:

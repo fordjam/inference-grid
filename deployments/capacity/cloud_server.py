@@ -19,6 +19,7 @@ from capacity import project
 
 MAX_BODY=128*1024
 COOKIE='__Host-grid_session'
+CSRF_COOKIE='__Host-grid_csrf'
 
 
 def password_hash(password,salt):
@@ -94,7 +95,7 @@ def handler(config,store):
         def log_message(self,*args):pass
         def reply(self,code,body=b'',mime='text/plain',headers=None):
             self.send_response(code)
-            for k,v in {'Content-Type':mime,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Strict-Transport-Security':'max-age=31536000','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",**(headers or {})}.items():self.send_header(k,v)
+            for k,v in {'Content-Type':mime,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin','Strict-Transport-Security':'max-age=31536000','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",**(headers or {})}.items():self.send_header(k,v)
             self.end_headers();self.wfile.write(body)
         def host_ok(self):return self.headers.get('Host')==config['host']
         def signed_in(self):
@@ -111,7 +112,10 @@ def handler(config,store):
             path=urlsplit(self.path).path
             if path=='/healthz':return self.reply(200,b'ok')
             if not self.host_ok():return self.reply(403,b'Forbidden')
-            if path=='/login':return self.reply(200,login,'text/html; charset=utf-8')
+            if path=='/login':
+                csrf=token(config['session_key']+'csrf')
+                page=login.replace(b'<label for="username">', ('<input type="hidden" name="csrf" value="'+csrf+'"><label for="username">').encode())
+                return self.reply(200,page,'text/html; charset=utf-8',{'Set-Cookie':CSRF_COOKIE+'='+csrf+'; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=1800'})
             if path=='/api/usage':
                 if not self.signed_in():return self.reply(401,b'{"error":"Sign in required"}','application/json')
                 return self.reply(200,json.dumps(store.get()).encode(),'application/json')
@@ -132,14 +136,27 @@ def handler(config,store):
                     return self.reply(200,b'{"stored":true}','application/json')
                 except Exception:return self.reply(400,b'Invalid snapshot')
             if path not in ('/login','/logout'):return self.reply(404,b'Not found')
-            if not self.same_origin():return self.reply(403,b'Forbidden origin')
+            form=None
+            if not self.same_origin():
+                # Browsers may omit Origin or send null on form navigation. Require
+                # a signed, cookie-bound form token; never accept another origin.
+                if path!='/login' or self.headers.get('Origin') not in (None,'null'):
+                    return self.reply(403,b'Forbidden origin')
+                try:
+                    form=parse_qs(self.body().decode(),max_num_fields=4)
+                    csrf=form.get('csrf',[''])[0]
+                    cookies=SimpleCookie();cookies.load(self.headers.get('Cookie',''))
+                    valid=(CSRF_COOKIE in cookies and hmac.compare_digest(csrf,cookies[CSRF_COOKIE].value)
+                           and valid_token(csrf,config['session_key']+'csrf'))
+                except Exception:valid=False
+                if not valid:return self.reply(403,b'Login page expired. Reload /login and try again.')
             if path=='/logout':return self.reply(303,headers={'Location':'/login','Set-Cookie':COOKIE+'=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0'})
             with lock:
                 while failures and failures[0]<time.time()-60:failures.popleft()
                 if len(failures)>=10:return self.reply(429,b'Too many attempts. Try again in one minute.')
                 failures.append(time.time())
             try:
-                form=parse_qs(self.body().decode(),max_num_fields=4)
+                if form is None:form=parse_qs(self.body().decode(),max_num_fields=4)
                 user=form.get('username',[''])[0];password=form.get('password',[''])[0]
                 ok=len(password)<=512 and hmac.compare_digest(user,config['username']) and hmac.compare_digest(password_hash(password,config['salt']),config['password_hash'])
             except Exception:ok=False

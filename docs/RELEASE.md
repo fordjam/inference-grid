@@ -4,11 +4,11 @@ Suitable for sharing as an experimental, trusted-operator project. Not a product
 
 ## Completed release checks
 
-- 56 regression tests passed against PostgreSQL 17.11 on macOS (three real-broker tests intentionally separate).
+- Current candidate: 59 regression tests passed locally (three opt-in broker tests skipped). Earlier core qualification: 56 tests passed against PostgreSQL 17.11 on macOS.
 - Three RabbitMQ 4.3.5/Celery 5.6.3 tests passed: real delivery, killed worker after adapter start, queued job surviving broker application stop/start.
-- Python static checks and formatting passed with repository-local configuration.
+- Capacity checks: nine HTTP tests plus display and refresh behavior tests passed. CI additionally builds the standalone Docker image.
 - Wheel and source archive built; clean wheel installation, CLI help and offline demo worked.
-- Packaging includes examples, docs, Compose and security guidance in the source archive. License and README metadata are present.
+- Packaging includes the standalone capacity deployment, examples, docs, Compose and security guidance in the source archive. License and README metadata are present.
 - Source-tree scan found no user-specific paths, account credentials or private project data in the release files. This is not a comprehensive security audit.
 
 ## Explicit limitations

@@ -2,3 +2,4 @@ include README.md LICENSE SECURITY.md CONTRIBUTING.md compose.yaml .env.example 
 recursive-include docs *.md *.txt
 recursive-include examples *.py
 recursive-include tests *.py
+recursive-include deployments/capacity *.py *.cjs *.md *.json *.html *.css *.js *.png *.webmanifest Dockerfile .dockerignore

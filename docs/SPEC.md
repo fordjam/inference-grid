@@ -34,6 +34,10 @@ The first start commits dispatch intent. A crash after that point cannot be inte
 
 Completion conservatively debits reserved estimates. Fresh observations replace the budget snapshot; overlapping refresh/completion can double-count conservatively. Observations now carry an observed_at timestamp: older snapshots and same-timestamp changed content are refused, while exact replay preserves local debits. Delayed observations also retain estimated debits for completions after their sampling timestamp. Collectors must retain the original observation timestamp rather than retimestamp cached data. Actual consumption reconciliation and reset epochs remain required before production budget automation. Unknown quota must not become zero usage or unlimited capacity.
 
+## Delivery priority
+
+The [cloud-first roadmap](ROADMAP.md) is the prioritized work sequence. Supervised lifecycle, trustworthy quota collection, observable refresh and qualified native cloud adapters come first. Capability discovery, execution telemetry, safe recovery, session affinity and outcome-based routing follow. Optional oMLX integration is deferred until cloud operation is qualified. The stages below remain evidence gates, not a claim that all earlier operational work is finished.
+
 ## Delivery stages and exit criteria
 
 | Stage | Deliverable | Exit evidence |
