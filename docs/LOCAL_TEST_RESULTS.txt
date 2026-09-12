@@ -1,0 +1,5 @@
+PostgreSQL regression suite: 56 passed, 3 skipped in 2.60s
+Dedicated RabbitMQ/Celery suite: 3 passed in 15.25s
+Ruff static checks: passed
+Clean wheel installation, CLI help and offline demo: passed
+Platform: macOS. Linux CI not executed.

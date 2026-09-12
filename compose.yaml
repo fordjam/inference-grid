@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: grid
+      POSTGRES_PASSWORD: ${GRID_POSTGRES_PASSWORD:?Set GRID_POSTGRES_PASSWORD}
+      POSTGRES_DB: grid
+    ports: ["127.0.0.1:54329:5432"]
+    volumes: ["grid_pg:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U grid -d grid"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  rabbitmq:
+    image: rabbitmq:4
+    ports: ["127.0.0.1:56729:5672"]
+    volumes: ["grid_rabbit:/var/lib/rabbitmq"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+volumes:
+  grid_pg:
+  grid_rabbit:

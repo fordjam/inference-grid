@@ -1,0 +1,4 @@
+include README.md LICENSE SECURITY.md CONTRIBUTING.md compose.yaml .env.example requirements.lock
+recursive-include docs *.md *.txt
+recursive-include examples *.py
+recursive-include tests *.py

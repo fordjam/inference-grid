@@ -1,0 +1,56 @@
+# Build specification: Inference Grid
+
+## Objective
+
+Increase accepted, useful project work per unit of constrained subscription capacity. Minimize coordinator tokens, repeated context, failed dispatch and human nudges. Utilization is a diagnostic, not the optimization target. A failed cheap job that costs a frontier model more to repair is not a saving.
+
+The project must be independent of any finance application. Project adapters provide ready tasks, authorized inputs and acceptance criteria. Provider adapters normalize native lifecycle records. No project data, account identifiers, cookies or private paths belong in the repository.
+
+## Target decision
+
+Use PostgreSQL as the authoritative policy/attempt ledger, RabbitMQ as durable transport, and Celery for bounded worker execution. Build the small policy layer specific to account quotas, aliases, output validation and independent review. Do not fork an entire coding-agent platform for scheduling. Add an HTTP inference proxy such as Plano only if measured routing savings justify it; it is not the task ledger or recovery coordinator.
+
+This decision follows negative-control evaluations of competing claim/dispatch behavior and ambiguous session recovery. The generic repository contains its own repeatable tests, not private pilot records or vendored upstream source.
+
+## Task contract implemented in v0.1
+
+`task` and `project` are stable strings. `spec` contains:
+
+- `authorized: true`: local operator attestation; not an authentication mechanism.
+- `model`, `family`: exact permitted model and implementation family.
+- `argv`: trusted adapter command, without shell interpolation. Commands and their installed code are an operator trust boundary. Do not put credentials in arguments.
+- `workspace`: absolute, dedicated workspace root. Each attempt gets a new child directory.
+- `timeout`: 1–3600 seconds; `output_bytes`: 1–10,000,000 captured stdout/stderr bytes and per-artifact limit. Disk/process containment requires a separate sandbox.
+- `inputs`: map of safe relative paths to SHA-256 digests; `input_root`: absolute source root when inputs exist; `manifest_sha256`: hash of canonical JSON input map. Input content is checked before dispatch and staged separately.
+- Optional `priority` (lower first), `candidates` (ordered account/estimate objects) and `account_aliases` for deterministic routing. All candidates use the same declared model. A different model requires an explicit new task.
+
+The worker passes one JSON request on stdin containing attempt, generation, requested model, manifest hash, input directory and output directory. The adapter writes artifacts and emits exactly one terminal JSON receipt on stdout: `status=completed`, `finish_reason=stop`, `actual_model`, `manifest_sha256`, and nonempty `artifacts` with relative path/SHA-256. Native adapter logs belong in bounded stderr. An adapter must implement its own provider-token/output bound and expose its native completion facts; the worker cannot infer a native token budget from stdout size.
+
+## State machine
+
+`queued → dispatching → completed → accepted`; `queued/dispatching → held` on stale admission or uncertainty. Admission and an outbox row commit together. Generation plus state compare-and-set fences completion and duplicate start. Account reservations span five-hour, weekly and other explicitly configured windows. Account aliases cannot be reassigned. Workspace exclusion applies across accounts and projects.
+
+The first start commits dispatch intent. A crash after that point cannot be interpreted as "nothing happened." Redelivery returns a no-op. An operator can mark old dispatches held. v0.1 deliberately has no generic automatic release/retry: provider-native reconciliation and an auditable administrative resolution API are the next gate.
+
+Completion conservatively debits reserved estimates. Fresh observations replace the budget snapshot; overlapping refresh/completion can double-count conservatively. Observations now carry an observed_at timestamp: older snapshots and same-timestamp changed content are refused, while exact replay preserves local debits. Delayed observations also retain estimated debits for completions after their sampling timestamp. Collectors must retain the original observation timestamp rather than retimestamp cached data. Actual consumption reconciliation and reset epochs remain required before production budget automation. Unknown quota must not become zero usage or unlimited capacity.
+
+## Delivery stages and exit criteria
+
+| Stage | Deliverable | Exit evidence |
+| --- | --- | --- |
+| 0.1, implemented | Generic ledger, deterministic router, transactional outbox, bounded adapter worker, receipts, local CLI, synthetic demo | Local adverse-path tests and receipt rejection tests pass |
+| 0.2 | PostgreSQL/RabbitMQ operational qualification | Concurrent multi-process claims, broker restart, publisher crash, worker kill and database outage with no unauthorized repeat dispatch |
+| 0.3 | Go, Cline and Command Code adapter packages | One bounded native job per provider, exact model/finish evidence, known quota provenance, explicit token cap, no paid fallback, locked-screen operation where supported |
+| 0.4 | Reconciliation and autonomous service | Native terminal resolution releases only justified reservations; retry budget is shared; auth/429 pause lane; versioned snapshots; dependency-aware tasks; durable fairness and backpressure |
+| 0.5 | Review and project integration | Independent reviewer receipt and executable checks bind exact artifact; immutable result store; project board import/export; no automatic merge/deploy without policy |
+| 1.0 | Public operational release | Auth/RBAC, migrations, metrics, backups/restore, threat model, license/dependency review, clean secret scan, multi-project fairness and acceptance benchmarks |
+
+## Required next evaluations
+
+Run real PostgreSQL and RabbitMQ rather than treating SQLite serialization as proof. Kill a worker after dispatch intent and verify external adapter call count does not increase after broker redelivery. Crash publisher after broker confirmation and before outbox commit. Retry connection refusal only with confirmed absence and budget. Test reset rollover, late quota snapshots, native completion arriving after hold, truncated output, silent model fallback, symlink traversal, same-account aliases and two projects competing fairly.
+
+Track accepted work, failure/rework rate, coordinator tokens, subscription consumption in native units, queue age, held age, review age and fallback count. Persist task-session affinity; don’t reclassify every agent turn. Start with deterministic category routing and measured provider success rates. Add learned routing only after an evaluation dataset demonstrates net improvement including cache loss and repair cost.
+
+## Public-repository boundary
+
+The repository is code/specification only. Credentials stay in a host adapter's secret store; provider identity and permitted payload are explicit local configuration. No browser cookies, session exports, native account logs, proprietary tasks, finance data or board snapshots are included. A future public repository needs an explicit publication step; local construction is not publication approval.
