@@ -658,10 +658,13 @@ class Ledger:
             )
         return {"attempt": aid, "category": category, "accepted": accepted}
 
-    def scorecard(self):
+    def scorecard(self, account=None):
         """Per model/family/category evidence from this ledger; missing usage stays absent."""
         with self.engine.connect() as con:
-            rows = list(con.execute(select(attempts)).mappings())
+            query = select(attempts)
+            if account is not None:
+                query = query.where(attempts.c.account == account)
+            rows = list(con.execute(query).mappings())
             specs = {t["id"]: t["spec"] for t in con.execute(select(tasks)).mappings()}
             outcomes = {}
             for e in con.execute(
