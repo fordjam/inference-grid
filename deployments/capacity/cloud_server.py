@@ -20,6 +20,13 @@ from capacity import project
 MAX_BODY=128*1024
 COOKIE='__Host-grid_session'
 CSRF_COOKIE='__Host-grid_csrf'
+# A request waits this long for the Mac's outbound poll before it is marked failed,
+# and this long for a claimed collection to finish. Both are wall-clock seconds.
+QUEUED_TTL=120
+COLLECTING_TTL=300
+REFRESH_TERMINAL=('completed','cooldown','failed')
+PROVIDER_STATUSES=('ok','cooldown','auth_required','error','unknown')
+REASONS=('collected','snapshot_only','collector_unavailable','collector_error','collector_timeout','upload_failed','mac_not_reporting','collection_timeout')
 
 
 def password_hash(password,salt):
@@ -66,12 +73,36 @@ def clean_snapshot(raw, now=None):
     return result,dt.timestamp()
 
 
+def clean_outcome(raw, now=None):
+    """Accept only the fixed refresh-outcome shape; never store raw collector output."""
+    now=time.time() if now is None else now
+    if not isinstance(raw,dict):raise ValueError('object required')
+    state=raw.get('state');reason=raw.get('reason')
+    if state not in REFRESH_TERMINAL or reason not in REASONS:raise ValueError('invalid outcome')
+    providers=raw.get('providers',[])
+    if not isinstance(providers,list) or len(providers)>10:raise ValueError('invalid providers')
+    clean=[]
+    for p in providers:
+        if not isinstance(p,dict) or not isinstance(p.get('provider'),str) or len(p['provider'])>40:raise ValueError('invalid provider')
+        if p.get('status') not in PROVIDER_STATUSES:raise ValueError('invalid provider status')
+        eligible=p.get('next_eligible_at')
+        if eligible is not None:
+            if not isinstance(eligible,str) or len(eligible)>100:raise ValueError('invalid eligibility')
+            dt=datetime.fromisoformat(eligible.replace('Z','+00:00'))
+            if dt.utcoffset() is None or dt.timestamp()>now+30*86400:raise ValueError('invalid eligibility')
+        clean.append({'provider':p['provider'],'status':p['status'],'next_eligible_at':eligible})
+    collected=raw.get('collected')
+    if not isinstance(collected,bool):raise ValueError('collected flag required')
+    return {'state':state,'reason':reason,'collected':collected,'providers':clean}
+
+
 class Store:
     def __init__(self,path):
         self.path=str(path)
         Path(path).parent.mkdir(parents=True,exist_ok=True)
         with sqlite3.connect(self.path) as c:
             c.execute('CREATE TABLE IF NOT EXISTS snapshot(id INTEGER PRIMARY KEY CHECK(id=1), captured REAL NOT NULL, body TEXT NOT NULL)')
+            c.execute('CREATE TABLE IF NOT EXISTS refresh_request(id TEXT PRIMARY KEY, state TEXT NOT NULL, requested_at REAL NOT NULL, claimed_at REAL, completed_at REAL, outcome TEXT)')
     def put(self,data,captured):
         body=json.dumps(data,allow_nan=False)
         with sqlite3.connect(self.path) as c:
@@ -83,6 +114,54 @@ class Store:
     def get(self):
         with sqlite3.connect(self.path) as c:row=c.execute('SELECT body FROM snapshot WHERE id=1').fetchone()
         return json.loads(row[0]) if row else {'accounts':[],'attempts':[],'captured_at':None}
+    # Refresh requests: queued -> collecting -> completed | cooldown | failed.
+    # Rows are written by the phone (queue), the Mac (claim, complete) and expiry.
+    @staticmethod
+    def _row(r):
+        if not r:return None
+        keys=('id','state','requested_at','claimed_at','completed_at','outcome')
+        d=dict(zip(keys,r));d['outcome']=json.loads(d['outcome']) if d['outcome'] else None
+        return d
+    @staticmethod
+    def _expire(c,now):
+        failed=lambda reason:json.dumps({'state':'failed','reason':reason,'collected':False,'providers':[]})
+        c.execute("UPDATE refresh_request SET state='failed',completed_at=?,outcome=? WHERE state='queued' AND requested_at<?",(now,failed('mac_not_reporting'),now-QUEUED_TTL))
+        c.execute("UPDATE refresh_request SET state='failed',completed_at=?,outcome=? WHERE state='collecting' AND claimed_at<?",(now,failed('collection_timeout'),now-COLLECTING_TTL))
+        c.execute('DELETE FROM refresh_request WHERE completed_at<?',(now-86400,))
+    def request_refresh(self,now=None):
+        """Queue a collection request; an open request is returned instead of a duplicate."""
+        now=time.time() if now is None else now
+        with sqlite3.connect(self.path) as c:
+            c.execute('BEGIN IMMEDIATE');self._expire(c,now)
+            row=c.execute("SELECT * FROM refresh_request WHERE state IN ('queued','collecting') ORDER BY requested_at LIMIT 1").fetchone()
+            if row:return self._row(row),False
+            rid=secrets.token_hex(8)
+            c.execute("INSERT INTO refresh_request VALUES(?,'queued',?,NULL,NULL,NULL)",(rid,now))
+            return self._row(c.execute('SELECT * FROM refresh_request WHERE id=?',(rid,)).fetchone()),True
+    def get_refresh(self,rid=None,now=None):
+        now=time.time() if now is None else now
+        with sqlite3.connect(self.path) as c:
+            c.execute('BEGIN IMMEDIATE');self._expire(c,now)
+            if rid is None:row=c.execute('SELECT * FROM refresh_request ORDER BY requested_at DESC LIMIT 1').fetchone()
+            else:row=c.execute('SELECT * FROM refresh_request WHERE id=?',(rid,)).fetchone()
+            return self._row(row)
+    def claim_refresh(self,now=None):
+        """Mac side: take the oldest queued request. At most one request collects at a time."""
+        now=time.time() if now is None else now
+        with sqlite3.connect(self.path) as c:
+            c.execute('BEGIN IMMEDIATE');self._expire(c,now)
+            if c.execute("SELECT 1 FROM refresh_request WHERE state='collecting'").fetchone():return None
+            row=c.execute("SELECT id FROM refresh_request WHERE state='queued' ORDER BY requested_at LIMIT 1").fetchone()
+            if not row:return None
+            c.execute("UPDATE refresh_request SET state='collecting',claimed_at=? WHERE id=? AND state='queued'",(now,row[0]))
+            return self._row(c.execute('SELECT * FROM refresh_request WHERE id=?',(row[0],)).fetchone())
+    def complete_refresh(self,rid,outcome,now=None):
+        """Mac side: record a sanitized terminal outcome. Only a collecting request can complete."""
+        now=time.time() if now is None else now
+        with sqlite3.connect(self.path) as c:
+            c.execute('BEGIN IMMEDIATE');self._expire(c,now)
+            changed=c.execute("UPDATE refresh_request SET state=?,completed_at=?,outcome=? WHERE id=? AND state='collecting'",(outcome['state'],now,json.dumps(outcome),rid)).rowcount
+            return changed==1
 
 
 def handler(config,store):
@@ -119,6 +198,15 @@ def handler(config,store):
             if path=='/api/usage':
                 if not self.signed_in():return self.reply(401,b'{"error":"Sign in required"}','application/json')
                 return self.reply(200,json.dumps(store.get()).encode(),'application/json')
+            if path=='/api/refresh':
+                if not self.signed_in():return self.reply(401,b'{"error":"Sign in required"}','application/json')
+                try:
+                    rid=parse_qs(urlsplit(self.path).query,max_num_fields=2).get('id',[None])[0]
+                    if rid is not None and not (len(rid)==16 and all(ch in '0123456789abcdef' for ch in rid)):raise ValueError
+                except ValueError:return self.reply(400,b'{"error":"Invalid request id"}','application/json')
+                row=store.get_refresh(rid)
+                if not row:return self.reply(404,b'{"error":"No refresh request"}','application/json')
+                return self.reply(200,json.dumps(row).encode(),'application/json')
             if path in ('/','/index.html'):
                 if not self.signed_in():return self.reply(303,headers={'Location':'/login'})
                 return self.reply(200,(root/'index.html').read_bytes(),'text/html; charset=utf-8')
@@ -135,6 +223,27 @@ def handler(config,store):
                     if not store.put(data,captured):return self.reply(409,b'Older snapshot refused')
                     return self.reply(200,b'{"stored":true}','application/json')
                 except Exception:return self.reply(400,b'Invalid snapshot')
+            if path in ('/api/refresh/claim','/api/refresh/complete'):
+                # Outbound poll from the Mac. The upload token cannot read the dashboard
+                # and the dashboard session cannot claim or complete collection work.
+                auth=self.headers.get('Authorization','')
+                if not hmac.compare_digest(auth,'Bearer '+config['upload_token']):return self.reply(401,b'Unauthorized')
+                if path=='/api/refresh/claim':
+                    row=store.claim_refresh()
+                    return self.reply(200,json.dumps(row).encode(),'application/json') if row else self.reply(204)
+                try:
+                    body=json.loads(self.body());rid=body.get('id');outcome=clean_outcome(body.get('outcome'))
+                    if not isinstance(rid,str) or len(rid)!=16:raise ValueError('invalid id')
+                except Exception:return self.reply(400,b'Invalid outcome')
+                if not store.complete_refresh(rid,outcome):return self.reply(409,b'{"error":"Request is not collecting"}','application/json')
+                return self.reply(200,b'{"recorded":true}','application/json')
+            if path=='/api/refresh':
+                # Only a signed-in same-origin page may ask the Mac to collect. The request
+                # cannot launch inference, change credentials or shorten a provider cooldown.
+                if not self.signed_in():return self.reply(401,b'{"error":"Sign in required"}','application/json')
+                if not self.same_origin():return self.reply(403,b'Forbidden origin')
+                row,created=store.request_refresh()
+                return self.reply(202 if created else 200,json.dumps(row).encode(),'application/json')
             if path not in ('/login','/logout'):return self.reply(404,b'Not found')
             form=None
             if not self.same_origin():

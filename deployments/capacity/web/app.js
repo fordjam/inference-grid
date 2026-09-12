@@ -16,33 +16,75 @@ let foot=ago(a.observed_at)+(fresh?' · refreshes automatically':' · not curren
 $('work').replaceChildren();let work=(snapshot.attempts||[]).slice().sort((a,b)=>(stamp(b.at)||0)-(stamp(a.at)||0)).slice(0,8);for(const a of work){const row=node('div',undefined,'workrow');row.append(node('strong',a.task||'Untitled work'),node('span',(names[a.provider]||a.provider||'Unknown provider')+' · '+(a.status||'Unknown status')),node('span',ago(a.at)));$('work').append(row)}if(!work.length)$('work').append(node('div','No recent activity reported by the connected feed.','empty'));$('updated').textContent='View updated '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});}
 let refreshInFlight=false;
 async function refresh(manual=false){
- if(refreshInFlight)return;
+ if(refreshInFlight)return false;
  refreshInFlight=true;
- const button=$('refresh'),controller=new AbortController();
+ const controller=new AbortController();
  const timeout=setTimeout(()=>controller.abort(),10000);
- button.disabled=true;button.textContent='Checking…';button.setAttribute('aria-busy','true');
- if(manual)$('refreshStatus').textContent='Checking for a newer upload…';
+ if(manual)$('refreshStatus').textContent='Downloading the latest upload…';
  try{
-  const previous=JSON.stringify(snapshot?.accounts||null),previousCapture=snapshot?.captured_at;
   const r=await fetch('/api/usage',{cache:'no-store',signal:controller.signal});
-  if(r.status===401){$('refreshStatus').textContent='Session expired. Opening sign-in…';location.href='/login';return}
+  if(r.status===401){$('refreshStatus').textContent='Session expired. Opening sign-in…';location.href='/login';return false}
   if(!r.ok)throw Error('http');
   const next=await r.json();if(!Array.isArray(next.accounts))throw Error('invalid');
   snapshot=next;online=true;
   $('connection').textContent=snapshot.captured_at?(age(snapshot.captured_at)>120?'◷ Mac has not uploaded for '+duration(age(snapshot.captured_at))+' · showing last readings':'● Connected · latest Mac upload '+new Date(snapshot.captured_at).toLocaleTimeString()):'● Connected to your local quota feed';
-  draw();
-  if(manual){
-   const changed=previous!==JSON.stringify(snapshot.accounts);
-   const uploaded=previousCapture!==snapshot.captured_at;
-   $('refreshStatus').textContent=(changed?'Latest readings loaded.':uploaded?'New upload received; provider readings are unchanged.':'No newer readings yet.')+' Checked '+new Date().toLocaleTimeString()+'. Provider checks run separately; rate-limit cooldowns still apply.';
-  }
+  draw();return true;
  }catch(error){
   online=false;$('connection').textContent='Could not reach the dashboard · showing last readings';
   if(!snapshot)snapshot={accounts:[],attempts:[]};draw();
-  $('refreshStatus').textContent=error.name==='AbortError'?'The check timed out after 10 seconds. Tap Refresh to retry.':'Refresh failed. Check your connection and try again.';
- }finally{
-  clearTimeout(timeout);refreshInFlight=false;button.disabled=false;button.textContent='↻ Refresh';button.setAttribute('aria-busy','false');
- }
+  if(manual)$('refreshStatus').textContent=error.name==='AbortError'?'The download timed out after 10 seconds. Tap Refresh to retry.':'Could not reach the dashboard. Check your connection and try again.';
+  return false;
+ }finally{clearTimeout(timeout);refreshInFlight=false}
 }
-$('refresh').onclick=()=>refresh(true);$('filter').onchange=draw;for(const m of ['remaining','used'])$(m).onclick=()=>{mode=m;$('remaining').setAttribute('aria-pressed',m==='remaining');$('used').setAttribute('aria-pressed',m==='used');draw()};window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installEvent=e});$('install').onclick=async()=>{if(installEvent){await installEvent.prompt();installEvent=null}else $('installHelp').showModal()};$('closeHelp').onclick=()=>$('installHelp').close();window.addEventListener('offline',()=>{online=false;$('connection').textContent='Offline · live readings unavailable';draw()});if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});refresh();setInterval(refresh,15000);
+// Refresh asks the Mac to collect new provider readings through its outbound poll.
+// It never launches inference, changes credentials or shortens a provider cooldown.
+const REASONS={snapshot_only:'Your Mac uploaded its latest snapshot, but no collector is configured there, so provider readings were not re-collected.',mac_not_reporting:'Your Mac did not pick up the request within 2 minutes. It may be asleep or offline; showing last readings.',collection_timeout:'Collection on your Mac did not finish in time; showing last readings.',collector_error:'The collector on your Mac reported an error; showing last readings.',collector_timeout:'The collector on your Mac timed out; showing last readings.',upload_failed:'Your Mac collected readings but could not upload them; showing last readings.'};
+const when=x=>{const t=stamp(x);return t===null?'an unknown time':new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})};
+function describe(request){
+ const o=request.outcome||{},providers=o.providers||[];
+ if(request.state==='queued')return 'Request queued · waiting for your Mac to pick it up…';
+ if(request.state==='collecting')return 'Your Mac is collecting new provider readings…';
+ const notes=[];
+ for(const p of providers.filter(p=>p.status==='cooldown'))notes.push((names[p.provider]||p.provider)+' usage check on cooldown'+(p.next_eligible_at?' until '+when(p.next_eligible_at):''));
+ for(const p of providers.filter(p=>p.status==='auth_required'))notes.push((names[p.provider]||p.provider)+' sign-in needs renewal on your Mac');
+ for(const p of providers.filter(p=>p.status==='error'))notes.push((names[p.provider]||p.provider)+' reading failed');
+ const done='Collected at '+when(request.completed_at)+'.';
+ if(request.state==='cooldown')return done+' '+notes.join('; ')+'. Refresh cannot shorten a cooldown.';
+ if(request.state==='completed')return o.reason==='collected'?done+(notes.length?' '+notes.join('; ')+'.':' New readings loaded.'):REASONS[o.reason]||done;
+ return REASONS[o.reason]||'The refresh request failed; showing last readings.';
+}
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+let collectionInFlight=false;
+async function follow(request){
+ const button=$('refresh'),started=Date.now();
+ collectionInFlight=true;button.disabled=true;button.setAttribute('aria-busy','true');
+ try{
+  while(!['completed','cooldown','failed'].includes(request.state)){
+   button.textContent=request.state==='collecting'?'Collecting…':'Queued…';$('refreshStatus').textContent=describe(request);
+   if(Date.now()-started>330000){$('refreshStatus').textContent='Still waiting for your Mac. Readings will appear automatically when they arrive.';return}
+   await sleep(2000);
+   const r=await fetch('/api/refresh?id='+encodeURIComponent(request.id),{cache:'no-store'});
+   if(r.status===401){location.href='/login';return}
+   if(!r.ok)throw Error('http');
+   request=await r.json();
+  }
+  await refresh(false);
+  $('refreshStatus').textContent=describe(request);
+ }catch(error){$('refreshStatus').textContent='Lost contact with the dashboard while waiting. Readings will appear automatically when they arrive.'}
+ finally{collectionInFlight=false;button.disabled=false;button.textContent='↻ Refresh';button.setAttribute('aria-busy','false')}
+}
+async function requestCollection(){
+ if(collectionInFlight)return;
+ $('refreshStatus').textContent='Asking your Mac to collect new readings…';
+ try{
+  const r=await fetch('/api/refresh',{method:'POST',cache:'no-store'});
+  if(r.status===401){$('refreshStatus').textContent='Session expired. Opening sign-in…';location.href='/login';return}
+  if(!r.ok)throw Error('http');
+  await follow(await r.json());
+ }catch(error){$('refreshStatus').textContent='Could not reach the dashboard to request a refresh. Check your connection and try again.'}
+}
+async function resumeCollection(){
+ try{const r=await fetch('/api/refresh',{cache:'no-store'});if(r.status!==200)return;const request=await r.json();if(['queued','collecting'].includes(request.state))await follow(request)}catch(error){}
+}
+$('refresh').onclick=requestCollection;$('filter').onchange=draw;for(const m of ['remaining','used'])$(m).onclick=()=>{mode=m;$('remaining').setAttribute('aria-pressed',m==='remaining');$('used').setAttribute('aria-pressed',m==='used');draw()};window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installEvent=e});$('install').onclick=async()=>{if(installEvent){await installEvent.prompt();installEvent=null}else $('installHelp').showModal()};$('closeHelp').onclick=()=>$('installHelp').close();window.addEventListener('offline',()=>{online=false;$('connection').textContent='Offline · live readings unavailable';draw()});if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});refresh().then(resumeCollection);setInterval(()=>refresh(),15000);
 $('logout').onclick=async()=>{await fetch('/logout',{method:'POST'});location.href='/login'};

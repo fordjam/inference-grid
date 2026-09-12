@@ -8,8 +8,9 @@ import urllib.request
 import urllib.error
 
 
-def main():
-    path=Path(sys.argv[1]);config=json.loads(path.read_text());now=datetime.now(timezone.utc).isoformat()
+def upload(config):
+    """Read the local sanitized feed and post it; returns a status record without secrets."""
+    now=datetime.now(timezone.utc).isoformat()
     status={'attempted_at':now,'status':'failed'}
     try:
         with urllib.request.urlopen(config['local_feed'],timeout=12) as response:raw=json.load(response)
@@ -22,6 +23,11 @@ def main():
             if response.status!=200:raise RuntimeError('upload refused')
         status.update(status='ok',uploaded_at=now,providers=len(accounts))
     except Exception as exc:status.update(error=type(exc).__name__,http_status=getattr(exc,'code',None))
+    return status
+
+
+def main():
+    path=Path(sys.argv[1]);status=upload(json.loads(path.read_text()))
     out=path.with_name('upload-status.json');temp=out.with_suffix('.tmp');temp.write_text(json.dumps(status));os.chmod(temp,0o600);temp.replace(out)
     print(json.dumps(status))
     return 0 if status['status']=='ok' else 1

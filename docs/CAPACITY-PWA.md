@@ -6,6 +6,6 @@ The PWA shows five provider cards, separate short/weekly/monthly allowances wher
 
 The optional `--overlay` JSON file contains sanitized account observations. Newer timestamps win; a newer failed read replaces an old success. Credentials and arbitrary upstream fields are not forwarded. A native credential refresher is host configuration, not part of the app shell.
 
-Install from a supporting desktop browser, or use Safari Add to Dock. The service worker caches only static app assets; API responses are never cached. Offline mode shows unavailable live data. Phone installation requires a separately configured authenticated HTTPS endpoint reachable from the phone; this loopback deployment does not provide that.
+Install from a supporting desktop browser, or use Safari Add to Dock. The service worker caches only static app assets; API responses are never cached. Offline mode shows unavailable live data. Phone installation requires a separately configured authenticated HTTPS endpoint reachable from the phone; this loopback deployment does not provide that. In the [hosted deployment](../deployments/capacity/README.md), Refresh queues an observable collection request that the Mac picks up by outbound polling, with queued/collecting/completed/cooldown/failed states, offline-Mac expiry and provider cooldowns shown on the phone.
 
 The local quota feed and this server must remain running. No login service or external hosting is installed automatically.

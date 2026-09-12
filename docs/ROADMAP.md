@@ -40,7 +40,7 @@ The inspiration is operational: managed lifecycle, discoverable models, explicit
 
 ## Current implementation versus planned work
 
-The core already provides durable admission, reservations, an outbox, bounded trusted workers and strict artifact receipts. The separately deployed capacity PWA has snapshot refresh feedback; Go has a scheduled collector and Claude has collector backoff. These are useful building blocks, not completion of CLOUD-01 through CLOUD-04. In particular, the phone Refresh button currently downloads the latest snapshot; CLOUD-03 adds an actual collection request lifecycle.
+The core already provides durable admission, reservations, an outbox, bounded trusted workers and strict artifact receipts. The separately deployed capacity PWA has snapshot refresh feedback; Go has a scheduled collector and Claude has collector backoff. These are useful building blocks, not completion of CLOUD-01 through CLOUD-04. The phone Refresh button now queues an observable collection request that the Mac claims by outbound polling (CLOUD-03 lifecycle); wiring each provider's native collector into that request remains provider adapter work.
 
 Delivery stages in SPEC.md remain qualification gates. This roadmap sets priority within and across them; it does not mark unfinished stages complete. Public publication and deployment follow the existing explicit authorization policy.
 
@@ -55,3 +55,7 @@ Durable canonical-account cooldowns now preserve maximum deadlines and gate infe
 ## 0.1.0a3 progress
 
 Added a bounded scheduler/publication supervisor with atomic heartbeat, interruptible backoff and OS-service templates. Added durable single-flight collection admission that consults usage cooldowns and refuses unsafe takeover. These advance CLOUD-01/02; provider observation normalization/publication, unified installation and orphaned-claim recovery remain open. See SERVICE.md and COLLECTION.md.
+
+## 0.1.0a4 progress
+
+Added the observable refresh request lifecycle to the hosted capacity dashboard: authenticated same-origin queueing with a request id, `queued`/`collecting`/`completed`/`cooldown`/`failed` states with completion time, coalesced concurrent taps, offline-Mac and stuck-collection expiry, and a Mac-side outbound poller (`deployments/capacity/refresh_agent.py`) that runs one bounded trusted collector command, uploads the sanitized snapshot and reports an allowlisted outcome. Snapshot-only completions are distinguished from new observations; provider cooldowns and sign-in renewal are shown, not bypassed. This advances CLOUD-03; the collector command per provider, unified installation and orphaned-claim recovery remain open.
