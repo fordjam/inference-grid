@@ -29,7 +29,9 @@ def project(raw, overlays=()):
         if not isinstance(a, dict) or a.get("provider") not in PROVIDERS:
             continue
         key = a["provider"]
-        if key in accounts and timestamp(a.get("observed_at")) <= timestamp(
+        # Newer observations win; on an equal timestamp the later (overlay) entry wins so an
+        # overlay can enrich the same observation, e.g. with derived reset instants.
+        if key in accounts and timestamp(a.get("observed_at")) < timestamp(
             accounts[key].get("observed_at")
         ):
             continue

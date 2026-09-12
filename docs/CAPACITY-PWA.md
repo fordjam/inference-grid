@@ -4,7 +4,7 @@ Run `inference-grid-capacity --port 8040 --upstream http://127.0.0.1:8020/api/us
 
 The PWA shows five provider cards, separate short/weekly/monthly allowances where reported, remaining/used toggles, reset timing, observation freshness and reported work. Missing windows are shown as unknown. Freshness expires after 15 minutes; a successful HTTP connection is not proof of fresh provider data.
 
-The optional `--overlay` JSON file contains sanitized account observations. Newer timestamps win; a newer failed read replaces an old success. Credentials and arbitrary upstream fields are not forwarded. A native credential refresher is host configuration, not part of the app shell.
+The optional `--overlay` JSON file contains sanitized account observations. Newer timestamps win; a newer failed read replaces an old success; on an equal timestamp the overlay entry wins so it can enrich the same observation (for example with reset instants derived from a display string). Credentials and arbitrary upstream fields are not forwarded. A native credential refresher is host configuration, not part of the app shell.
 
 Install from a supporting desktop browser, or use Safari Add to Dock. The service worker caches only static app assets; API responses are never cached. Offline mode shows unavailable live data. Phone installation requires a separately configured authenticated HTTPS endpoint reachable from the phone; this loopback deployment does not provide that. In the [hosted deployment](../deployments/capacity/README.md), Refresh queues an observable collection request that the Mac picks up by outbound polling, with queued/collecting/completed/cooldown/failed states, offline-Mac expiry and provider cooldowns shown on the phone.
 
