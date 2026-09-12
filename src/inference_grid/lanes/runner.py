@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .config import validate_lane_config
 
-KINDS = {"zcode_cli": "zcode"}
+KINDS = {"zcode_cli": "zcode", "claude_headless": "zai"}
 
 
 def load_lanes(path):
@@ -41,7 +41,9 @@ def main(argv=None):
         return 1
     module = __import__("inference_grid.lanes." + module_name, fromlist=["run"])
     attempt_dir = Path.cwd()
-    receipt, verdict = module.run(request, lane, attempt_dir)
+    # The lane's executable is configured, never discovered on PATH inside the worker.
+    options = {"claude": lane["executable"]} if module_name == "zai" else {}
+    receipt, verdict = module.run(request, lane, attempt_dir, **options)
     (attempt_dir / "verdict.json").write_text(json.dumps(verdict, indent=2))
     if receipt is None:
         print("lane refused: " + str(verdict.get("refusal")), file=sys.stderr)
