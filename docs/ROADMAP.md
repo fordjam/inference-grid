@@ -2,7 +2,7 @@
 
 Updated 2026-09-12. Owner direction: apply the operational lessons from oMLX to existing cloud subscriptions first; defer local model serving. This is planned work, not a claim that the separate live dashboard integrations are packaged or production-qualified.
 
-Optimize accepted useful work per constrained subscription unit, including coordinator and repair tokens. Idle capacity is a symptom, not the objective. Initial providers: Claude, Codex, ClinePass, OpenCode Go and Command Code GOAT, using each provider's permitted native interface. No assumed interchangeability between subscriptions and paid APIs.
+Optimize accepted useful work per constrained subscription unit, including coordinator and repair tokens. Idle capacity is a symptom, not the objective. Initial providers: Claude, Codex, ClinePass, OpenCode Go, Command Code GOAT and, from 2026-09-12, the Z.ai GLM Coding Plan (Lite), using each provider's permitted native interface. No assumed interchangeability between subscriptions and paid APIs.
 
 ## Priority and dependencies
 
@@ -67,3 +67,5 @@ Post-a4: `resolve` gives held attempts an auditable operator exit (released or c
 Distribution round 2 (post-a4): Go delivered `provider_report`; GOAT completed its first tool-using representative job (offline classifier fixtures) through Grid with `classify_goat` gating the receipt, advancing CLOUD-04 for that lane. `refresh-collect` now lets the phone refresh publish each provider's latest native observation and report cooldowns, closing CLOUD-03 for the coordinator side; native per-provider fetch remains the private collectors' job.
 
 CLOUD-09 foundation: `outcome` records and `scorecard` turn every attempt into routing evidence; EVALUATION.md carries the first generated scorecard. Independent cross-family review through Go failed on permission and budget axes (see EVALUATION.md); a capability registry entry per model must record hosting policy, protocol support and reasoning budget, not only the plan's model list (CLOUD-05).
+
+Z.ai GLM Coding Plan lane (Lite, subscribed 2026-09-12): the plan may only be used inside officially supported tools, so the trusted adapter runs Claude Code headless against `https://api.z.ai/api/anthropic` (a documented configuration) rather than raw HTTP. Lite quota is 2,000 five-hour / 10,000 weekly credits with no documented usage API; readings are operator-attested from the console and per-request credit cost stays unknown. Models: `glm-5.3-flash`, `glm-5.3`. Campaign until 2026-09-20: 23:00–09:00 Singapore time (15:00–01:00 UTC) GLM-5.3-Flash quota is doubled through supported agents and free through ZCode 3.10+, which is not installed. Qualification step: canary pending credential and quota files.
