@@ -18,6 +18,7 @@ from ..flash_window import flash_window
 from ..lane_readiness import lane_readiness
 from ..ledger import Refused, digest, lanes as lane_records, select
 from ..worker import execute
+from .guard import check_input
 from .task import validate_task
 from ..lanes.select import select_lane
 
@@ -87,6 +88,9 @@ def stage_packet(project_root, task, packet_dir):
         target = input_dir / ("brief.txt" if name == task["brief"] else Path(name).name)
         if not source.is_file():
             raise Refused(f"{task['id']}: input missing: {name}")
+        problem = check_input(name, source.read_bytes())
+        if problem:
+            raise Refused(f"{task['id']}: input refused: {name}: {problem}")
         shutil.copy2(source, target)
         manifest[target.name] = hashlib.sha256(target.read_bytes()).hexdigest()
     expected = input_dir / "expected.json"
