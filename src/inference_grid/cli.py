@@ -18,6 +18,7 @@ def main():
         "command",
         choices=[
             "init",
+            "doctor",
             "account",
             "submit",
             "claim",
@@ -31,6 +32,12 @@ def main():
     )
     parser.add_argument("--json", help="JSON argument file; never store credentials here")
     args = parser.parse_args()
+    if args.command == "doctor":
+        from .doctor import diagnose
+
+        report = diagnose(args.database)
+        print(json.dumps(report, indent=2))
+        raise SystemExit(0 if report["status"] == "checks_passed" else 1)
     ledger = Ledger(args.database)
     data = json.load(open(args.json)) if args.json else {}
     commands = {

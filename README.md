@@ -36,7 +36,7 @@ Submit account/task JSON files with `inference-grid account --json account.json`
 
 Account arguments: `name`, `capacity`, `windows` (remaining quota by explicitly named unit/window), `expires` (Unix freshness deadline), `models`, optional `alias_names` and `observed_at` (the original Unix collection timestamp). Native collectors must supply `observed_at`; omission means a new local operator observation. Replayed observations do not restore locally debited capacity. Run `inference-grid init` after updating an existing prototype database to add the observation table. Task arguments: `task`, `project`, `spec`. See [the specification](docs/SPEC.md) for the task contract, gates and roadmap.
 
-`inference-grid status` shows attempt state. `hold-abandoned --json ...` takes an operator-selected `before` timestamp. `accept` records **operator-attested** independent review tied to an exact receipt hash; it does not authenticate a reviewer or verify a provider identity.
+`inference-grid status` shows attempt state. `inference-grid doctor` performs read-only ledger and executable checks; provider authentication and broker health are explicitly not checked. See [cloud hardening](docs/CLOUD-HARDENING.md). `hold-abandoned --json ...` takes an operator-selected `before` timestamp. `accept` records **operator-attested** independent review tied to an exact receipt hash; it does not authenticate a reviewer or verify a provider identity.
 
 ## Guarantees and limits
 

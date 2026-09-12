@@ -43,3 +43,7 @@ The inspiration is operational: managed lifecycle, discoverable models, explicit
 The core already provides durable admission, reservations, an outbox, bounded trusted workers and strict artifact receipts. The separately deployed capacity PWA has snapshot refresh feedback; Go has a scheduled collector and Claude has collector backoff. These are useful building blocks, not completion of CLOUD-01 through CLOUD-04. In particular, the phone Refresh button currently downloads the latest snapshot; CLOUD-03 adds an actual collection request lifecycle.
 
 Delivery stages in SPEC.md remain qualification gates. This roadmap sets priority within and across them; it does not mark unfinished stages complete. Public publication and deployment follow the existing explicit authorization policy.
+
+## First hardening slices, 2026-09-12
+
+Implemented: read-only `doctor` diagnostics, pure Retry-After deadline/key policy, and conservative Cline terminal normalization. One small Go task completed through the real Grid ledger/worker; its derivative required local corrections before integration. See [scope and evidence](CLOUD-HARDENING.md). Full supervised lifecycle, durable cooldown enforcement and native adapter qualification remain open.
