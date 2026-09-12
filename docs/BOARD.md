@@ -44,3 +44,7 @@ Nothing merges automatically. Held attempts wait for `resolve` with evidence.
 ## Sensitive data
 
 Board inputs are sent to third-party models, so only files a task lists are staged, and `board.guard` refuses any input whose name looks like a credential store (`.env*`, `auth.json`, `credentials*`, key files, databases, `lanes.json`) or whose content matches a credential pattern (private key blocks, `sk-`/GitHub/AWS/Slack token shapes, bearer tokens, `api_key: …` assignments) or is binary. Lane modules read credentials from mode-0600 files named in the private `lanes.json`, pass them only through the child environment or request headers, and never write them to receipts, verdicts or attempt files; each lane runs with a scratch HOME. The board ledger and packet roots are private (0700/0600). The cloud dashboard receives only sanitized usage fields.
+
+## Attested readings
+
+Providers without a usage API (the Z.ai Coding Plan) are admitted from an operator-attested console reading kept in a private file with its true observation time. Policy, not measurement: such a reading stays valid for 24 hours for admission and lane readiness; ZCode consumes no plan quota inside the campaign window. Every other lane uses a collector reading no older than 15 minutes, refreshed by the board's prepare step before each dispatch.
