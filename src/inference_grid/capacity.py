@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-PROVIDERS = {"codex", "claude", "clinepass", "command-code", "opencode"}
+PROVIDERS = {"codex", "claude", "clinepass", "command-code", "opencode", "zai"}
 
 
 def timestamp(value):
@@ -20,8 +20,12 @@ def timestamp(value):
 
 
 def project(raw, overlays=()):
+    # An overlay is a list of account observations or {"accounts": [...], "attempts": [...]};
+    # overlay attempts replace the upstream activity list when present.
+    overlay_accounts = overlays.get("accounts", []) if isinstance(overlays, dict) else overlays
+    overlay_attempts = overlays.get("attempts") if isinstance(overlays, dict) else None
     accounts = {}
-    for a in [*raw.get("accounts", []), *overlays]:
+    for a in [*raw.get("accounts", []), *overlay_accounts]:
         if not isinstance(a, dict) or a.get("provider") not in PROVIDERS:
             continue
         key = a["provider"]
@@ -58,7 +62,9 @@ def project(raw, overlays=()):
         accounts=list(accounts.values()),
         attempts=[
             {k: a.get(k) for k in ("task", "provider", "model", "status", "at")}
-            for a in raw.get("attempts", [])[:30]
+            for a in (
+                overlay_attempts if isinstance(overlay_attempts, list) else raw.get("attempts", [])
+            )[:30]
             if isinstance(a, dict)
         ],
         served_at=datetime.now(timezone.utc).isoformat(),
