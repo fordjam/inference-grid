@@ -9,7 +9,9 @@ from .scheduler import tick
 from .worker import execute
 
 
-def board_tick(ledger, board_dir, project_root, lanes_path, accounts_by_lane, packets_root):
+def board_tick(
+    ledger, board_dir, project_root, lanes_path, accounts_by_lane, packets_root, prepare_argv=None
+):
     from .board.runner import tick as board_run
     from .lanes.runner import load_lanes
 
@@ -21,6 +23,7 @@ def board_tick(ledger, board_dir, project_root, lanes_path, accounts_by_lane, pa
         lanes_path,
         accounts_by_lane,
         packets_root,
+        prepare_argv=prepare_argv,
     )
 
 

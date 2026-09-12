@@ -28,6 +28,6 @@
   "output_bytes": 2000000,
   "thinking_tokens": null
  },
- "state": "ready",
- "blocked_reason": null
+ "state": "blocked",
+ "blocked_reason": "attempt fd452ac6-b11a-4b52-85f1-1f093d93d0e4 held; resolve with evidence"
 }

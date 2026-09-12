@@ -172,3 +172,33 @@ def test_tick_dispatches_tests_and_records(world):
         )
         == []
     )
+
+
+def test_held_attempt_with_complete_files_gets_a_verify_followup(world, monkeypatch, tmp_path):
+    # An adapter that writes the artifact but exits without a receipt (deadline-like), then a
+    # second run that succeeds: the runner must resolve the first and dispatch the follow-up.
+    flaky = tmp_path / "flaky_adapter.py"
+    flaky.write_text(
+        FAKE_ADAPTER.replace(
+            'print(json.dumps({"status": "completed"',
+            'import os\nif not os.path.exists(str(Path(request["input_directory"]) / "brief.txt")) or "already exist" not in (Path(request["input_directory"]) / "brief.txt").read_text():\n    (Path(request["output_directory"]).parent / "work").mkdir(exist_ok=True)\n    for name in names:\n        (Path(request["output_directory"]).parent / "work" / name).write_bytes((inputs / "mod.py").read_bytes())\n    sys.exit(1)\nprint(json.dumps({"status": "completed"',
+        )
+    )
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(flaky)])
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    (world["board"] / "copy-wrong.json").unlink()
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "passed"
+    states = sorted((r["task"].split("-2026")[0], r["state"]) for r in world["ledger"].status())
+    assert states == [("copy-ok", "completed"), ("copy-ok", "failed")]
+    assert json.loads((world["board"] / "copy-ok.json").read_text())["state"] == "review_pending"

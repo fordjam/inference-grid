@@ -123,10 +123,28 @@ def run_tests(project_root, task, artifact_dir, scratch):
     return proc.returncode == 0, summary[0][:300]
 
 
-def dispatch(ledger, lanes, lanes_path, lane_id, task, project_root, packet_dir, account_alias):
+def dispatch(
+    ledger,
+    lanes,
+    lanes_path,
+    lane_id,
+    task,
+    project_root,
+    packet_dir,
+    account_alias,
+    input_dir=None,
+):
     """Submit, claim and execute one attempt for the task on the lane; returns (aid, state, output_dir)."""
     lane = lanes[lane_id]
-    input_dir, manifest = stage_packet(project_root, task, packet_dir)
+    if input_dir is None:
+        input_dir, manifest = stage_packet(project_root, task, packet_dir)
+    else:
+        input_dir = Path(input_dir)
+        manifest = {
+            p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(input_dir.iterdir())
+            if p.is_file()
+        }
     workspace = Path(packet_dir) / "attempts"
     workspace.mkdir(exist_ok=True)
     spec = {
@@ -141,7 +159,9 @@ def dispatch(ledger, lanes, lanes_path, lane_id, task, project_root, packet_dir,
         "input_root": str(input_dir),
         "manifest_sha256": digest(manifest),
     }
-    task_id = task["id"] + "-" + time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    task_id = task["id"] + "-" + time.strftime("%Y%m%dT%H%M%S", time.gmtime(time.time()))
+    if input_dir.name == "input-verify":
+        task_id += "-verify"
     ledger.submit(task_id, Path(project_root).name, spec)
     with ledger.engine.connect() as con:
         from ..ledger import accounts, aliases
@@ -158,8 +178,46 @@ def dispatch(ledger, lanes, lanes_path, lane_id, task, project_root, packet_dir,
     return aid, state, workspace / aid / "artifacts"
 
 
+def verify_followup(task, packet_dir, held_attempt_dir):
+    """Build a verify-only packet from a held attempt whose expected files all exist.
+
+    Returns the follow-up input directory, or None when the files are incomplete. This is a
+    recorded change of brief (run the tests, fix nothing unless they fail), never a blind retry.
+    """
+    work = Path(held_attempt_dir) / "work"
+    names = [Path(a).name for a in task["artifacts"]]
+    if not all((work / n).is_file() for n in names):
+        return None
+    source = Path(packet_dir) / "input"
+    verify = Path(packet_dir) / "input-verify"
+    if verify.exists():
+        shutil.rmtree(verify)
+    shutil.copytree(source, verify)
+    for n in names:
+        shutil.copy2(work / n, verify / n)
+    tests = [Path(t).stem for t in task["tests"] if Path(t).name.startswith("test_")]
+    (verify / "brief.txt").write_text(
+        "Work only inside the current directory. The files "
+        + ", ".join(names)
+        + " already exist here from a previous session; every other file is a read-only reference. "
+        + "Run exactly this once: python3 -m unittest -v "
+        + " ".join(tests)
+        + ". If it passes, do not change any file. If it fails, make the smallest fix and run the "
+        + "command once more. Then stop with a one-line summary stating pass or fail. No other commands, no network.\n"
+    )
+    return verify
+
+
 def tick(
-    board_dir, project_root, ledger, lanes, lanes_path, accounts_by_lane, packets_root, now=None
+    board_dir,
+    project_root,
+    ledger,
+    lanes,
+    lanes_path,
+    accounts_by_lane,
+    packets_root,
+    now=None,
+    prepare_argv=None,
 ):
     """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records."""
     now = time.time() if now is None else now
@@ -185,6 +243,9 @@ def tick(
             continue
         lane_id = choice["lane"]
         packet_dir = Path(packets_root) / task_id / time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
+        if prepare_argv:
+            # Refresh account observations right before the claim; a long tick outlives them.
+            subprocess.run(prepare_argv, capture_output=True, timeout=120)
         try:
             aid, state, output_dir = dispatch(
                 ledger,
@@ -196,6 +257,31 @@ def tick(
                 packet_dir,
                 accounts_by_lane[lane_id],
             )
+            if state != "completed":
+                followup = verify_followup(task, packet_dir, Path(packet_dir) / "attempts" / aid)
+                if followup is not None:
+                    ledger.resolve(
+                        aid,
+                        "consumed",
+                        "deadline with all expected files present; verify-only follow-up dispatched",
+                        "board runner",
+                    )
+                    ledger.record_outcome(
+                        aid, task["category"], False, note="deadline; files complete"
+                    )
+                    if prepare_argv:
+                        subprocess.run(prepare_argv, capture_output=True, timeout=120)
+                    aid, state, output_dir = dispatch(
+                        ledger,
+                        lanes,
+                        lanes_path,
+                        lane_id,
+                        task,
+                        project_root,
+                        packet_dir,
+                        accounts_by_lane[lane_id],
+                        input_dir=followup,
+                    )
         except Refused as exc:
             results.append(
                 {
