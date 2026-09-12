@@ -1,10 +1,42 @@
 # Inference Grid
 
-A small, project-independent control plane for bounded inference jobs. PostgreSQL owns admission and attempt state; RabbitMQ transports attempt IDs; Celery runs trusted adapters. Subscription windows and account aliases are admission constraints, not token prices.
+**Make useful progress across your AI coding subscriptions without constantly deciding who should work next.**
 
-**Status: 0.1.0a1 public-alpha candidate.** Local failure tests run with SQLite. PostgreSQL and RabbitMQ are the production target and have separate integration checks. This is not yet a production service, a credential broker, or a security sandbox. No live provider account is configured in this repository.
+If you use several AI coding tools, one can run out of allowance while the others sit idle. Each has different models, usage limits and ways of running tasks. Keeping work moving means checking quotas, choosing a provider, handing over context, tracking results and recovering when a session fails.
 
-## Quick start (no provider calls)
+Inference Grid is being built to coordinate that work across projects. The aim is to assign suitable tasks to available providers, respect their limits, and keep a reliable record of what happened—so you spend less time moving work between tools and more time reviewing useful results.
+
+## The problem in practice
+
+Imagine you have a feature to implement, tests to write and a code review waiting:
+
+- Your strongest model is close to its weekly limit.
+- Another subscription has room to handle a smaller task.
+- A previous agent stopped halfway through, and you do not know whether it finished.
+
+The intended workflow is to give Grid the tasks, their priorities and the providers allowed to handle them. Grid should reserve capacity, run suitable work, collect the results and hold uncertain attempts for investigation. A finished response still needs to pass the task's checks and review.
+
+The goal is **more accepted work from the capacity you already have**. Keeping every subscription busy is only useful if its output saves time overall.
+
+## What works today
+
+**Experimental alpha:** the orchestration core is available, and the broader cloud-provider workflow is still being built. The [first release](https://github.com/fordjam/inference-grid/releases/tag/v0.1.0a1) is published; `main` also contains newer hardening work.
+
+Today you can:
+
+- Define tasks, permitted models and account allowances, then run explicitly configured worker commands.
+- Reserve capacity across multiple usage windows and prevent duplicate queued deliveries from starting the same attempt again.
+- Record outputs, check their identity and contents, and hold uncertain results instead of silently retrying them.
+- Run a demonstration without calling a model or spending inference capacity.
+- Use a capacity dashboard with a separately supplied usage feed, and inspect local configuration with `inference-grid doctor` on `main`.
+
+**Connecting your subscriptions is not yet a plug-and-play setup.** Native collectors and complete provider adapters are not bundled. Automatic recovery, a unified background service and routing based on measured task quality remain [roadmap work](docs/ROADMAP.md). Small external-provider trials help test the design, but do not establish a complete integration.
+
+This alpha is for developers evaluating or extending the system. It runs trusted commands and is not a security sandbox.
+
+## Try the demo
+
+Use Python 3.12. From a checkout of this repository:
 
 ```sh
 python3.12 -m venv .venv
@@ -14,11 +46,28 @@ pytest -q
 python examples/demo.py
 ```
 
-Installing dependencies requires network access unless they are already cached. The tests and demo below use no provider credentials.
+Installation needs network access unless dependencies are cached. The demo needs no provider credentials: it creates a temporary task, produces an output, and shows that delivering the same job again does not rerun it. Expect `completed` followed by `duplicate_or_stale`.
 
-The demo creates a temporary ledger, account and workspace, admits one synthetic task, produces an artifact, then demonstrates duplicate-message suppression. It uses no API and spends nothing. `completed` does not mean reviewed or accepted.
+## View capacity
 
-## Services
+The optional [capacity app](docs/CAPACITY-PWA.md) shows usage, remaining allowances and the age of each reading. Start it with `inference-grid-capacity`, then open http://127.0.0.1:8040.
+
+Live readings require a separately running sanitized quota feed; no native collector is bundled. Without one, the app can open but provider capacity remains unavailable. The [standalone deployment bundle](deployments/capacity/README.md) supports an authenticated hosted dashboard receiving snapshots from your own collector.
+
+## How it works
+
+Grid separates deciding whether work may start from delivering and executing it:
+
+| Component | Responsibility |
+| --- | --- |
+| PostgreSQL | Stores tasks, reserves account capacity and records attempt state |
+| RabbitMQ | Delivers queued attempt identifiers to workers |
+| Celery workers | Run configured adapters with runtime and output bounds |
+| Provider adapters | Translate a provider's native execution and results into Grid's task contract |
+
+SQLite supports the local demo and evaluation tests. Provider adapters are trusted local code; the public package does not contain account credentials.
+
+## Run the worker services
 
 ```sh
 cp .env.example .env
@@ -38,7 +87,7 @@ Account arguments: `name`, `capacity`, `windows` (remaining quota by explicitly 
 
 `inference-grid status` shows attempt state. `inference-grid doctor` performs read-only ledger and executable checks; provider authentication and broker health are explicitly not checked. See [cloud hardening](docs/CLOUD-HARDENING.md). `hold-abandoned --json ...` takes an operator-selected `before` timestamp. `accept` records **operator-attested** independent review tied to an exact receipt hash; it does not authenticate a reviewer or verify a provider identity.
 
-## Guarantees and limits
+## Execution boundaries
 
 * Account aliases share reservations; every configured quota window must be reserved.
 * Tasks and workspaces cannot be claimed concurrently. Task specs are immutable.
@@ -49,16 +98,12 @@ Account arguments: `name`, `capacity`, `windows` (remaining quota by explicitly 
 
 External exactly-once execution is **not** guaranteed. Database fencing prevents a stale attempt from being accepted locally; provider reconciliation is still necessary. Adapter receipts are trusted evidence from locally approved code, not cryptographic provider attestations. Run untrusted code in a real OS/container sandbox. This worker only separates directories and limits runtime and captured output; it does not prevent filesystem/network access or disk exhaustion.
 
-## Project layout
+## Developer references
 
 `ledger.py`: transactions and admission; `scheduler.py`: priority and authorized candidate order; `queue.py`: outbox and Celery; `worker.py`: bounded process and verification; `receipts.py`: strict receipt shape; `aliases.py`: alias resolution; `quota.py`: timestamp/usage validation; `native_receipts.py`: native response structural checks; `tests/`: adverse-path evaluations.
 
 [Cloud-first roadmap](docs/ROADMAP.md) · [Decision and implementation spec](docs/SPEC.md) · [Failure policy](docs/FAILURE_POLICY.md) · [Evaluation record](docs/EVALUATION.md) · [Provider contribution record](docs/CONTRIBUTIONS.md)
 
-## Alpha release scope
+## Validation
 
-This repository is useful for evaluating durable local admission and trusted adapter contracts. Real PostgreSQL, RabbitMQ delivery, worker death and broker application restart have been tested on macOS. Linux CI has passed for the initial publication candidate, including PostgreSQL, RabbitMQ worker loss and container restart. Tagged candidates are rerun before release. Native account collectors and full Go/Cline/Command Code adapters are not bundled yet; their external canaries do not imply they are integrated here. See CONTRIBUTING.md for destructive-test opt-ins.
-
-## Local capacity app
-
-An installable, read-only [capacity PWA](docs/CAPACITY-PWA.md) displays provider headroom and freshness from a sanitized local feed. A separately running sanitized quota feed is required for live data; no native collector is bundled. Start it with `inference-grid-capacity`; the default URL is http://127.0.0.1:8040. Without the feed, the shell can load but live capacity is unavailable.
+Linux CI exercises SQLite and PostgreSQL tests, RabbitMQ delivery, worker loss, broker container restart, dashboard behavior and the deployment build. Passing these checks does not establish production readiness or qualify every cloud provider. See the [evaluation record](docs/EVALUATION.md), [release scope](docs/RELEASE.md) and [contributing guide](CONTRIBUTING.md) for evidence and test requirements.
