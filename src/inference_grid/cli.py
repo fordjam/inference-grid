@@ -9,6 +9,21 @@ from .scheduler import tick
 from .worker import execute
 
 
+def board_tick(ledger, board_dir, project_root, lanes_path, accounts_by_lane, packets_root):
+    from .board.runner import tick as board_run
+    from .lanes.runner import load_lanes
+
+    return board_run(
+        board_dir,
+        project_root,
+        ledger,
+        load_lanes(lanes_path),
+        lanes_path,
+        accounts_by_lane,
+        packets_root,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Durable admission for trusted, bounded adapters")
     parser.add_argument(
@@ -35,6 +50,7 @@ def main():
             "lane",
             "outcome",
             "scorecard",
+            "board-tick",
             "tick",
         ],
     )
@@ -59,6 +75,7 @@ def main():
             "refresh-collect",
             "lane",
             "outcome",
+            "board-tick",
             "defer",
             "cooldown",
         }
@@ -85,6 +102,7 @@ def main():
         "lane": ledger.record_lane,
         "outcome": ledger.record_outcome,
         "scorecard": ledger.scorecard,
+        "board-tick": lambda **kw: board_tick(ledger, **kw),
     }
     print(json.dumps(commands[args.command](**data), indent=2))
 

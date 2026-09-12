@@ -155,6 +155,16 @@ def run(
     work.mkdir(mode=0o700)
     staged = stage_inputs(request, work)
     prompt = (work / "brief.txt").read_text().strip()
+    # No tools are available to the model, so every other staged text input travels in the
+    # prompt itself, in a stable order, each under a labelled separator.
+    for name in staged:
+        if name in ("brief.txt", "expected.json"):
+            continue
+        try:
+            content = (work / name).read_text()
+        except UnicodeDecodeError:
+            continue
+        prompt += "\n\n=== " + name + " ===\n" + content
     verdict = {
         "supervisor": None,
         "session": None,
