@@ -591,7 +591,7 @@ def test_outcome_records_feed_scorecard_without_inventing_usage(grid):
     with pytest.raises(Refused, match="completed work"):
         ledger.record_outcome(held, "extraction", True)
     ledger.record_outcome(held, "extraction", False, note="adapter exited early")
-    card = ledger.scorecard()
+    card = ledger.scorecard(account=account)
     assert [
         (e["model"], e["category"], e["attempts"], e["completed"], e["accepted"], e["resolved"])
         for e in card
