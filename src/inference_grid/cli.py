@@ -29,6 +29,7 @@ def main():
             "publish",
             "hold-abandoned",
             "accept",
+            "resolve",
             "tick",
         ],
     )
@@ -42,7 +43,17 @@ def main():
         raise SystemExit(0 if report["status"] == "checks_passed" else 1)
     if (
         args.command
-        in {"account", "submit", "claim", "run", "hold-abandoned", "accept", "defer", "cooldown"}
+        in {
+            "account",
+            "submit",
+            "claim",
+            "run",
+            "hold-abandoned",
+            "accept",
+            "resolve",
+            "defer",
+            "cooldown",
+        }
         and not args.json
     ):
         parser.error("this command requires --json")
@@ -61,6 +72,7 @@ def main():
         "publish": lambda: publish(ledger),
         "hold-abandoned": lambda **kw: hold_abandoned(ledger, **kw),
         "accept": ledger.accept,
+        "resolve": ledger.resolve,
     }
     print(json.dumps(commands[args.command](**data), indent=2))
 

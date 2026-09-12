@@ -506,3 +506,65 @@ def test_cooldown_and_start_serialize_under_account_lock(grid, monkeypatch, firs
     assert (started is not None) == (first_operation == "start")
     state = next(r for r in ledger.status() if r["id"] == aid)["state"]
     assert state == ("dispatching" if first_operation == "start" else "held")
+
+
+def test_resolve_released_frees_slot_without_debit(grid):
+    ledger, account, tmp = grid
+    task = submit(grid, argv=[sys.executable, "-c", "raise SystemExit(1)"], timeout=1)
+    aid, gen = claim(grid, task)
+    assert execute(ledger, aid, gen) == "held"
+    with pytest.raises(Refused, match="account busy"):
+        claim(grid, submit(grid, "two"))
+    with pytest.raises(Refused, match="outcome"):
+        ledger.resolve(aid, "retry", "please", "operator")
+    with pytest.raises(Refused, match="reason"):
+        ledger.resolve(aid, "released", "  ", "operator")
+    with pytest.raises(Refused, match="operator"):
+        ledger.resolve(aid, "released", "adapter exited before any provider call", "")
+    result = ledger.resolve(
+        aid,
+        "released",
+        "adapter exited before any provider call",
+        "operator",
+        evidence={"stderr_digest": "b" * 64},
+    )
+    assert result == {"attempt": aid, "state": "abandoned", "outcome": "released"}
+    with ledger.engine.connect() as con:
+        windows = con.execute(
+            select(accounts.c.windows).where(accounts.c.id == account)
+        ).scalar_one()
+    assert windows == {"five_hour": 10, "weekly": 20}
+    # The freed workspace and account slot admit new work; the resolved attempt stays terminal.
+    claim(grid, submit(grid, "three", workspace=str(tmp / "one")))
+    with pytest.raises(Refused, match="only held"):
+        ledger.resolve(aid, "released", "again", "operator")
+
+
+def test_resolve_consumed_debits_reservation(grid):
+    ledger, account, _ = grid
+    aid, gen = claim(
+        grid, submit(grid, argv=[sys.executable, "-c", "import time; time.sleep(5)"], timeout=1)
+    )
+    assert execute(ledger, aid, gen) == "held"
+    assert (
+        ledger.resolve(aid, "consumed", "native log shows a model request", "operator")["state"]
+        == "failed"
+    )
+    with ledger.engine.connect() as con:
+        windows = con.execute(
+            select(accounts.c.windows).where(accounts.c.id == account)
+        ).scalar_one()
+    assert windows == {"five_hour": 8, "weekly": 18}
+    claim(grid, submit(grid, "two"))
+
+
+def test_resolve_refuses_non_held_states(grid):
+    ledger, _, _ = grid
+    aid, gen = claim(grid, submit(grid))
+    with pytest.raises(Refused, match="only held"):
+        ledger.resolve(aid, "released", "queued is not held", "operator")
+    ledger.start(aid, gen)
+    with pytest.raises(Refused, match="only held"):
+        ledger.resolve(aid, "released", "dispatching is not held", "operator")
+    with pytest.raises(Refused, match="unknown attempt"):
+        ledger.resolve("missing", "released", "x", "operator")

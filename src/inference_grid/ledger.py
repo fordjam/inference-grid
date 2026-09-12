@@ -508,6 +508,63 @@ class Ledger:
             )
             self.event(con, aid, "native_completed", receipt_digest=digest(receipt))
 
+    def resolve(self, aid, outcome, reason, operator, evidence=None):
+        """Auditable operator resolution of a held attempt; never a retry or acceptance.
+
+        outcome "released": the operator attests, from native evidence, that no provider
+        execution consumed capacity; the reservation is dropped. outcome "consumed": the
+        provider did or may have run; the reservation is debited as a completion would be.
+        Both leave the ACTIVE set, freeing the workspace and account slot. The original
+        hold reason, evidence digest and operator are recorded together in one event.
+        """
+        if outcome not in ("released", "consumed"):
+            raise Refused("outcome must be released or consumed")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 500:
+            raise Refused("bounded resolution reason required")
+        if not isinstance(operator, str) or not operator.strip() or len(operator) > 100:
+            raise Refused("operator attestation required")
+        if evidence is not None and not isinstance(evidence, dict):
+            raise Refused("evidence must be an object")
+        state = "abandoned" if outcome == "released" else "failed"
+        with self.tx() as con:
+            row = con.execute(select(attempts).where(attempts.c.id == aid)).mappings().first()
+            if not row:
+                raise Refused("unknown attempt")
+            if row["state"] != "held":
+                raise Refused("only held attempts can be resolved")
+            self.lock(con, ["account:" + row["account"], "workspace:" + row["workspace"]])
+            changed = con.execute(
+                update(attempts)
+                .where(attempts.c.id == aid, attempts.c.state == "held")
+                .values(state=state, updated=time.time())
+            )
+            if changed.rowcount != 1:
+                raise Refused("attempt changed during resolution")
+            if outcome == "consumed":
+                acct = (
+                    con.execute(select(accounts).where(accounts.c.id == row["account"]))
+                    .mappings()
+                    .one()
+                )
+                windows = {
+                    k: max(0, v - row["estimate"].get(k, 0)) for k, v in acct["windows"].items()
+                }
+                con.execute(
+                    update(accounts).where(accounts.c.id == row["account"]).values(windows=windows)
+                )
+            self.event(
+                con,
+                aid,
+                "operator_resolved",
+                outcome=outcome,
+                state=state,
+                reason=reason,
+                held_reason=row["reason"],
+                operator=operator,
+                evidence_digest=digest(evidence) if evidence is not None else None,
+            )
+            return {"attempt": aid, "state": state, "outcome": outcome}
+
     def accept(self, aid, receipt_digest, reviewer_family, verdict):
         with self.tx() as con:
             self.lock(con, ["accept:" + aid])

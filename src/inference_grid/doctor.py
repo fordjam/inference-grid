@@ -82,6 +82,7 @@ def diagnose(url, now=None):
             "queued": states.count("queued"),
             "dispatching": states.count("dispatching"),
             "held": states.count("held"),
+            "resolved": states.count("abandoned") + states.count("failed"),
             "pending_publications": pending,
             "missing_executables": sum(executable_state(s) == "missing" for s in specs),
             "unresolved_executables": sum(executable_state(s) == "unresolved" for s in specs),
