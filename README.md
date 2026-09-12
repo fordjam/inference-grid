@@ -57,7 +57,7 @@ External exactly-once execution is **not** guaranteed. Database fencing prevents
 
 ## Alpha release scope
 
-This repository is useful for evaluating durable local admission and trusted adapter contracts. Real PostgreSQL, RabbitMQ delivery, worker death and broker application restart have been tested on macOS. Linux CI is configured but not claimed as executed. Native account collectors and full Go/Cline/Command Code adapters are not bundled yet; their external canaries do not imply they are integrated here. See CONTRIBUTING.md for destructive-test opt-ins.
+This repository is useful for evaluating durable local admission and trusted adapter contracts. Real PostgreSQL, RabbitMQ delivery, worker death and broker application restart have been tested on macOS. Linux CI has passed for the initial publication candidate, including PostgreSQL, RabbitMQ worker loss and container restart. Tagged candidates are rerun before release. Native account collectors and full Go/Cline/Command Code adapters are not bundled yet; their external canaries do not imply they are integrated here. See CONTRIBUTING.md for destructive-test opt-ins.
 
 ## Local capacity app
 

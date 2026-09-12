@@ -27,3 +27,7 @@ Claude's bounded independent review completed after native OAuth refresh. Reprod
 Cline qualification: Python 3.9 rejected nanosecond RFC3339 timestamps in the external quota collector. An isolated fix passed eight tests; missing reset times remain unknown. Installed thinking-none mapping omitted upstream reasoning settings. A bounded low-effort canary completed with verified model, 607 output tokens and one independently passing test. These external adapter fixes are qualified evidence, not yet integrated into this repository's adapter layer.
 
 Alpha freeze: 56 PostgreSQL tests passed, three broker tests separately passed (delivery, killed worker, broker application restart). Linux CI configured, not executed. Clean wheel installation and offline demo passed. See RELEASE.md for scope.
+
+## GitHub publication qualification
+
+Candidate `0ed2b9b` passed [Linux CI](https://github.com/fordjam/inference-grid/actions/runs/34695750001), including dashboard HTTP/display/refresh tests, Docker build, SQLite and PostgreSQL suites, and the three real-broker tests including container restart. A subsequent local review found a capacity decrease after queue admission was not rechecked at dispatch; two regressions and a conservative hold fix bring the local suite to 61 passed, three broker-only skips. The repaired candidate must pass CI before tagging.

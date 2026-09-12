@@ -354,3 +354,26 @@ def test_delayed_new_observation_cannot_erase_later_completion(grid):
             ]
             == 18
         )
+
+
+@pytest.mark.parametrize("already_running", [False, True])
+def test_refreshed_capacity_holds_queued_without_disturbing_running(grid, already_running):
+    ledger, account, _ = grid
+    ledger.configure_account(account, 2, {"five_hour": 10, "weekly": 20},
+                             time.time() + 300, ["synthetic"])
+    first = claim(grid, submit(grid, "capacity-first"))
+    second = claim(grid, submit(grid, "capacity-second"))
+    if already_running:
+        assert ledger.start(*first) is not None
+    ledger.configure_account(account, 1, {"five_hour": 10, "weekly": 20},
+                             time.time() + 300, ["synthetic"])
+    assert ledger.start(*second) is None
+    if not already_running:
+        assert ledger.start(*first) is None
+    rows = {row["id"]: row for row in ledger.status()}
+    assert rows[second[0]]["state"] == "held"
+    assert "capacity changed" in rows[second[0]]["reason"]
+    assert rows[first[0]]["state"] == ("dispatching" if already_running else "held")
+    # Holds retain the reservations; a refresh must not silently release them.
+    with pytest.raises(Refused, match="account busy"):
+        claim(grid, submit(grid, "capacity-third"))

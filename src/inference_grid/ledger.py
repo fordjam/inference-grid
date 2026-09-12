@@ -354,6 +354,7 @@ class Ledger:
                 acct["expires"] <= time.time()
                 or job["spec"]["model"] not in acct["models"]
                 or over_budget
+                or len(reserved) > acct["capacity"]
                 or changed_windows
             ):
                 con.execute(
@@ -361,10 +362,10 @@ class Ledger:
                     .where(attempts.c.id == aid, attempts.c.state == "queued")
                     .values(
                         state="held",
-                        reason="admission observation expired or model removed",
+                        reason="admission observation expired or model, quota windows, or capacity changed",
                     )
                 )
-                self.event(con, aid, "reconciliation_required", reason="stale admission")
+                self.event(con, aid, "reconciliation_required", reason="stale or changed admission")
                 return None
             row = (
                 con.execute(
