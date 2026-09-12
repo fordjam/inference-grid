@@ -9,6 +9,7 @@ import time
 from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.engine import make_url
 
+from .collector import collection_claims
 from .ledger import accounts, attempts, cooldowns, outbox, tasks
 
 
@@ -47,13 +48,22 @@ def diagnose(url, now=None):
         connect_args = {"connect_timeout": 5} if parsed.get_backend_name() == "postgresql" else {}
         engine = create_engine(url, connect_args=connect_args)
         with engine.connect() as con:
-            required = {t.name for t in (accounts, attempts, cooldowns, outbox, tasks)}
+            required = {
+                t.name for t in (accounts, attempts, cooldowns, outbox, tasks, collection_claims)
+            }
             if not required.issubset(inspect(con).get_table_names()):
                 result["findings"].append("schema_missing_run_init")
                 return result
             # Never print stored argv, URLs, credentials or exception text.
             active_cooldowns = list(
                 con.execute(select(cooldowns.c.endpoint).where(cooldowns.c.until > now)).scalars()
+            )
+            collecting = list(
+                con.execute(
+                    select(collection_claims.c.deadline).where(
+                        collection_claims.c.token.is_not(None)
+                    )
+                ).scalars()
             )
             account_rows = list(con.execute(select(accounts.c.expires)).scalars())
             states = list(con.execute(select(attempts.c.state)).scalars())
@@ -64,6 +74,8 @@ def diagnose(url, now=None):
         result["database"] = "readable"
         result["counts"] = {
             "accounts": len(account_rows),
+            "collecting": sum(t > now for t in collecting),
+            "stuck_collections": sum(t <= now for t in collecting),
             "inference_cooldowns": active_cooldowns.count("inference"),
             "usage_cooldowns": active_cooldowns.count("usage"),
             "stale_accounts": sum(not math.isfinite(x) or x <= now for x in account_rows),
@@ -77,6 +89,7 @@ def diagnose(url, now=None):
         }
         for count, finding in (
             (not account_rows, "no_accounts_configured"),
+            (result["counts"]["stuck_collections"], "collection_reconciliation_required"),
             (result["counts"]["inference_cooldowns"], "provider_inference_cooldown_active"),
             (result["counts"]["usage_cooldowns"], "usage_collection_cooldown_active"),
             (result["counts"]["stale_accounts"], "refresh_stale_account_observations"),

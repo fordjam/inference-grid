@@ -1,11 +1,9 @@
-# 0.1.0a2 experimental alpha
+# 0.1.0a3 experimental alpha
 
-This release adds durable account/endpoint cooldowns, read-only doctor diagnostics, conservative Cline outcome classification and bounded structured JSON decoding. It includes the cloud-first roadmap and capacity dashboard fixes from main after a1.
+Adds bounded dispatcher supervision, heartbeat/backoff and manual OS-service templates, plus single-flight quota collection admission and a Go-authored HTTP status classifier.
 
-Before upgrading an existing ledger, run `inference-grid init` to add the cooldown table. No automatic migration deletes or releases existing work. Full native provider adapters and supervised service installation remain unfinished.
+Upgrade: run `inference-grid init` before restarting work; it adds collection_claims without releasing existing reservations. The new supervisor runs tick/publish only. Celery workers, data services and native collectors remain separate.
 
-Local tests and independent review cover maximum deadline persistence, account aliases, quota-refresh independence, usage/inference separation, queued-to-held behavior, already-running work, expiry without reservation release and ordered cooldown/start races. CI repeats core tests on PostgreSQL and exercises actual broker recovery, wheel installation and dashboard/container checks. See the GitHub release for exact candidate CI evidence.
+Provider callbacks must enforce network deadlines. The collector foundation does not publish observations, automatically clear orphaned claims or install existing dashboard feeds. See SERVICE.md and COLLECTION.md for boundaries. No full autonomous-loop, security sandbox or exactly-once external execution guarantee is claimed.
 
-No full autonomous-loop, native-provider review approval, security sandbox or exactly-once external execution guarantee is claimed. A completed response remains distinct from an accepted artifact. Go tasks were exercised through Grid; one completed and needed local corrections, another was correctly held for malformed transport formatting. No blind retry was used.
-
-Wheel and source archives are attached to the GitHub prerelease; PyPI publication is not included. Prior a1 evidence remains in EVALUATION.md and the a1 release notes.
+The GitHub release records exact validation, CI and artifacts. Previous alpha evidence remains in prior release notes and EVALUATION.md.

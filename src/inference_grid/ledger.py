@@ -114,6 +114,9 @@ class Ledger:
 
     def initialize(self):
         metadata.create_all(self.engine)
+        from .collector import initialize_collections
+
+        initialize_collections(self)
 
     @contextmanager
     def tx(self):

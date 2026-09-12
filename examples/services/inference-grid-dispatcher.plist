@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>GRID_BROKER_URL</key>
+		<string>REPLACE_WITH_LOCAL_BROKER_URL</string>
+		<key>GRID_DATABASE_URL</key>
+		<string>REPLACE_WITH_LOCAL_DATABASE_URL</string>
+	</dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>Label</key>
+	<string>local.inference-grid.dispatcher</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/path/to/venv/bin/inference-grid-service</string>
+		<string>run</string>
+		<string>--state-dir</string>
+		<string>/path/to/private/grid-state</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>15</integer>
+</dict>
+</plist>

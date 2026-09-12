@@ -51,3 +51,7 @@ Implemented: read-only `doctor` diagnostics, pure Retry-After deadline/key polic
 ## 0.1.0a2 progress
 
 Durable canonical-account cooldowns now preserve maximum deadlines and gate inference claim/start; doctor reports usage and inference cooldowns separately. Structured JSON decoding handles one exact code fence without relaxing schema checks. These changes advance CLOUD-02/CLOUD-04; external collector wiring, automatic held resolution and supervised lifecycle remain open.
+
+## 0.1.0a3 progress
+
+Added a bounded scheduler/publication supervisor with atomic heartbeat, interruptible backoff and OS-service templates. Added durable single-flight collection admission that consults usage cooldowns and refuses unsafe takeover. These advance CLOUD-01/02; provider observation normalization/publication, unified installation and orphaned-claim recovery remain open. See SERVICE.md and COLLECTION.md.

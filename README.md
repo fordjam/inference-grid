@@ -31,7 +31,7 @@ Today you can:
 - Use a capacity dashboard with a separately supplied usage feed, and inspect local configuration with `inference-grid doctor`.
 - Persist account cooldowns and stop new inference from starting before its deadline.
 
-**Connecting your subscriptions is not yet a plug-and-play setup.** Native collectors and complete provider adapters are not bundled. Automatic recovery, a unified background service and routing based on measured task quality remain [roadmap work](docs/ROADMAP.md). Small external-provider trials help test the design, but do not establish a complete integration.
+**Connecting your subscriptions is not yet a plug-and-play setup.** Native collectors and complete provider adapters are not bundled. A [dispatcher supervisor](docs/SERVICE.md) is available; automatic recovery, unified service installation and routing based on measured task quality remain [roadmap work](docs/ROADMAP.md). Small external-provider trials help test the design, but do not establish a complete integration.
 
 This alpha is for developers evaluating or extending the system. It runs trusted commands and is not a security sandbox.
 
