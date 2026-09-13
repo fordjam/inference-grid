@@ -319,7 +319,7 @@ class GoLaneTests(unittest.TestCase):
         # The endpoint's documented request schema honours no token-count reasoning field
         # for the model, so the task's thinking budget caps max_tokens (plus a generous
         # content allowance) and the verdict records that the budget itself could not be
-        # forwarded.
+        # forwarded: no effort field in the body, reasoning_effort unsupported.
         request, attempt = self.attempt(expected=["out.py"])
         sender = self.send(self.native())
         receipt, verdict = go.run(
@@ -327,10 +327,42 @@ class GoLaneTests(unittest.TestCase):
         )
         self.assertIsNone(verdict["refusal"], verdict)
         self.assertEqual(sender.recorded["body"]["max_tokens"], 10000)
+        self.assertNotIn("reasoning_effort", sender.recorded["body"])
         self.assertNotIn("thinking_tokens", sender.recorded["body"])
+        self.assertEqual(verdict["reasoning_effort"], "unsupported")
         self.assertEqual(verdict["reasoning_budget"], "unsupported")
         self.assertEqual((verdict["thinking_tokens"], verdict["max_tokens"]), (6000, 10000))
         self.assertTrue((attempt / "artifacts/out.py").is_file())
+
+    def test_reasoning_effort_follows_the_tier_policy(self):
+        # kimi-k3 is in the capability map, so the tier the policy picks for the task's
+        # thinking budget is sent as reasoning_effort: absent or <=4000 low, <=12000
+        # high, beyond max. Board review tasks (6000) ask for high, not the endpoint's
+        # default max that thought 16000 tokens away.
+        for thinking, effort in (
+            (None, "low"),
+            (0, "low"),
+            (4000, "low"),
+            (4001, "high"),
+            (6000, "high"),
+            (12000, "high"),
+            (12001, "max"),
+        ):
+            request, attempt = self.attempt(expected=["out.py"])
+            sender = self.send(self.native(model="kimi-k3"))
+            payload = dict(request, model="kimi-k3")
+            if thinking is not None:
+                payload["thinking_tokens"] = thinking
+            receipt, verdict = go.run(payload, self.lane, attempt, send=sender)
+            self.assertIsNone(verdict["refusal"], verdict)
+            self.assertEqual(sender.recorded["body"]["reasoning_effort"], effort, thinking)
+            self.assertEqual(verdict["reasoning_effort"], effort, thinking)
+            self.assertNotIn("reasoning_budget", verdict)
+            if thinking is not None and thinking > 0:
+                self.assertEqual(sender.recorded["body"]["max_tokens"], thinking + 4000)
+            else:
+                self.assertEqual(sender.recorded["body"]["max_tokens"], 16000)
+            self.assertTrue((attempt / "artifacts/out.py").is_file())
 
     def test_reasoning_overrun_is_its_own_refusal(self):
         # kimi-k3 answering with finish_reason length, all reasoning tokens and no content

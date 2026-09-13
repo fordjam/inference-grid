@@ -27,6 +27,27 @@ MAX_CONTENT = 40000
 # Generous room for the reply itself when a thinking budget caps max_tokens; the reply
 # is a single JSON object.
 CONTENT_ALLOWANCE = 4000
+# Capability map: the reasoning_effort values the endpoint's documented request schema
+# honours per model (OpenCode Zen chat-completions; kimi-k3 reasons by default at max).
+# Only kimi-k3 is recorded; every other model sends nothing until the operator adds it.
+REASONING_EFFORT = {"kimi-k3": ("low", "high", "max")}
+# The coordinator's policy mapping a task's thinking_tokens to an effort tier
+# (docs/BOARD.md): absent or at most 4000 → low, up to 12000 → high, beyond → max.
+EFFORT_TIERS = ((4000, "low"), (12000, "high"))
+
+
+def reasoning_effort_for(thinking_tokens):
+    """The effort tier for a task's thinking budget under EFFORT_TIERS, max beyond.
+
+    An absent budget tiers as low: the mapped models reason by default, so an unbudgeted
+    task still asks for the cheapest effort the model accepts.
+    """
+    if thinking_tokens is None:
+        return "low"
+    for cap, effort in EFFORT_TIERS:
+        if thinking_tokens <= cap:
+            return effort
+    return "max"
 
 
 class RefusedRedirects(urllib.request.HTTPRedirectHandler):
@@ -211,15 +232,9 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
     verdict["transport_timeout"] = transport_timeout
     verdict["task_wall_seconds"] = task_wall
     verdict["lane_wall_seconds"] = lane_wall
-    # The task's reasoning budget reaches the request only through max_tokens: the
-    # endpoint's documented request schema honours no token-count reasoning field for the
-    # model (only categorical reasoning_effort), so the verdict says the budget itself
-    # could not be forwarded while the cap keeps a reasoning model from thinking its
-    # whole output away.
     thinking_tokens = request.get("thinking_tokens")
     if type(thinking_tokens) is int and thinking_tokens > 0:
         max_tokens = thinking_tokens + CONTENT_ALLOWANCE
-        verdict["reasoning_budget"] = "unsupported"
         verdict["thinking_tokens"] = thinking_tokens
     verdict["max_tokens"] = max_tokens
     body = {
@@ -228,6 +243,18 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
         "stream": False,
         "max_tokens": max_tokens,
     }
+    # What the endpoint honours is categorical reasoning_effort, per model
+    # (REASONING_EFFORT, tiers via reasoning_effort_for/EFFORT_TIERS, policy in
+    # docs/BOARD.md). The token count itself travels only as the max_tokens cap above,
+    # so a model outside the map says reasoning_budget: unsupported.
+    effort = reasoning_effort_for(thinking_tokens if type(thinking_tokens) is int else None)
+    if effort in REASONING_EFFORT.get(request.get("model"), ()):
+        body["reasoning_effort"] = effort
+        verdict["reasoning_effort"] = effort
+    else:
+        verdict["reasoning_effort"] = "unsupported"
+        if verdict.get("thinking_tokens") is not None:
+            verdict["reasoning_budget"] = "unsupported"
     try:
         if send is not None:
             response = send(body, key, session, transport_timeout)
