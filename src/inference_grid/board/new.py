@@ -2,7 +2,9 @@
 
 Pure file work: the task is validated by board.task before anything is written, the brief
 is created empty for the author to fill, and an independent_review task also gets the
-review schema acceptance test beside the board. Existing files are refused, never edited.
+review schema acceptance test beside the board. Existing task files and briefs are
+refused; the schema test is shared by every review task, so an existing one is reused
+untouched (never overwritten) rather than blocking the second review task on a board.
 """
 
 import json
@@ -51,10 +53,7 @@ def new_task(board_dir, project_root, task):
     board_file = board_dir / (task["id"] + ".json")
     brief = project_root / task["brief"]
     schema_test = board_dir.parent / "tests" / "test_review_schema.py"
-    wanted = [("task file", board_file), ("brief", brief)]
-    if task["category"] == "independent_review":
-        wanted.append(("schema test", schema_test))
-    for label, path in wanted:
+    for label, path in [("task file", board_file), ("brief", brief)]:
         if path.exists():
             raise FileExistsError(f"{label} already exists: {path}")
     board_dir.mkdir(parents=True, exist_ok=True)
@@ -63,7 +62,8 @@ def new_task(board_dir, project_root, task):
     brief.write_text("")
     created = {"task": str(board_file), "brief": str(brief)}
     if task["category"] == "independent_review":
-        schema_test.parent.mkdir(parents=True, exist_ok=True)
-        schema_test.write_text(SCHEMA_TEST)
+        if not schema_test.exists():
+            schema_test.parent.mkdir(parents=True, exist_ok=True)
+            schema_test.write_text(SCHEMA_TEST)
         created["schema_test"] = str(schema_test)
     return created

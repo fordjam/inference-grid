@@ -58,15 +58,15 @@ def test_existing_files_are_refused_and_left_unchanged(tmp_path):
     assert not (board / "other.json").exists()
 
 
-def test_existing_schema_test_is_not_overwritten(tmp_path):
+def test_existing_schema_test_is_reused_not_overwritten(tmp_path):
     board = tmp_path / "grid/board"
     schema = tmp_path / "grid/tests/test_review_schema.py"
     schema.parent.mkdir(parents=True)
     schema.write_text("# coordinator's own schema test\n")
-    with pytest.raises(FileExistsError, match="schema test"):
-        new_task(board, tmp_path, task(category="independent_review"))
+    created = new_task(board, tmp_path, task(category="independent_review"))
     assert schema.read_text() == "# coordinator's own schema test\n"
-    assert not (board / "write-mod.json").exists()
+    assert created["schema_test"] == str(schema)
+    assert (board / "write-mod.json").exists()
 
 
 def test_invalid_task_writes_nothing(tmp_path):
