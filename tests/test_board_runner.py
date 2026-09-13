@@ -232,13 +232,14 @@ def test_tick_dispatches_tests_and_records(world):
 
 
 def test_held_attempt_with_complete_files_gets_a_verify_followup(world, monkeypatch, tmp_path):
-    # An adapter that writes the artifact but exits without a receipt (deadline-like), then a
-    # second run that succeeds: the runner must resolve the first and dispatch the follow-up.
+    # A deadline-shaped hold (lane verdict says wall_deadline) that wrote the artifact but
+    # exits without a receipt, then a second run that succeeds: the runner must resolve the
+    # first and dispatch the follow-up.
     flaky = tmp_path / "flaky_adapter.py"
     flaky.write_text(
         FAKE_ADAPTER.replace(
             'print(json.dumps({"status": "completed"',
-            'import os\nif not os.path.exists(str(Path(request["input_directory"]) / "brief.txt")) or "already exist" not in (Path(request["input_directory"]) / "brief.txt").read_text():\n    (Path(request["output_directory"]).parent / "work").mkdir(exist_ok=True)\n    for name in names:\n        (Path(request["output_directory"]).parent / "work" / name).write_bytes((inputs / "mod.py").read_bytes())\n    sys.exit(1)\nprint(json.dumps({"status": "completed"',
+            'import os\nif not os.path.exists(str(Path(request["input_directory"]) / "brief.txt")) or "already exist" not in (Path(request["input_directory"]) / "brief.txt").read_text():\n    attempt = Path(request["output_directory"]).parent\n    (attempt / "work").mkdir(exist_ok=True)\n    for name in names:\n        (attempt / "work" / name).write_bytes((inputs / "mod.py").read_bytes())\n    (attempt / "verdict.json").write_text(json.dumps({"supervisor": {"reason": "wall_deadline"}}))\n    sys.exit(1)\nprint(json.dumps({"status": "completed"',
         )
     )
     monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(flaky)])
@@ -263,6 +264,44 @@ def test_held_attempt_with_complete_files_gets_a_verify_followup(world, monkeypa
     )
     assert states == [("copy-ok", "completed"), ("copy-ok", "failed")]
     assert json.loads((world["board"] / "copy-ok.json").read_text())["state"] == "review_pending"
+
+
+def test_receipt_refusal_hold_gets_no_followup(world, monkeypatch, tmp_path):
+    # The same complete files, but the adapter failed its own receipt check (no deadline
+    # evidence anywhere): the follow-up must not fire and the hold waits for the operator.
+    crashing = tmp_path / "crashing_adapter.py"
+    crashing.write_text(
+        FAKE_ADAPTER.replace(
+            'print(json.dumps({"status": "completed"',
+            '(Path(request["output_directory"]).parent / "work").mkdir(exist_ok=True)\n'
+            "for name in names:\n"
+            '    (Path(request["output_directory"]).parent / "work" / name).write_bytes((inputs / "mod.py").read_bytes())\n'
+            "sys.exit(1)\n"
+            'print(json.dumps({"status": "completed"',
+        )
+    )
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(crashing)])
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    (world["board"] / "copy-wrong.json").unlink()
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "held"
+    task = json.loads((world["board"] / "copy-ok.json").read_text())
+    assert task["state"] == "blocked"
+    assert "resolve with evidence" in task["blocked_reason"]
+    attempts = [
+        r for r in world["ledger"].status() if r["account"] == world["account"]
+    ]
+    assert len(attempts) == 1 and attempts[0]["state"] == "held"
 
 
 def test_rejected_review_blocks_the_task(world, monkeypatch):

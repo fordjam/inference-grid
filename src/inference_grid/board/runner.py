@@ -283,6 +283,31 @@ def dispatch(
     return aid, state, workspace / aid / "artifacts"
 
 
+def deadline_hold(ledger, packet_dir, aid):
+    """True when a held attempt stopped at its wall deadline rather than a receipt refusal.
+
+    The worker's deadline hold records "Refused: timeout: provider acceptance may be
+    ambiguous" in the ledger; lanes that supervise a native process also report
+    supervisor reason wall_deadline in the verdict beside the attempt. Any other hold
+    (unexpected model, escaping artifact name, crashed adapter) stays held for the
+    operator even when the expected files happen to exist.
+    """
+    reason = ""
+    for row in ledger.status():
+        if row["id"] == aid:
+            reason = row.get("reason") or ""
+            break
+    if "timeout" in reason:
+        return True
+    verdict_path = Path(packet_dir) / "attempts" / aid / "verdict.json"
+    try:
+        verdict = json.loads(verdict_path.read_text())
+    except (OSError, ValueError):
+        return False
+    supervisor = verdict.get("supervisor") if isinstance(verdict, dict) else None
+    return isinstance(supervisor, dict) and supervisor.get("reason") == "wall_deadline"
+
+
 def verify_followup(task, packet_dir, held_attempt_dir):
     """Build a verify-only packet from a held attempt whose expected files all exist.
 
@@ -571,7 +596,7 @@ def tick(
                 packet_dir,
                 accounts_by_lane[lane_id],
             )
-            if state != "completed":
+            if state != "completed" and deadline_hold(ledger, packet_dir, aid):
                 followup = verify_followup(task, packet_dir, Path(packet_dir) / "attempts" / aid)
                 if followup is not None:
                     # The one authorized recorded-change retry (BOARD.md): a deadline hold
