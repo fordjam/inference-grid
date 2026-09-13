@@ -4,7 +4,8 @@ Answers what a board is doing without five ledger queries and a JSON loop: per t
 state, lanes, author family and bounded reason, the live review task for review_pending
 work (resolving retry reviews through their recorded source link), and for a blocked
 reason that names an attempt, the ledger state plus what the attempt's verdict and
-artifacts show under its packet workspace.
+artifacts show under its packet workspace. With suggest, transport-dead blocked tasks
+also carry the pre-filled board-new retry JSON (retry_suggestion).
 """
 
 import json
@@ -75,8 +76,37 @@ def attempt_detail(ledger, aid):
     return detail
 
 
-def board_status(ledger, board_dir):
-    """One status row per board task; the ledger is only read for attempt states."""
+def retry_suggestion(board_dir, task, detail):
+    """The exact board-new --json payload that would retry a transport-dead blocked task.
+
+    wall_seconds doubles up to the 900 s cap and the change string is pre-written from
+    the refusal; board_dir follows the <project>/grid/board convention for project_root.
+    A suggestion only — board-new does the authoring, the operator decides.
+    """
+    previous = task["budget"]["wall_seconds"]
+    raised = min(900, 2 * previous)
+    refusal = detail.get("refusal") or "transport_error"
+    board_dir = Path(board_dir)
+    return {
+        "board_dir": str(board_dir),
+        "project_root": str(board_dir.parent.parent),
+        "retry": task["id"],
+        "change": f"wall_seconds {previous} -> {raised} after {refusal}"[:300],
+        "budget": {
+            "wall_seconds": raised,
+            "output_bytes": task["budget"]["output_bytes"],
+            "thinking_tokens": task["budget"]["thinking_tokens"],
+        },
+    }
+
+
+def board_status(ledger, board_dir, suggest=False):
+    """One status row per board task; the ledger is only read for attempt states.
+
+    With suggest, a blocked task whose attempt refusal starts with transport_error and
+    whose artifacts are absent also carries the pre-filled board-new retry JSON
+    (handoff-4 B3) — print only, nothing is authored here.
+    """
     board = load_board(board_dir)
     needs_ledger = any(t["state"] == "blocked" for _, t in board.values())
     rows = []
@@ -102,6 +132,14 @@ def board_status(ledger, board_dir):
         if task["state"] == "blocked":
             match = ATTEMPT_IN_REASON.search(task["blocked_reason"] or "")
             if match:
-                row["attempt"] = attempt_detail(ledger, match.group(1)) if needs_ledger else None
+                detail = attempt_detail(ledger, match.group(1)) if needs_ledger else None
+                row["attempt"] = detail
+                if (
+                    suggest
+                    and isinstance(detail, dict)
+                    and str(detail.get("refusal") or "").startswith("transport_error")
+                    and not detail.get("artifacts_present")
+                ):
+                    row["suggest"] = retry_suggestion(board_dir, task, detail)
         rows.append(row)
     return rows

@@ -156,3 +156,92 @@ def test_attempt_detail_reads_the_verdict_and_artifacts(tmp_path):
         "artifacts_present": True,
     }
     assert (attempt_dir / "verdict.json").read_bytes() == before  # read-only
+
+
+def test_suggest_prefills_the_retry_for_transport_dead_tasks(tmp_path):
+    # A transport-dead blocked task (refusal transport_error, no artifacts) carries the
+    # exact board-new JSON that would retry it: wall_seconds doubled to the 900 s cap,
+    # the change pre-written from the refusal. Print only — nothing is authored.
+    board = tmp_path / "grid/board"
+    board.mkdir(parents=True)
+    task = write_task(board, "slow", "blocked")
+    task["budget"] = {"wall_seconds": 600, "output_bytes": 2000000, "thinking_tokens": 6000}
+    url = "sqlite:///" + str(tmp_path / "ledger.sqlite")
+    ledger = Ledger(url)
+    ledger.initialize()
+    account = "go-" + uuid.uuid4().hex[:8]
+    ledger.configure_account(
+        account, 1, {"five_hour": 10, "weekly": 20}, time.time() + 600, ["glm-5.3-flash"]
+    )
+    aid, generation = seed_attempt(ledger, account, "seed-1", tmp_path / "ws")
+    ledger.start(aid, generation)
+    ledger.hold(aid, "Refused: transport dead")
+    task["blocked_reason"] = f"attempt {aid} held; resolve with evidence"
+    (board / "slow.json").write_text(json.dumps(task))
+    attempt_dir = tmp_path / "ws" / aid
+    attempt_dir.mkdir(parents=True)
+    (attempt_dir / "verdict.json").write_text(
+        json.dumps({"refusal": "transport_error: TimeoutError", "transport_timeout": 400})
+    )
+    before = {p.name: p.read_bytes() for p in board.glob("*.json")}
+    rows = {r["id"]: r for r in board_status(ledger, board, suggest=True)}
+    assert rows["slow"]["suggest"] == {
+        "board_dir": str(board),
+        "project_root": str(tmp_path),
+        "retry": "slow",
+        "change": "wall_seconds 600 -> 900 after transport_error: TimeoutError",
+        "budget": {"wall_seconds": 900, "output_bytes": 2000000, "thinking_tokens": 6000},
+    }
+    assert {p.name: p.read_bytes() for p in board.glob("*.json")} == before
+    # A small budget doubles without reaching the cap.
+    task["budget"] = {"wall_seconds": 300, "output_bytes": 1000, "thinking_tokens": None}
+    (board / "slow.json").write_text(json.dumps(task))
+    rows = {r["id"]: r for r in board_status(ledger, board, suggest=True)}
+    assert rows["slow"]["suggest"]["change"] == (
+        "wall_seconds 300 -> 600 after transport_error: TimeoutError"
+    )
+    assert rows["slow"]["suggest"]["budget"] == {
+        "wall_seconds": 600,
+        "output_bytes": 1000,
+        "thinking_tokens": None,
+    }
+
+
+def test_suggest_skips_holds_that_are_not_transport_dead(tmp_path):
+    board = tmp_path / "grid/board"
+    board.mkdir(parents=True)
+    write_task(board, "http", "blocked")
+    write_task(board, "partial", "blocked")
+    url = "sqlite:///" + str(tmp_path / "ledger.sqlite")
+    ledger = Ledger(url)
+    ledger.initialize()
+    account = "go-" + uuid.uuid4().hex[:8]
+    ledger.configure_account(
+        account, 2, {"five_hour": 10, "weekly": 20}, time.time() + 600, ["glm-5.3-flash"]
+    )
+    aid1, gen1 = seed_attempt(ledger, account, "s1", tmp_path / "ws1")
+    ledger.start(aid1, gen1)
+    ledger.hold(aid1, "Refused: http status")
+    (tmp_path / "ws1" / aid1).mkdir(parents=True)
+    (tmp_path / "ws1" / aid1 / "verdict.json").write_text(
+        json.dumps({"refusal": "endpoint returned HTTP 402"})
+    )
+    aid2, gen2 = seed_attempt(ledger, account, "s2", tmp_path / "ws2")
+    ledger.start(aid2, gen2)
+    ledger.hold(aid2, "Refused: transport with files")
+    delivered = tmp_path / "ws2" / aid2
+    delivered.mkdir(parents=True)
+    (delivered / "verdict.json").write_text(
+        json.dumps({"refusal": "transport_error: TimeoutError"})
+    )
+    (delivered / "artifacts").mkdir()
+    (delivered / "artifacts" / "out.py").write_text("VALUE = 1\n")
+    for name, aid in (("http", aid1), ("partial", aid2)):
+        task = json.loads((board / f"{name}.json").read_text())
+        task["blocked_reason"] = f"attempt {aid} held; resolve with evidence"
+        (board / f"{name}.json").write_text(json.dumps(task))
+    rows = {r["id"]: r for r in board_status(ledger, board, suggest=True)}
+    assert "suggest" not in rows["http"]  # not a transport refusal
+    assert "suggest" not in rows["partial"]  # transport refusal, but artifacts exist
+    rows = {r["id"]: r for r in board_status(ledger, board)}
+    assert all("suggest" not in r for r in rows)  # off by default

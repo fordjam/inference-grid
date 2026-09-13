@@ -166,10 +166,10 @@ def main():
     print(json.dumps(commands[args.command](**data), indent=2))
 
 
-def board_status(ledger, board_dir):
+def board_status(ledger, board_dir, suggest=False):
     from .board.status import board_status as status
 
-    return status(ledger, board_dir)
+    return status(ledger, board_dir, suggest=suggest)
 
 
 if __name__ == "__main__":
