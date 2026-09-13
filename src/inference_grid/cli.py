@@ -134,6 +134,7 @@ def main():
             "board-tick",
             "board-new",
             "board-status",
+            "inbox-integrate",
             "evaluation",
             "tick",
         ],
@@ -164,6 +165,7 @@ def main():
             "board-tick",
             "board-new",
             "board-status",
+            "inbox-integrate",
             "defer",
             "cooldown",
         }
@@ -211,6 +213,9 @@ def main():
         "board-tick": lambda **kw: board_tick(ledger, **kw),
         "board-new": lambda **kw: board_new(**kw),
         "board-status": lambda **kw: board_status(ledger, **kw),
+        "inbox-integrate": lambda **kw: inbox_integrate(
+            kw["project_root"], kw["task_id"], dry_run=kw.get("dry_run", True)
+        ),
     }
     print(json.dumps(commands[args.command](**data), indent=2))
 
@@ -219,6 +224,12 @@ def board_status(ledger, board_dir=None, suggest=False, boards=None):
     from .board.status import board_status as status
 
     return status(ledger, board_dir, suggest=suggest, boards=boards)
+
+
+def inbox_integrate(project_root, task_id, dry_run=True):
+    from .board.integrate import inbox_integrate as integrate
+
+    return integrate(project_root, task_id, dry_run=dry_run)
 
 
 if __name__ == "__main__":
