@@ -852,3 +852,121 @@ def test_a_held_attempt_makes_the_lane_busy(world):
         "copy-wrong": "lane_busy",
     }
     assert len(world["ledger"].status()) == 1  # nothing new dispatched
+
+
+def write_link(board, source_id, **fields):
+    """A review source link; fields default to a first-round link for source_id."""
+    link = dict(
+        task=source_id,
+        attempt="a" * 8 + "-0000",
+        lane="go",
+        family="glm",
+        receipt_digest="d" * 64,
+        artifacts=["mod2.py"],
+        review_task="review-" + source_id,
+    )
+    link.update(fields)
+    stage = board / "review" / source_id
+    stage.mkdir(parents=True, exist_ok=True)
+    (stage / "source.json").write_text(json.dumps(link))
+    return link
+
+
+def test_a_retry_review_resolves_its_source_by_link(world, monkeypatch):
+    # review-x-2 cannot be resolved by stripping the prefix (that yields x-2): the source
+    # link names the retry explicitly, so its approval accepts x.
+    (world["board"] / "copy-wrong.json").unlink()
+    lanes = dict(world["lanes"])
+    lanes["kimi"] = dict(
+        lanes["go"], family="kimi", model="kimi-k3", categories=["independent_review"]
+    )
+    world["ledger"].configure_account(
+        "kimi-acct",
+        1,
+        {"five_hour": 10, "weekly": 20},
+        time.time() + 600,
+        ["kimi-k3"],
+        ["kimi-alias"],
+    )
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    world["ledger"].record_lane("kimi", dict(ready_record(now), provider="kimi"))
+    accounts = {"go": world["account"], "kimi": "kimi-alias"}
+    first = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        lanes,
+        world["lanes_path"],
+        accounts,
+        world["packets"],
+        now=now,
+    )
+    assert first[0]["task"] == "copy-ok" and first[0]["result"] == "passed"
+    # copy-ok is now review_pending with a source link naming review-copy-ok; the operator
+    # re-dispatches the review as a new task and records the change in the link.
+    link = json.loads((world["board"] / "review/copy-ok/source.json").read_text())
+    assert link["review_task"] == "review-copy-ok"
+    link["review_task"] = "review-copy-ok-2"
+    (world["board"] / "review/copy-ok/source.json").write_text(json.dumps(link))
+    retry = make_review_task("review-copy-ok-2", "brief-approve.txt")
+    retry["lanes"] = ["kimi"]
+    (world["board"] / "review-copy-ok-2.json").write_text(json.dumps(retry))
+    adapter = world["lanes_path"].parent / "review_adapter.py"
+    # The generated review brief quotes the word "rejected" in its schema; reject only
+    # when the original brief itself asks for it.
+    adapter.write_text(REVIEW_ADAPTER.replace('reject = "reject" in', 'reject = "brief-reject" in'))
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(adapter)])
+    second = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        lanes,
+        world["lanes_path"],
+        accounts,
+        world["packets"],
+        now=now + 1,
+    )
+    result = second[0]["result"]
+    assert "accepted" in result, result
+    assert json.loads((world["board"] / "copy-ok.json").read_text())["state"] == "accepted"
+
+
+def test_prefix_fallback_still_resolves_legacy_links(world):
+    # A link without the review_task field (first-round files) resolves by the prefix rule.
+    board = world["board"]
+    link = write_link(board, "y")
+    del link["review_task"]
+    (board / "review/y/source.json").write_text(json.dumps(link))
+    found, path = runner.find_source_link(board, "review-y")
+    assert found["task"] == "y"
+    missing, _ = runner.find_source_link(board, "review-nowhere")
+    assert missing is None
+
+
+def test_a_retry_rejection_blocks_its_source(world, monkeypatch):
+    (world["board"] / "copy-ok.json").unlink()
+    (world["board"] / "copy-wrong.json").unlink()
+    adapter = world["lanes_path"].parent / "review_adapter.py"
+    adapter.write_text(REVIEW_ADAPTER)
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(adapter)])
+    source = make_task("x", "brief.txt", state="review_pending")
+    (world["board"] / "x.json").write_text(json.dumps(source))
+    write_link(world["board"], "x", review_task="review-x-2")
+    retry = make_review_task("review-x-2", "brief-reject.txt")
+    (world["board"] / "review-x-2.json").write_text(json.dumps(retry))
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "review_rejected"
+    assert json.loads((world["board"] / "x.json").read_text())["state"] == "blocked"
+    assert "review rejected" in json.loads((world["board"] / "x.json").read_text())["blocked_reason"]

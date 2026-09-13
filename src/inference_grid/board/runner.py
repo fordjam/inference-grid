@@ -463,6 +463,7 @@ def write_source_link(board_dir, task, aid, lane_id, lanes, receipt_digest):
                 "family": lanes[lane_id]["family"],
                 "receipt_digest": receipt_digest,
                 "artifacts": task["artifacts"],
+                "review_task": "review-" + task["id"],
             },
             indent=1,
         )
@@ -470,7 +471,31 @@ def write_source_link(board_dir, task, aid, lane_id, lanes, receipt_digest):
     )
 
 
-def propagate_rejection(board, review_id, findings):
+def find_source_link(board_dir, review_id):
+    """Resolve the source a review task judges, without deriving it from the name alone.
+
+    A retry review (review-x-2 for source x) cannot be found by stripping the review-
+    prefix, so the scan matches source.json files that name the review task explicitly.
+    Returns (link, link_path); without a named match the legacy review- prefix rule
+    applies, which also covers links written before the review_task field existed.
+    """
+    review_dir = Path(board_dir) / "review"
+    if review_dir.is_dir():
+        for link_path in sorted(review_dir.glob("*/source.json")):
+            try:
+                link = json.loads(link_path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(link, dict) and link.get("review_task") == review_id:
+                return link, link_path
+    legacy = review_dir / review_id[len("review-") :] / "source.json"
+    try:
+        return json.loads(legacy.read_text()), legacy
+    except (OSError, ValueError):
+        return None, legacy
+
+
+def propagate_rejection(board, board_dir, review_id, findings):
     """Block the source task a rejected review refers to, carrying the findings summary.
 
     Without this the review task blocks alone while the source stays review_pending with
@@ -479,7 +504,9 @@ def propagate_rejection(board, review_id, findings):
     """
     if not review_id.startswith("review-"):
         return
-    source = board.get(review_id[len("review-") :])
+    link, _ = find_source_link(board_dir, review_id)
+    source_id = (link or {}).get("task") or review_id[len("review-") :]
+    source = board.get(source_id)
     if source is None or source[1]["state"] != "review_pending":
         return
     note = "; ".join(
@@ -545,12 +572,12 @@ def land_in_inbox(project_root, task, artifact_dir, record):
 
 def accept_reviewed(board_dir, project_root, ledger, lanes, review_lane, review_task, result):
     """An approved review accepts the source attempt in the ledger and lands it on the inbox."""
-    source_id = review_task["id"][len("review-") :]
-    link_path = Path(board_dir) / "review" / source_id / "source.json"
+    review_id = review_task["id"]
+    link, link_path = find_source_link(board_dir, review_id)
+    source_id = (link or {}).get("task") or review_id[len("review-") :]
     source_path = Path(board_dir) / (source_id + ".json")
-    if not link_path.is_file() or not source_path.is_file():
+    if link is None or not source_path.is_file():
         return result + "; source link missing, nothing accepted"
-    link = json.loads(link_path.read_text())
     source_task = validate_task(json.loads(source_path.read_text()))
     reviewer_family = lanes[review_lane]["family"]
     try:
@@ -745,7 +772,7 @@ def tick(
                     passed = False
                     result = "review_rejected"
                     summary = f"review rejected with {len(findings)} finding(s)"
-                    propagate_rejection(board, task_id, findings)
+                    propagate_rejection(board, board_dir, task_id, findings)
         ledger.record_outcome(aid, task["category"], passed, note=(summary or "")[:300])
         if passed:
             if task["author_family"] is None:

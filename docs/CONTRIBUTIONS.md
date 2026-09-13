@@ -136,3 +136,4 @@ Defects and features observed on the live board during the first operator-driven
 | Item | Fix / Change | Evidence |
 | --- | --- | --- |
 | A1 | `readiness_view` counts every state the ledger treats as ACTIVE (queued, dispatching, held) toward `max_concurrency`, importing the set from `ledger.py`; a held attempt now makes the lane busy instead of leaving room for refused dispatches | `test_a_held_attempt_makes_the_lane_busy` |
+| A2 | Review sources resolve by link, not by name: `write_source_link` records `review_task` in `review/<source>/source.json`, and `accept_reviewed`/`propagate_rejection` scan those links for the review id with the legacy `review-` prefix rule as fallback — so the authorised retry `review-lane-cline-2` can accept `lane-cline` | `test_a_retry_review_resolves_its_source_by_link` (full reject→retry→accept flow), `test_prefix_fallback_still_resolves_legacy_links`, `test_a_retry_rejection_blocks_its_source` |
