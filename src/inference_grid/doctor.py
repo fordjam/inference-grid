@@ -12,7 +12,7 @@ from sqlalchemy.engine import make_url
 
 from .collector import collection_claims
 from .lane_readiness import lane_readiness
-from .ledger import accounts, attempts, cooldowns, lanes, outbox, tasks
+from .ledger import accounts, attempts, classifier_view, cooldowns, lanes, outbox, tasks
 
 MAX_BOARD_DIRS = 8
 
@@ -126,7 +126,7 @@ def diagnose(url, now=None, boards=None):
         result["lanes"] = []
         for record in lane_rows:
             try:
-                classified = lane_readiness(record, now)
+                classified = lane_readiness(classifier_view(record), now)
             except ValueError:
                 classified = {
                     "provider": str(record.get("provider", "?"))[:40]

@@ -1012,3 +1012,91 @@ def test_superseded_sources_are_never_touched(world, monkeypatch):
     )
     task = json.loads((world["board"] / "x.json").read_text())
     assert task["blocked_reason"].startswith("superseded:")
+
+
+def test_a_403_verdict_excludes_the_model_until_expiry(world, monkeypatch):
+    # An adapter whose verdict records an endpoint 403 for the model: the hold also
+    # records unsupported_until for the lane's model, and readiness excludes the lane.
+    (world["board"] / "copy-wrong.json").unlink()
+    refusing = world["lanes_path"].parent / "refusing_adapter.py"
+    refusing.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "request = json.load(sys.stdin)\n"
+        "attempt = Path(request['output_directory']).parent\n"
+        "verdict = {'refusal': 'endpoint returned HTTP 403'}\n"
+        "(attempt / 'verdict.json').write_text(json.dumps(verdict))\n"
+        "sys.exit(1)\n"
+    )
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(refusing)])
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "held"
+    view = runner.readiness_view(world["ledger"], world["lanes"], now + 1, {"go": world["account"]})
+    assert view["go"]["state"] == "unqualified"
+    with world["ledger"].engine.connect() as con:
+        from inference_grid.ledger import lanes as lane_records, select
+
+        record = (
+            con.execute(select(lane_records).where(lane_records.c.provider == "go"))
+            .mappings()
+            .one()["record"]
+        )
+    until = record["unsupported_until"]["glm-5.3-flash"]
+    assert now + 1 < until <= now + runner.MODEL_REFUSAL_TTL + 5
+
+
+def test_unsupported_until_expires_and_ignores_other_models(world):
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    accounts = {"go": world["account"]}
+    # A refusal for another model does not touch this lane's model...
+    world["ledger"].record_lane(
+        "go", dict(ready_record(now), unsupported_until={"kimi-k3": now + 60})
+    )
+    view = runner.readiness_view(world["ledger"], world["lanes"], now + 1, accounts)
+    assert view["go"]["state"] == "ready"
+    # ...a refusal for this model does, until it expires...
+    world["ledger"].record_lane(
+        "go", dict(ready_record(now), unsupported_until={"glm-5.3-flash": now + 60})
+    )
+    view = runner.readiness_view(world["ledger"], world["lanes"], now + 1, accounts)
+    assert view["go"]["state"] == "unqualified"
+    # ...and an expired entry restores the lane.
+    world["ledger"].record_lane(
+        "go", dict(ready_record(now), unsupported_until={"glm-5.3-flash": now - 1})
+    )
+    view = runner.readiness_view(world["ledger"], world["lanes"], now + 1, accounts)
+    assert view["go"]["state"] == "ready"
+
+
+def test_lane_records_carry_metadata_without_confusing_the_classifier(world):
+    # record_lane stores the routing metadata while lane_readiness keeps classifying the
+    # strict key set, so doctor's lane view stays valid too.
+    now = time.time()
+    world["ledger"].record_lane(
+        "go", dict(ready_record(now), unsupported_until={"glm-5.3-flash": now + 60})
+    )
+    from inference_grid.lane_readiness import lane_readiness
+    from inference_grid.ledger import classifier_view
+
+    with world["ledger"].engine.connect() as con:
+        from inference_grid.ledger import lanes as lane_records, select
+
+        record = (
+            con.execute(select(lane_records).where(lane_records.c.provider == "go"))
+            .mappings()
+            .one()["record"]
+        )
+    assert "unsupported_until" in record
+    assert lane_readiness(classifier_view(record), now + 1)["state"] == "ready"

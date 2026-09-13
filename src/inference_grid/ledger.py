@@ -103,6 +103,16 @@ lanes = Table(
 # Locks cover task/account/workspace namespaces; rows persist to avoid ABA races.
 locks = Table("locks", metadata, Column("id", String, primary_key=True))
 ACTIVE = ("queued", "dispatching", "held")
+# Per-model routing metadata a lane record may carry beyond the readiness classifier's
+# fixed key set; stripped before classification, stored with the record.
+LANE_RECORD_METADATA = ("unsupported_until",)
+
+
+def classifier_view(record):
+    """The lane record reduced to the keys the provider-authored classifier knows."""
+    if isinstance(record, dict) and any(k in record for k in LANE_RECORD_METADATA):
+        return {k: v for k, v in record.items() if k not in LANE_RECORD_METADATA}
+    return record
 
 
 def digest(value):
@@ -523,7 +533,7 @@ class Ledger:
         if not isinstance(record, dict) or record.get("provider") != provider:
             raise Refused("record.provider must match provider")
         try:
-            classified = lane_readiness(record, time.time())
+            classified = lane_readiness(classifier_view(record), time.time())
         except ValueError as exc:
             raise Refused("invalid lane record: " + str(exc)[:120]) from exc
         with self.tx() as con:

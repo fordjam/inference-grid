@@ -23,7 +23,7 @@ from pathlib import Path
 
 from ..flash_window import flash_window
 from ..lane_readiness import lane_readiness
-from ..ledger import ACTIVE, Refused, digest, lanes as lane_records, select
+from ..ledger import ACTIVE, Refused, classifier_view, digest, lanes as lane_records, select
 from ..ledger import aliases as alias_records, attempts as attempt_records
 from ..worker import execute
 from .guard import check_input
@@ -31,6 +31,18 @@ from .task import validate_task
 from ..lanes.select import select_lane
 
 RUNNER = [sys.executable, "-m", "inference_grid.lanes.runner"]
+
+# How long a model stays excluded from a lane after the endpoint answered 401/403 for it.
+MODEL_REFUSAL_TTL = 24 * 3600
+
+
+def model_unsupported_until(record, model, now):
+    """The instant until which the lane's endpoint has refused this model, else None."""
+    meta = record.get("unsupported_until") if isinstance(record, dict) else None
+    until = meta.get(model) if isinstance(meta, dict) else meta
+    if type(until) in (int, float) and until > now:
+        return until
+    return None
 
 
 def load_board(board_dir):
@@ -161,10 +173,14 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None):
             view[lane_id] = {"state": "stale"}
             continue
         try:
-            state = lane_readiness(record, now)["state"]
+            state = lane_readiness(classifier_view(record), now)["state"]
         except ValueError:
             view[lane_id] = {"state": "invalid"}
             continue
+        if state == "ready" and model_unsupported_until(record, lane["model"], now):
+            # The endpoint has refused this model (401/403) recently: excluded until the
+            # recorded instant expires, without bending the provider-authored classifier.
+            state = "unqualified"
         if state == "ready" and accounts_by_lane:
             account = alias_map.get(accounts_by_lane.get(lane_id))
             if account is not None and active.get(account, 0) >= lane.get("max_concurrency", 1):
@@ -333,6 +349,42 @@ def deadline_hold(ledger, packet_dir, aid):
         return False
     supervisor = verdict.get("supervisor") if isinstance(verdict, dict) else None
     return isinstance(supervisor, dict) and supervisor.get("reason") == "wall_deadline"
+
+
+def note_model_refusal(ledger, lanes, lane_id, packet_dir, aid):
+    """Record unsupported_until when the endpoint answered 401/403 for the lane's model.
+
+    The verdict beside the held attempt is the only evidence read; the merge keeps the
+    stored record classifier-valid and drops already-expired entries.
+    """
+    try:
+        verdict = json.loads((Path(packet_dir) / "attempts" / aid / "verdict.json").read_text())
+    except (OSError, ValueError):
+        return
+    refusal = verdict.get("refusal") if isinstance(verdict, dict) else None
+    if not isinstance(refusal, str) or not (
+        "endpoint returned HTTP 401" in refusal or "endpoint returned HTTP 403" in refusal
+    ):
+        return
+    with ledger.engine.connect() as con:
+        row = con.execute(
+            select(lane_records).where(lane_records.c.provider == lane_id)
+        ).mappings().first()
+    if row is None:
+        return
+    record = dict(row["record"])
+    meta = record.get("unsupported_until")
+    meta = dict(meta) if isinstance(meta, dict) else {}
+    now = time.time()
+    meta = {model: until for model, until in meta.items() if until > now}
+    meta[lanes[lane_id]["model"]] = now + MODEL_REFUSAL_TTL
+    record["unsupported_until"] = meta
+    try:
+        ledger.record_lane(lane_id, record)
+    except Refused:
+        # A stale or invalid stored record must not turn a hold into a crash; the
+        # operator resolves the hold and the next collector reading repairs the record.
+        pass
 
 
 def verify_followup(task, packet_dir, held_attempt_dir):
@@ -730,7 +782,9 @@ def tick(
             continue
         if state != "completed":
             # The attempt is held in the ledger; outcomes attach after the operator resolves
-            # it, so the board only records the block with the hold reason.
+            # it, so the board only records the block with the hold reason. A 401/403 from
+            # the endpoint also excludes the model from this lane for a day.
+            note_model_refusal(ledger, lanes, lane_id, packet_dir, aid)
             save_task(
                 path,
                 task,
