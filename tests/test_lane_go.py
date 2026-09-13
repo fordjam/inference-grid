@@ -334,6 +334,78 @@ class GoLaneTests(unittest.TestCase):
         self.assertEqual((verdict["thinking_tokens"], verdict["max_tokens"]), (6000, 10000))
         self.assertTrue((attempt / "artifacts/out.py").is_file())
 
+    def test_deepseek_v4_flash_gets_the_tier_policy(self):
+        # deepseek-v4-flash is in the capability map like kimi-k3: the policy tier rides
+        # on reasoning_effort, whatever the model.
+        for thinking, effort in ((None, "low"), (6000, "high"), (13000, "max")):
+            request, attempt = self.attempt(expected=["out.py"])
+            sender = self.send(self.native(model="deepseek-v4-flash"))
+            payload = dict(request, model="deepseek-v4-flash")
+            if thinking is not None:
+                payload["thinking_tokens"] = thinking
+            receipt, verdict = go.run(payload, self.lane, attempt, send=sender)
+            self.assertIsNone(verdict["refusal"], verdict)
+            self.assertEqual(sender.recorded["body"]["reasoning_effort"], effort, thinking)
+            self.assertEqual(verdict["reasoning_effort"], effort, thinking)
+            self.assertEqual(receipt["actual_model"], "deepseek-v4-flash")
+
+    def test_deepseek_reasoning_overrun_is_classified(self):
+        request, attempt = self.attempt(expected=["out.py"])
+        response = self.native(model="deepseek-v4-flash", finish_reason="length", content="")
+        response["usage"] = {"completion_tokens": 9000, "reasoning_tokens": 9000}
+        receipt, verdict = go.run(
+            dict(request, model="deepseek-v4-flash", thinking_tokens=6000),
+            self.lane,
+            attempt,
+            send=self.send(response),
+        )
+        self.assertIsNone(receipt)
+        self.assertEqual(
+            verdict["refusal"],
+            "reasoning_overrun: finish_reason length with no content"
+            " (reasoning_tokens 9000 of max_tokens 10000)",
+        )
+
+    def test_deepseek_served_by_an_unexpected_model_is_refused(self):
+        request, attempt = self.attempt(expected=["out.py"])
+        receipt, verdict = go.run(
+            dict(request, model="deepseek-v4-flash"),
+            self.lane,
+            attempt,
+            send=self.send(self.native(model="glm-5.3-flash")),
+        )
+        self.assertEqual(
+            (receipt, verdict["refusal"]), (None, "request served by an unexpected model")
+        )
+
+    def test_a_region_optin_403_is_its_own_refusal(self):
+        import io
+
+        request, attempt = self.attempt(expected=["out.py"])
+        error = urllib.error.HTTPError(
+            ENDPOINT,
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b'{"error": {"message": "China hosting opt-in disabled"}}'),
+        )
+        receipt, verdict = go.run(request, self.lane, attempt, send=self.send(error))
+        self.assertIsNone(receipt)
+        self.assertEqual(
+            verdict["refusal"],
+            "region_optin_required: enable China hosting in the Go console",
+        )
+        # The body itself is never recorded; only the fixed classification is.
+        self.assertNotIn("disabled", json.dumps(verdict))
+        self.assertFalse((attempt / "native.json").exists())
+        # A 403 about something else keeps the bare status refusal.
+        request, attempt = self.attempt(expected=["out.py"])
+        error = urllib.error.HTTPError(
+            ENDPOINT, 403, "Forbidden", {}, io.BytesIO(b'{"error": "quota exhausted"}')
+        )
+        _, verdict = go.run(request, self.lane, attempt, send=self.send(error))
+        self.assertEqual(verdict["refusal"], "endpoint returned HTTP 403")
+
     def test_reasoning_effort_follows_the_tier_policy(self):
         # kimi-k3 is in the capability map, so the tier the policy picks for the task's
         # thinking budget is sent as reasoning_effort: absent or <=4000 low, <=12000

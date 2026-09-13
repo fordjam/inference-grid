@@ -27,10 +27,17 @@ MAX_CONTENT = 40000
 # Generous room for the reply itself when a thinking budget caps max_tokens; the reply
 # is a single JSON object.
 CONTENT_ALLOWANCE = 4000
-# Capability map: the reasoning_effort values the endpoint's documented request schema
-# honours per model (OpenCode Zen chat-completions; kimi-k3 reasons by default at max).
-# Only kimi-k3 is recorded; every other model sends nothing until the operator adds it.
-REASONING_EFFORT = {"kimi-k3": ("low", "high", "max")}
+# Capability map: the reasoning_effort values the model's documented request schema
+# honours on this OpenAI-compatible endpoint. kimi-k3: low/high/max, endpoint default
+# max (OpenCode Zen docs). deepseek-v4-flash: DeepSeek's own ChatCompletions schema
+# documents a thinking toggle plus reasoning_effort none/low/high/max, default high —
+# "none" would disable thinking, which review tasks never want; whether the Go gateway
+# passes the field through for the model is unverified until the first canary, and the
+# verdict plus unsupported_until will say.
+REASONING_EFFORT = {
+    "kimi-k3": ("low", "high", "max"),
+    "deepseek-v4-flash": ("low", "high", "max"),
+}
 # The coordinator's policy mapping a task's thinking_tokens to an effort tier
 # (docs/BOARD.md): absent or at most 4000 → low, up to 12000 → high, beyond → max.
 EFFORT_TIERS = ((4000, "low"), (12000, "high"))
@@ -143,6 +150,22 @@ def qualify(response, model):
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str) or not content.strip():
         return "empty terminal text"
+    return None
+
+
+def region_optin_refusal(error):
+    """`region_optin_required` when a 403 body says the hosting opt-in is off; else None.
+
+    The body is read only to classify, bounded and never recorded: the operator should
+    see "enable China hosting in the Go console", not a bare 403 or the error page.
+    """
+    try:
+        body = error.read(65536)
+    except Exception:
+        return None
+    text = body.decode("utf-8", "ignore").lower()
+    if any(marker in text for marker in ("region", "opt-in", "opt_in", "china")):
+        return "region_optin_required: enable China hosting in the Go console"
     return None
 
 
@@ -261,8 +284,11 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
         else:
             response = http_send(body, key, session, transport_timeout)
     except urllib.error.HTTPError as exc:
-        # The status code and a fixed reason only; the error body is never read or recorded.
+        # The status code and a fixed reason only; the error body is read solely to
+        # classify a hosting opt-in 403 and is never recorded.
         verdict["refusal"] = f"endpoint returned HTTP {exc.code}"
+        if exc.code == 403:
+            verdict["refusal"] = region_optin_refusal(exc) or verdict["refusal"]
         return None, verdict
     except ResponseTooLarge as exc:
         verdict["refusal"] = str(exc)

@@ -425,13 +425,17 @@ def hold_block_reason(aid, verdict, state):
 def note_model_refusal(ledger, lanes, lane_id, packet_dir, aid):
     """Record unsupported_until when the endpoint answered 401/403 for the lane's model.
 
-    The verdict beside the held attempt is the only evidence read; the merge keeps the
-    stored record classifier-valid and drops already-expired entries.
+    The verdict beside the held attempt is the only evidence read; a region/opt-in 403
+    (its own region_optin_required refusal) counts the same: the operator enables the
+    hosting opt-in, and until then the model stays excluded without re-probing it. The
+    merge keeps the stored record classifier-valid and drops already-expired entries.
     """
     verdict = read_verdict(packet_dir, aid)
     refusal = verdict.get("refusal") if verdict else None
     if not isinstance(refusal, str) or not (
-        "endpoint returned HTTP 401" in refusal or "endpoint returned HTTP 403" in refusal
+        "endpoint returned HTTP 401" in refusal
+        or "endpoint returned HTTP 403" in refusal
+        or refusal.startswith("region_optin_required")
     ):
         return
     with ledger.engine.connect() as con:

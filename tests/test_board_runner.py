@@ -1289,6 +1289,59 @@ def test_unsupported_until_expires_and_ignores_other_models(world):
     assert view["go"]["state"] == "ready"
 
 
+def test_a_region_optin_refusal_excludes_the_model_until_expiry(world, monkeypatch):
+    # DeepSeek's 403 says the hosting opt-in is off: its own region_optin_required
+    # refusal, recorded per model in the lane record like any other 403.
+    (world["board"] / "copy-wrong.json").unlink()
+    lanes = dict(world["lanes"])
+    lanes["go"] = dict(lanes["go"], model="deepseek-v4-flash")
+    world["ledger"].configure_account(
+        "ds-acct",
+        1,
+        {"five_hour": 10, "weekly": 20},
+        time.time() + 600,
+        ["deepseek-v4-flash"],
+        ["ds-alias"],
+    )
+    refusing = world["lanes_path"].parent / "region_refusing_adapter.py"
+    refusing.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "request = json.load(sys.stdin)\n"
+        "attempt = Path(request['output_directory']).parent\n"
+        "verdict = {'refusal': 'region_optin_required: enable China hosting"
+        " in the Go console'}\n"
+        "(attempt / 'verdict.json').write_text(json.dumps(verdict))\n"
+        "sys.exit(1)\n"
+    )
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(refusing)])
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        lanes,
+        world["lanes_path"],
+        {"go": "ds-alias"},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "held"
+    view = runner.readiness_view(world["ledger"], lanes, now + 1, {"go": "ds-alias"})
+    assert view["go"]["state"] == "unqualified"
+    with world["ledger"].engine.connect() as con:
+        from inference_grid.ledger import lanes as lane_records, select
+
+        record = (
+            con.execute(select(lane_records).where(lane_records.c.provider == "go"))
+            .mappings()
+            .one()["record"]
+        )
+    until = record["unsupported_until"]["deepseek-v4-flash"]
+    assert now + 1 < until <= now + runner.MODEL_REFUSAL_TTL + 5
+
+
 def test_lane_records_carry_metadata_without_confusing_the_classifier(world):
     # record_lane stores the routing metadata while lane_readiness keeps classifying the
     # strict key set, so doctor's lane view stays valid too.

@@ -272,3 +272,36 @@ def test_suggest_skips_tasks_whose_chain_already_moved_on(tmp_path):
     assert "suggest" not in rows["unrelated"]
     # Without suggest the shape stays the plain row list.
     assert isinstance(board_status(ledger, board), list)
+
+
+def test_a_region_optin_refusal_is_shown_and_never_suggested(tmp_path):
+    # The operator should see "enable China hosting in the Go console" in board-status,
+    # and --suggest must not offer a blind retry of a region-blocked hold.
+    board = tmp_path / "grid/board"
+    board.mkdir(parents=True)
+    write_task(board, "stuck", "blocked")
+    url = "sqlite:///" + str(tmp_path / "ledger.sqlite")
+    ledger = Ledger(url)
+    ledger.initialize()
+    account = "go-" + uuid.uuid4().hex[:8]
+    ledger.configure_account(
+        account, 1, {"five_hour": 10, "weekly": 20}, time.time() + 600, ["glm-5.3-flash"]
+    )
+    aid, generation = seed_attempt(ledger, account, "seed-1", tmp_path / "ws")
+    ledger.start(aid, generation)
+    ledger.hold(aid, "Refused: region")
+    task = json.loads((board / "stuck.json").read_text())
+    task["blocked_reason"] = f"attempt {aid} held; resolve with evidence"
+    (board / "stuck.json").write_text(json.dumps(task))
+    attempt_dir = tmp_path / "ws" / aid
+    attempt_dir.mkdir(parents=True)
+    (attempt_dir / "verdict.json").write_text(
+        json.dumps({"refusal": "region_optin_required: enable China hosting in the Go console"})
+    )
+    report = board_status(ledger, board, suggest=True)
+    rows = {r["id"]: r for r in report["rows"]}
+    assert rows["stuck"]["attempt"]["refusal"] == (
+        "region_optin_required: enable China hosting in the Go console"
+    )
+    assert "suggest" not in rows["stuck"]
+    assert report["skipped"] == []
