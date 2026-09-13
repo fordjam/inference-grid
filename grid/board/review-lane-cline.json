@@ -1,0 +1,30 @@
+{
+ "id": "review-lane-cline",
+ "category": "independent_review",
+ "brief": "grid/briefs/review-lane-cline.txt",
+ "inputs": [
+  "grid/briefs/review-lane-cline.txt",
+  "grid/board/review/lane-cline/cline.py",
+  "grid/briefs/lane-cline.txt",
+  "grid/tests/test_cline_lane.py",
+  "grid/tests/test_review_schema.py"
+ ],
+ "tests": [
+  "grid/tests/test_review_schema.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "cline",
+  "zai"
+ ],
+ "author_family": "glm",
+ "budget": {
+  "wall_seconds": 600,
+  "output_bytes": 2000000,
+  "thinking_tokens": 6000
+ },
+ "state": "ready",
+ "blocked_reason": null
+}

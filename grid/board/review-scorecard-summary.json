@@ -1,0 +1,30 @@
+{
+ "id": "review-scorecard-summary",
+ "category": "independent_review",
+ "brief": "grid/briefs/review-scorecard-summary.txt",
+ "inputs": [
+  "grid/briefs/review-scorecard-summary.txt",
+  "grid/board/review/scorecard-summary/scorecard_summary.py",
+  "grid/briefs/scorecard-summary.txt",
+  "grid/tests/test_scorecard_summary.py",
+  "grid/tests/test_review_schema.py"
+ ],
+ "tests": [
+  "grid/tests/test_review_schema.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "cline",
+  "zai"
+ ],
+ "author_family": "glm",
+ "budget": {
+  "wall_seconds": 600,
+  "output_bytes": 2000000,
+  "thinking_tokens": 6000
+ },
+ "state": "ready",
+ "blocked_reason": null
+}

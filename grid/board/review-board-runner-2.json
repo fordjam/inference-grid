@@ -1,0 +1,30 @@
+{
+ "id": "review-board-runner-2",
+ "category": "independent_review",
+ "brief": "grid/briefs/review-board-runner-2.txt",
+ "inputs": [
+  "grid/briefs/review-board-runner-2.txt",
+  "docs/BOARD.md",
+  "src/inference_grid/board/runner.py",
+  "src/inference_grid/board/task.py",
+  "tests/test_board_runner.py",
+  "grid/tests/test_review_schema.py"
+ ],
+ "tests": [
+  "grid/tests/test_review_schema.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "zai"
+ ],
+ "author_family": "claude",
+ "budget": {
+  "wall_seconds": 600,
+  "output_bytes": 2000000,
+  "thinking_tokens": 6000
+ },
+ "state": "ready",
+ "blocked_reason": null
+}
