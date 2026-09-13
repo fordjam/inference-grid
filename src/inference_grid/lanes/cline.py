@@ -94,6 +94,34 @@ def parse_rows(raw):
     return rows
 
 
+def ordered_snapshots(snapshots_dir):
+    """Snapshot directories sorted oldest to newest by their iter-N suffix."""
+    try:
+        children = list(Path(snapshots_dir).iterdir())
+    except OSError:
+        return []
+
+    def order(path):
+        stem = path.name.rsplit("-", 1)[-1]
+        return (int(stem) if stem.isdigit() else -1, path.name)
+
+    return [child for child in sorted(children, key=order) if child.is_dir()]
+
+
+def snapshot_iteration(path):
+    stem = Path(path).name.rsplit("-", 1)[-1]
+    return int(stem) if stem.isdigit() else None
+
+
+def newest_complete_snapshot(snapshots_dir, names):
+    """The newest iter-N directory holding every expected artifact, else None."""
+    best = None
+    for child in ordered_snapshots(snapshots_dir):
+        if all((child / n).is_file() for n in names):
+            best = child
+    return best
+
+
 def newest_snapshot_with(snapshots_dir, name):
     """The newest iter-N directory holding name (a passing file the agent deleted), else None."""
     try:
@@ -219,6 +247,20 @@ def run(
     except ValueError as exc:
         verdict["refusal"] = str(exc)
         return None, verdict
+    # Deletion guard: once some iteration_end snapshot held every expected artifact, that
+    # state is authoritative. If the workspace later lost a file (a passing artifact
+    # destroyed mid-run), restore the newest complete snapshot over the workspace and
+    # record which iteration served, so the deletion cannot erase the evidence. The run
+    # itself is already over by the time the controller sees the snapshots.
+    restored_from = None
+    if any(not (work / n).is_file() for n in names):
+        complete = newest_complete_snapshot(snapshots, names)
+        if complete is not None:
+            for n in names:
+                if not (work / n).is_file():
+                    shutil.copy2(complete / n, work / n)
+            restored_from = snapshot_iteration(complete)
+    verdict["restored_from_snapshot"] = restored_from
     # An artifact still in the workspace comes from there; otherwise the newest snapshot
     # that still holds it serves, and the verdict records which place served each name.
     sources = {}

@@ -55,6 +55,16 @@ if "snapshot" in prompt:
     while not os.path.exists(served) and time.time() < deadline:
         time.sleep(0.05)
     os.unlink(target)
+if "removelater" in prompt:
+    # Snapshot iteration 1 holds the file, then a later iteration deletes it: the
+    # controller must restore the last complete snapshot, not lose the artifact.
+    served = os.path.join(cwd, os.pardir, "snapshots", "iter-1", "out.py")
+    deadline = time.time() + 10
+    while not os.path.exists(served) and time.time() < deadline:
+        time.sleep(0.05)
+    os.unlink(target)
+    emit({"event": {"type": "iteration_start", "iteration": 2}})
+    emit({"event": {"type": "iteration_end", "iteration": 2}})
 if "wrongmodel" in prompt:
     model = "wrong-model"
 if "noterminal" not in prompt:
@@ -124,14 +134,29 @@ class ClineLaneTests(unittest.TestCase):
         self.assertEqual(verdict["progress"]["output_tokens_reported"], 12)
         self.assertEqual(verdict["artifact_sources"], {"out.py": "work"})
 
+    def test_deleted_after_a_complete_snapshot_is_restored(self):
+        # A passing artifact destroyed in a later iteration cannot erase the evidence:
+        # the newest snapshot that held everything is restored into the workspace and
+        # the verdict records which iteration served.
+        request, attempt = self.attempt("write out.py, then removelater")
+        receipt, verdict = self.run_lane(request, attempt)
+        self.assertIsNone(verdict["refusal"], verdict)
+        self.assertEqual(verdict["restored_from_snapshot"], 1)
+        self.assertTrue((attempt / "work/out.py").is_file())
+        self.assertEqual((attempt / "artifacts/out.py").read_text(), "VALUE = 1\n")
+        self.assertEqual(verdict["artifact_sources"], {"out.py": "work"})
+
     def test_success_served_from_snapshot(self):
         request, attempt = self.attempt("write out.py, then snapshot it")
         receipt, verdict = self.run_lane(request, attempt)
         self.assertIsNone(verdict["refusal"])
-        self.assertFalse((attempt / "work/out.py").exists())
+        # The deletion guard restores the last complete snapshot into the workspace, so
+        # the published bytes always have a workspace-side provenance too.
+        self.assertTrue((attempt / "work/out.py").is_file())
         self.assertEqual([a["path"] for a in receipt["artifacts"]], ["out.py"])
         self.assertEqual((attempt / "artifacts/out.py").read_text(), "VALUE = 1\n")
-        self.assertEqual(verdict["artifact_sources"], {"out.py": "iter-1"})
+        self.assertEqual(verdict["artifact_sources"], {"out.py": "work"})
+        self.assertEqual(verdict["restored_from_snapshot"], 1)
 
     def test_missing_credential(self):
         request, attempt = self.attempt("write out.py please")

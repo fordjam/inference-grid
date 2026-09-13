@@ -130,7 +130,7 @@ class ClineLaneTests(unittest.TestCase):
         self.assertEqual(verdict["outcome"], "native_complete")
         self.assertEqual(verdict["artifact_sources"], {"out.py": "work"})
 
-    def test_deleted_artifact_is_served_from_the_newest_snapshot(self):
+    def test_deleted_artifact_is_restored_from_the_complete_snapshot(self):
         attempt_dir, input_dir, output_dir = self.attempt("snap")
         self.stage(input_dir, "servefromsnapshot")
         receipt, verdict = cline.run(
@@ -138,9 +138,11 @@ class ClineLaneTests(unittest.TestCase):
             home=str(self.base / "snap" / "home"),
         )
         self.assertIsNotNone(receipt, verdict)
-        self.assertFalse((attempt_dir / "work" / "out.py").exists())
+        # The deletion guard restores the last complete snapshot into the workspace.
+        self.assertTrue((attempt_dir / "work" / "out.py").is_file())
         self.assertEqual((output_dir / "out.py").read_text(), "VALUE = 7\n")
-        self.assertEqual(verdict["artifact_sources"], {"out.py": "iter-1"})
+        self.assertEqual(verdict["artifact_sources"], {"out.py": "work"})
+        self.assertEqual(verdict["restored_from_snapshot"], 1)
 
     def test_missing_or_wrong_mode_credential_refuses_without_running(self):
         attempt_dir, input_dir, output_dir = self.attempt("nocred")
