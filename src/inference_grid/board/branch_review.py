@@ -25,7 +25,7 @@ from .runner import REVIEW_BUDGET, review_brief_text
 from .task import validate_task
 
 # Paths a review may stage, relative to the repository root; the coordinator extends it.
-ALLOWED_PREFIXES = ("src/", "api/", "web/", "tests/", "tools/", "docs/", "scripts/", "grid/")
+ALLOWED_PREFIXES = (".gitignore", "requirements-test.txt", "requirements.txt", "pyproject.toml", "src/", "api/", "web/", "tests/", "tools/", "docs/", "scripts/", "grid/")
 
 # Co-Authored-By trailer name → the family select_lane uses for cross-family exclusion.
 TRAILER_FAMILIES = {
