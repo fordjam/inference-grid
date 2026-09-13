@@ -105,11 +105,17 @@ def board_status(ledger, board_dir, suggest=False):
 
     With suggest, a blocked task whose attempt refusal starts with transport_error and
     whose artifacts are absent also carries the pre-filled board-new retry JSON
-    (handoff-4 B3) — print only, nothing is authored here.
+    (handoff-4 B3) — print only, nothing is authored here. A blocked task whose id is
+    the predecessor of an existing task (`<id>-<n>` on the board) is never offered a
+    retry: its chain already moved on, whatever the reason text says (old reasons
+    predate the enforced `superseded:` convention); such tasks are named in the
+    `skipped` list with their successor. The suggest shape is
+    {"rows": [...], "skipped": [...]}; without suggest, the plain row list.
     """
     board = load_board(board_dir)
     needs_ledger = any(t["state"] == "blocked" for _, t in board.values())
     rows = []
+    skipped = []
     for tid, (path, task) in board.items():
         row = {
             "id": tid,
@@ -118,6 +124,14 @@ def board_status(ledger, board_dir, suggest=False):
             "author_family": task["author_family"],
             "blocked_reason": (task["blocked_reason"] or "")[:80] or None,
         }
+        successors = sorted(
+            other
+            for other in board
+            if other != tid and re.fullmatch(re.escape(tid) + r"-\d+", other)
+        )
+        moved_on = suggest and bool(successors)
+        if moved_on:
+            skipped.append({"task": tid, "successor": successors[0]})
         if task["state"] == "review_pending":
             found = None
             for rid in review_candidates(board_dir, tid):
@@ -136,10 +150,13 @@ def board_status(ledger, board_dir, suggest=False):
                 row["attempt"] = detail
                 if (
                     suggest
+                    and not moved_on
                     and isinstance(detail, dict)
                     and str(detail.get("refusal") or "").startswith("transport_error")
                     and not detail.get("artifacts_present")
                 ):
                     row["suggest"] = retry_suggestion(board_dir, task, detail)
         rows.append(row)
+    if suggest:
+        return {"rows": rows, "skipped": skipped}
     return rows

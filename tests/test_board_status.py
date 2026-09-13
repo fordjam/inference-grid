@@ -184,7 +184,9 @@ def test_suggest_prefills_the_retry_for_transport_dead_tasks(tmp_path):
         json.dumps({"refusal": "transport_error: TimeoutError", "transport_timeout": 400})
     )
     before = {p.name: p.read_bytes() for p in board.glob("*.json")}
-    rows = {r["id"]: r for r in board_status(ledger, board, suggest=True)}
+    report = board_status(ledger, board, suggest=True)
+    assert report["skipped"] == []
+    rows = {r["id"]: r for r in report["rows"]}
     assert rows["slow"]["suggest"] == {
         "board_dir": str(board),
         "project_root": str(tmp_path),
@@ -196,7 +198,8 @@ def test_suggest_prefills_the_retry_for_transport_dead_tasks(tmp_path):
     # A small budget doubles without reaching the cap.
     task["budget"] = {"wall_seconds": 300, "output_bytes": 1000, "thinking_tokens": None}
     (board / "slow.json").write_text(json.dumps(task))
-    rows = {r["id"]: r for r in board_status(ledger, board, suggest=True)}
+    report = board_status(ledger, board, suggest=True)
+    rows = {r["id"]: r for r in report["rows"]}
     assert rows["slow"]["suggest"]["change"] == (
         "wall_seconds 300 -> 600 after transport_error: TimeoutError"
     )
@@ -240,8 +243,32 @@ def test_suggest_skips_holds_that_are_not_transport_dead(tmp_path):
         task = json.loads((board / f"{name}.json").read_text())
         task["blocked_reason"] = f"attempt {aid} held; resolve with evidence"
         (board / f"{name}.json").write_text(json.dumps(task))
-    rows = {r["id"]: r for r in board_status(ledger, board, suggest=True)}
+    report = board_status(ledger, board, suggest=True)
+    rows = {r["id"]: r for r in report["rows"]}
     assert "suggest" not in rows["http"]  # not a transport refusal
     assert "suggest" not in rows["partial"]  # transport refusal, but artifacts exist
+    assert report["skipped"] == []
     rows = {r["id"]: r for r in board_status(ledger, board)}
     assert all("suggest" not in r for r in rows)  # off by default
+
+
+def test_suggest_skips_tasks_whose_chain_already_moved_on(tmp_path):
+    # review-lane-cline was offered a retry although review-lane-cline-2 existed: the
+    # operator's hand-written reason predated the superseded: convention. The id-shape
+    # rule decides — a blocked task with an <id>-<n> successor is never offered one.
+    board = tmp_path / "grid/board"
+    board.mkdir(parents=True)
+    write_task(board, "review-lane-cline", "blocked", reason="held at the wall deadline")
+    write_task(board, "review-lane-cline-2", "ready")
+    write_task(board, "unrelated", "blocked", reason="held; resolve with evidence")
+    ledger = Ledger("sqlite:///" + str(tmp_path / "ledger.sqlite"))
+    ledger.initialize()
+    report = board_status(ledger, board, suggest=True)
+    assert report["skipped"] == [
+        {"task": "review-lane-cline", "successor": "review-lane-cline-2"}
+    ]
+    rows = {r["id"]: r for r in report["rows"]}
+    assert "suggest" not in rows["review-lane-cline"]
+    assert "suggest" not in rows["unrelated"]
+    # Without suggest the shape stays the plain row list.
+    assert isinstance(board_status(ledger, board), list)
