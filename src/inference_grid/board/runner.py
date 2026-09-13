@@ -14,6 +14,7 @@ review-<id> task created for it; acceptance itself stays an operator action.
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -459,6 +460,22 @@ def verify_followup(task, packet_dir, held_attempt_dir):
 
 REVIEW_BUDGET = {"wall_seconds": 600, "output_bytes": 2000000, "thinking_tokens": 6000}
 
+# A line/size/length citation in a finding's expected or observed text.
+SIZE_HINT = re.compile(r"\b(lines?|bytes?|chars?|characters?|size|length)\b", re.IGNORECASE)
+
+
+def advisory_size_finding(finding):
+    """True when a finding's expected and observed texts both cite a line or size budget.
+
+    CONTRIBUTIONS (2026-09-12) records the policy that size hints in a brief are
+    advisory, but a literal reviewer enforces them anyway; the advisory-only tag in the
+    blocked reason lets the operator see a rejection that rests on nothing else. The tag
+    never approves anything — the retry path with the amended brief answers it.
+    """
+    expected = str(finding.get("expected") or "")
+    observed = str(finding.get("observed") or "")
+    return bool(SIZE_HINT.search(expected)) and bool(SIZE_HINT.search(observed))
+
 
 def review_brief_text(task):
     """The exact text sent to the reviewer: what was asked, what to check, verdict schema."""
@@ -477,7 +494,9 @@ def review_brief_text(task):
         "artifact next to the brief requirement it violates. The coordinator's acceptance tests "
         "are staged too; a difference between them and the artifact's own tests is a finding. "
         "Do not report style preferences or hypothetical concerns; mark judgment calls as "
-        'checked and move on. Then decide "approved" if no demonstrated defect changes '
+        'checked and move on. Any line, size or length budget in the original brief is '
+        "advisory: it is a hint, not a requirement, and exceeding it is not a finding. "
+        'Then decide "approved" if no demonstrated defect changes '
         'behavior, otherwise "rejected". OUTPUT FORMAT, mandatory: the entire reply is one '
         'JSON object {"verdict": "approved" or "rejected", "findings": [{"location": '
         '"<file and function>", "input": "<concrete input>", "expected": "<what the '
@@ -876,6 +895,14 @@ def tick(
                     passed = False
                     result = "review_rejected"
                     summary = f"review rejected with {len(findings)} finding(s)"
+                    advisory = [
+                        i for i, f in enumerate(findings, 1) if advisory_size_finding(f)
+                    ]
+                    if advisory:
+                        summary += (
+                            " (finding " + ", ".join(map(str, advisory)) + " advisory-only:"
+                            " rests on the brief's advisory size hint, not a defect)"
+                        )
                     propagate_rejection(board, board_dir, task_id, findings)
         ledger.record_outcome(aid, task["category"], passed, note=(summary or "")[:300])
         if passed:

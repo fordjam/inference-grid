@@ -331,11 +331,82 @@ def test_rejected_review_blocks_the_task(world, monkeypatch):
     task = json.loads((world["board"] / "review-calc.json").read_text())
     assert task["state"] == "blocked"
     assert "review rejected with 1 finding" in task["blocked_reason"]
+    # A behavioral finding is not tagged: the size-hint tag exists for size-only rejections.
+    assert "advisory-only" not in task["blocked_reason"]
     source = json.loads((world["board"] / "calc.json").read_text())
     assert source["state"] == "blocked"
     assert "review rejected" in source["blocked_reason"]
     assert "mod2.py" in source["blocked_reason"] and "VALUE = 2" in source["blocked_reason"]
     # The rejection is recorded as a failed outcome, never an acceptance.
+    card = world["ledger"].scorecard(account=world["account"])
+    assert [(e["category"], e["accepted"], e["attempts"]) for e in card] == [
+        ("independent_review", 0, 1)
+    ]
+
+
+def test_review_brief_says_size_hints_are_advisory():
+    # A literal reviewer enforces the original brief's 45-line hint (live round 2 rejected
+    # a clean artifact on exactly that); the generated brief must state the policy.
+    text = runner.review_brief_text({"id": "x", "artifacts": ["reply.txt"], "brief": "b.txt"})
+    assert "advisory" in text and "not a finding" in text
+    # The output-format rule stays the final sentence; the advisory note comes before it.
+    assert text.index("advisory") < text.index("OUTPUT FORMAT")
+
+
+def test_advisory_size_finding_matches_only_size_citations():
+    assert runner.advisory_size_finding({"expected": "~45 lines", "observed": "51 lines"})
+    assert runner.advisory_size_finding(
+        {"expected": "size under 2 KB", "observed": "length exceeds the budget"}
+    )
+    assert not runner.advisory_size_finding(
+        {"expected": "VALUE = 1", "observed": "VALUE = 2"}
+    )
+    assert not runner.advisory_size_finding(
+        {"expected": "45 lines", "observed": "crashes on empty input"}
+    )
+    assert not runner.advisory_size_finding({})
+
+
+def test_a_size_only_rejection_is_tagged_advisory_only(world, monkeypatch):
+    # A rejection whose single finding cites only the brief's size hint is blocked with
+    # advisory-only in the reason; it is never auto-approved — the retry path answers it.
+    adapter = world["lanes_path"].parent / "size_adapter.py"
+    adapter.write_text(
+        REVIEW_ADAPTER.replace(
+            '"expected": "VALUE = 1"',
+            '"expected": "about 45 lines per the hint"',
+        ).replace(
+            '"observed": "VALUE = 2"',
+            '"observed": "the artifact is 51 lines"',
+        )
+    )
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(adapter)])
+    (world["board"] / "copy-ok.json").unlink()
+    (world["board"] / "copy-wrong.json").unlink()
+    (world["board"] / "x.json").write_text(
+        json.dumps(make_task("x", "brief.txt", state="review_pending"))
+    )
+    (world["board"] / "review-x.json").write_text(
+        json.dumps(make_review_task("review-x", "brief-reject.txt"))
+    )
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "review_rejected"
+    task = json.loads((world["board"] / "review-x.json").read_text())
+    assert task["state"] == "blocked"
+    assert "advisory-only" in task["blocked_reason"]
+    source = json.loads((world["board"] / "x.json").read_text())
+    assert source["state"] == "blocked"  # nothing auto-approved
     card = world["ledger"].scorecard(account=world["account"])
     assert [(e["category"], e["accepted"], e["attempts"]) for e in card] == [
         ("independent_review", 0, 1)
