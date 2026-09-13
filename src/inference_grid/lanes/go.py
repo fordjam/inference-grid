@@ -138,7 +138,7 @@ def expected_code(content):
     return code, None
 
 
-def run(request, lane, attempt_dir, *, send=None, max_tokens=6000, timeout=150):
+def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=150):
     """Execute one attempt; return (receipt or None, verdict). The caller prints the receipt."""
     attempt_dir = Path(attempt_dir)
     work = attempt_dir / "work"
@@ -194,14 +194,19 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=6000, timeout=150):
     if problem:
         verdict["refusal"] = problem
         return None, verdict
-    code, problem = expected_code(response["choices"][0]["message"]["content"])
-    if problem:
-        verdict["refusal"] = problem
-        return None, verdict
     name, problem = expected_artifact(work)
     if problem:
         verdict["refusal"] = problem
         return None, verdict
+    content = response["choices"][0]["message"]["content"]
+    if name == "reply.txt":
+        # Reply-only tasks (reviews) publish the response text itself; no code schema applies.
+        code = content.strip()
+    else:
+        code, problem = expected_code(content)
+        if problem:
+            verdict["refusal"] = problem
+            return None, verdict
     data = code.encode()
     output = Path(request["output_directory"])
     target = output / name

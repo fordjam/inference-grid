@@ -111,7 +111,7 @@ class GoLaneTests(unittest.TestCase):
                     "model": MODEL,
                     "messages": [{"role": "user", "content": "write the module"}],
                     "stream": False,
-                    "max_tokens": 6000,
+                    "max_tokens": 16000,
                 },
                 "key": KEY,
                 "session": "a",
@@ -249,3 +249,42 @@ class GoLaneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplyModeTests(unittest.TestCase):
+    def test_reply_txt_publishes_raw_content_without_code_schema(self):
+        tmp = tempfile.TemporaryDirectory(dir="/private/tmp")
+        try:
+            root = Path(tmp.name)
+            cred = root / "auth.json"
+            cred.write_text(json.dumps({"opencode-go": {"type": "api", "key": "k" * 40}}))
+            cred.chmod(0o600)
+            attempt = root / "attempt"
+            (attempt / "inputs").mkdir(parents=True)
+            (attempt / "artifacts").mkdir()
+            (attempt / "inputs/brief.txt").write_text("review this")
+            (attempt / "inputs/expected.json").write_text(json.dumps(["reply.txt"]))
+            request = {
+                "attempt": "a",
+                "generation": 1,
+                "model": "kimi-k3",
+                "manifest_sha256": "m" * 64,
+                "input_directory": str(attempt / "inputs"),
+                "output_directory": str(attempt / "artifacts"),
+            }
+            verdict_text = json.dumps({"verdict": "approved", "findings": [], "checked": ["x"]})
+
+            def send(body, key, session, timeout):
+                return {
+                    "model": "kimi-k3",
+                    "choices": [{"finish_reason": "stop", "message": {"content": verdict_text}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 2},
+                }
+
+            receipt, verdict = go.run(
+                request, {"credential_path": str(cred), "wall_seconds": 60}, attempt, send=send
+            )
+            self.assertIsNotNone(receipt, verdict)
+            self.assertEqual((attempt / "artifacts/reply.txt").read_text(), verdict_text)
+        finally:
+            tmp.cleanup()

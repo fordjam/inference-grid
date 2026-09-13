@@ -156,6 +156,9 @@ def stage_packet(project_root, task, packet_dir):
             relative = "brief.txt"
         else:
             relative = name if tree else Path(name).name
+            if relative == "brief.txt":
+                # A review stages the original brief beside its own; keep both readable.
+                relative = "original-brief.txt"
         if relative in manifest:
             raise Refused(f"{task['id']}: staged input names must not collide: {relative}")
         target = input_dir / relative
@@ -308,7 +311,11 @@ def review_brief_text(task):
         "You are an independent reviewer for task review-" + task["id"] + ". "
         "The artifact file(s) " + artifacts + " were authored "
         "by one provider lane against the original brief, which is staged here as "
-        + Path(task["brief"]).name
+        + (
+            "original-brief.txt"
+            if Path(task["brief"]).name == "brief.txt"
+            else Path(task["brief"]).name
+        )
         + ". Read every staged file first. Review the artifact against the original brief only: "
         "whether each stated requirement is met, and defects you can demonstrate by quoting the "
         "artifact next to the brief requirement it violates. The coordinator's acceptance tests "
@@ -376,6 +383,106 @@ def create_review_task(board_dir, project_root, task, lane_id, lanes, output_dir
     validate_task(review)
     review_path.write_text(json.dumps(review, indent=1) + "\n")
     return review, "created " + review_id
+
+
+def write_source_link(board_dir, task, aid, lane_id, lanes, receipt_digest):
+    """Sidecar linking a review to the attempt it judges; the task schema itself stays fixed."""
+    stage = Path(board_dir) / "review" / task["id"]
+    stage.mkdir(parents=True, exist_ok=True)
+    (stage / "source.json").write_text(
+        json.dumps(
+            {
+                "task": task["id"],
+                "attempt": aid,
+                "lane": lane_id,
+                "family": lanes[lane_id]["family"],
+                "receipt_digest": receipt_digest,
+                "artifacts": task["artifacts"],
+            },
+            indent=1,
+        )
+        + "\n"
+    )
+
+
+def receipt_digest_of(ledger, aid):
+    for row in ledger.status():
+        if row["id"] == aid and row.get("receipt"):
+            return digest(row["receipt"])
+    return None
+
+
+def land_in_inbox(project_root, task, artifact_dir, record):
+    """Commit accepted artifacts and their record to the project's grid/inbox branch.
+
+    A separate worktree under ~/.grid-workspaces/inbox keeps the operator's checkout untouched.
+    Tree tasks land at their project paths; flat tasks under grid/inbox/<task-id>/. Nothing is
+    pushed or merged; returns a short note.
+    """
+    project_root = Path(project_root)
+    if not (project_root / ".git").exists():
+        return "project is not a git repository; artifacts left in the packet"
+    worktree = Path.home() / ".grid-workspaces" / "inbox" / project_root.name
+    git = ["git", "-C", str(project_root)]
+    if not worktree.exists():
+        branches = subprocess.run(
+            git + ["branch", "--list", "grid/inbox"], capture_output=True, text=True
+        )
+        args = ["worktree", "add", str(worktree)]
+        args += ["grid/inbox"] if branches.stdout.strip() else ["-b", "grid/inbox", "HEAD"]
+        done = subprocess.run(git + args, capture_output=True, text=True, timeout=120)
+        if done.returncode != 0:
+            return "inbox worktree could not be created: " + done.stderr.strip()[:200]
+    tree = tree_task(task)
+    for name in task["artifacts"]:
+        relative = name if tree else "grid/inbox/" + task["id"] + "/" + Path(name).name
+        source = Path(artifact_dir) / (name if tree else Path(name).name)
+        target = worktree / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    record_path = worktree / "grid" / "inbox" / (task["id"] + ".json")
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps(record, indent=1) + "\n")
+    wt = ["git", "-C", str(worktree)]
+    subprocess.run(wt + ["add", "-A"], capture_output=True, timeout=60)
+    message = f"grid: accept {task['id']} ({record.get('lane')}, attempt {record.get('attempt')})"
+    done = subprocess.run(
+        wt + ["commit", "-q", "-m", message], capture_output=True, text=True, timeout=60
+    )
+    if done.returncode != 0:
+        return "inbox commit failed: " + (done.stderr or done.stdout).strip()[:200]
+    return "landed on grid/inbox"
+
+
+def accept_reviewed(board_dir, project_root, ledger, lanes, review_lane, review_task, result):
+    """An approved review accepts the source attempt in the ledger and lands it on the inbox."""
+    source_id = review_task["id"][len("review-") :]
+    link_path = Path(board_dir) / "review" / source_id / "source.json"
+    source_path = Path(board_dir) / (source_id + ".json")
+    if not link_path.is_file() or not source_path.is_file():
+        return result + "; source link missing, nothing accepted"
+    link = json.loads(link_path.read_text())
+    source_task = validate_task(json.loads(source_path.read_text()))
+    reviewer_family = lanes[review_lane]["family"]
+    try:
+        ledger.accept(link["attempt"], link["receipt_digest"], reviewer_family, "approved")
+    except Refused as exc:
+        return result + "; accept refused: " + str(exc)[:120]
+    packet_artifacts = None
+    for candidate in sorted(Path(source_path).parent.glob("review/" + source_id)):
+        packet_artifacts = candidate
+    record = {
+        "task": source_id,
+        "attempt": link["attempt"],
+        "lane": link["lane"],
+        "author_family": link["family"],
+        "reviewer_family": reviewer_family,
+        "review_task": review_task["id"],
+        "receipt_digest": link["receipt_digest"],
+    }
+    note = land_in_inbox(project_root, source_task, packet_artifacts, record)
+    save_task(source_path, source_task, state="accepted", blocked_reason=None)
+    return result + "; accepted; " + note
 
 
 def tick(
@@ -544,10 +651,17 @@ def tick(
                 created, note = create_review_task(
                     board_dir, project_root, task, lane_id, lanes, output_dir
                 )
+                write_source_link(
+                    board_dir, task, aid, lane_id, lanes, receipt_digest_of(ledger, aid)
+                )
                 if created is None and note != "review task already exists":
                     result = ("passed; review task not created: " + note)[:200]
             else:
                 next_state = "passed"
+                if task["id"].startswith("review-"):
+                    result = accept_reviewed(
+                        board_dir, project_root, ledger, lanes, lane_id, task, result
+                    )
             save_task(path, task, state=next_state, blocked_reason=None)
         else:
             if result == "failed_tests":

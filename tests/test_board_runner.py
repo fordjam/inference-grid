@@ -530,3 +530,102 @@ def test_tree_task_keeps_paths_and_discovers_tests(world):
         (packet / "input/expected.json").read_text()
     ) == ["pkg/mod2.py"]
     assert (packet / "scratch/pkg/mod2.py").read_text() == "VALUE = 1\n"
+
+
+def test_approved_review_accepts_source_and_lands_on_inbox(world, monkeypatch, tmp_path):
+    import subprocess
+
+    project = world["project"]
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    subprocess.run(["git", "-C", str(project), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project),
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "t")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "t")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    (project / "grid/tests").mkdir(parents=True, exist_ok=True)
+    (project / "grid/tests/test_review_schema.py").write_text(
+        "import json, unittest\nfrom pathlib import Path\n\nclass T(unittest.TestCase):\n    def test_verdict(self):\n        self.assertIn(json.loads(Path('reply.txt').read_text())['verdict'], ('approved', 'rejected'))\n"
+    )
+    (world["board"] / "copy-wrong.json").unlink()
+    lanes = dict(world["lanes"])
+    lanes["kimi"] = dict(
+        lanes["go"], family="kimi", model="kimi-k3", categories=["independent_review"]
+    )
+    world["lanes_path"].write_text(json.dumps({"lanes": lanes}))
+    world["ledger"].configure_account(
+        "kimi-acct",
+        1,
+        {"five_hour": 10, "weekly": 20},
+        time.time() + 600,
+        ["kimi-k3"],
+        ["kimi-alias"],
+    )
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    world["ledger"].record_lane("kimi", dict(ready_record(now), provider="kimi"))
+    accounts = {"go": world["account"], "kimi": "kimi-alias"}
+    first = runner.tick(
+        world["board"],
+        project,
+        world["ledger"],
+        lanes,
+        world["lanes_path"],
+        accounts,
+        world["packets"],
+        now=now,
+    )
+    assert first[0]["result"] == "passed"
+    assert (world["board"] / "review/copy-ok/source.json").is_file()
+    review_task = json.loads((world["board"] / "review-copy-ok.json").read_text())
+    review_task["lanes"] = ["go", "kimi"]
+    (world["board"] / "review-copy-ok.json").write_text(json.dumps(review_task))
+    adapter = tmp_path / "review_adapter.py"
+    # The generated review brief mentions the word "rejected" in its schema; approve unless the
+    # original brief itself asked for a rejection.
+    adapter.write_text(REVIEW_ADAPTER.replace('reject = "reject" in', 'reject = "brief-reject" in'))
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(adapter)])
+    second = runner.tick(
+        world["board"],
+        project,
+        world["ledger"],
+        lanes,
+        world["lanes_path"],
+        accounts,
+        world["packets"],
+        now=now + 1,
+    )
+    assert second[0]["lane"] == "kimi", second
+    assert second[0]["result"].startswith("passed; accepted; landed on grid/inbox"), second
+    assert json.loads((world["board"] / "copy-ok.json").read_text())["state"] == "accepted"
+    states = {r["state"] for r in world["ledger"].status() if r["account"] == world["account"]}
+    assert "accepted" in states
+    log = subprocess.run(
+        ["git", "-C", str(project), "log", "--oneline", "grid/inbox"],
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "grid: accept copy-ok" in log
+    tree = subprocess.run(
+        ["git", "-C", str(project), "ls-tree", "-r", "--name-only", "grid/inbox"],
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "grid/inbox/copy-ok/mod2.py" in tree and "grid/inbox/copy-ok.json" in tree
+    assert not (project / "grid/inbox").exists()  # the operator's checkout is untouched
