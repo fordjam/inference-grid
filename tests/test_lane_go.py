@@ -246,12 +246,6 @@ class GoLaneTests(unittest.TestCase):
                 None, None, 302, "found", {}, "https://example.test/next"
             )
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-
     def test_transport_timeout_follows_the_lane_budget(self):
         # Without an explicit timeout the transport waits min(wall_seconds, 600), not the old
         # fixed 150 s, and the verdict records which bound was used.
@@ -278,6 +272,10 @@ if __name__ == "__main__":
         self.assertIsNone(verdict["refusal"])
         self.assertEqual(sender.recorded["timeout"], 600)
         self.assertEqual(verdict["transport_timeout"], 600)
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 class ReplyModeTests(unittest.TestCase):

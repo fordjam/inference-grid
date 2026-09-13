@@ -298,9 +298,7 @@ def test_receipt_refusal_hold_gets_no_followup(world, monkeypatch, tmp_path):
     task = json.loads((world["board"] / "copy-ok.json").read_text())
     assert task["state"] == "blocked"
     assert "resolve with evidence" in task["blocked_reason"]
-    attempts = [
-        r for r in world["ledger"].status() if r["account"] == world["account"]
-    ]
+    attempts = [r for r in world["ledger"].status() if r["account"] == world["account"]]
     assert len(attempts) == 1 and attempts[0]["state"] == "held"
 
 
