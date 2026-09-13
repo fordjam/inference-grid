@@ -310,8 +310,12 @@ def test_rejected_review_blocks_the_task(world, monkeypatch):
     monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(adapter)])
     (world["board"] / "copy-ok.json").unlink()
     (world["board"] / "copy-wrong.json").unlink()
-    (world["board"] / "rev.json").write_text(
-        json.dumps(make_review_task("rev", "brief-reject.txt"))
+    # A source task waiting for this review; its findings must reach it, not just the review.
+    (world["board"] / "calc.json").write_text(
+        json.dumps(make_task("calc", "brief.txt", state="review_pending"))
+    )
+    (world["board"] / "review-calc.json").write_text(
+        json.dumps(make_review_task("review-calc", "brief-reject.txt"))
     )
     now = time.time()
     world["ledger"].record_lane("go", ready_record(now))
@@ -326,9 +330,13 @@ def test_rejected_review_blocks_the_task(world, monkeypatch):
         now=now,
     )
     assert results[0]["result"] == "review_rejected"
-    task = json.loads((world["board"] / "rev.json").read_text())
+    task = json.loads((world["board"] / "review-calc.json").read_text())
     assert task["state"] == "blocked"
     assert "review rejected with 1 finding" in task["blocked_reason"]
+    source = json.loads((world["board"] / "calc.json").read_text())
+    assert source["state"] == "blocked"
+    assert "review rejected" in source["blocked_reason"]
+    assert "mod2.py" in source["blocked_reason"] and "VALUE = 2" in source["blocked_reason"]
     # The rejection is recorded as a failed outcome, never an acceptance.
     card = world["ledger"].scorecard(account=world["account"])
     assert [(e["category"], e["accepted"], e["attempts"]) for e in card] == [

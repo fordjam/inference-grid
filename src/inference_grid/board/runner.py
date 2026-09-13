@@ -450,6 +450,30 @@ def write_source_link(board_dir, task, aid, lane_id, lanes, receipt_digest):
     )
 
 
+def propagate_rejection(board, review_id, findings):
+    """Block the source task a rejected review refers to, carrying the findings summary.
+
+    Without this the review task blocks alone while the source stays review_pending with
+    no evidence attached; the source operator needs the first findings (location —
+    observed) where the work itself is tracked.
+    """
+    if not review_id.startswith("review-"):
+        return
+    source = board.get(review_id[len("review-") :])
+    if source is None or source[1]["state"] != "review_pending":
+        return
+    note = "; ".join(
+        f"{finding.get('location', '?')} — {finding.get('observed', '?')}"
+        for finding in findings[:3]
+    )
+    save_task(
+        source[0],
+        source[1],
+        state="blocked",
+        blocked_reason=("review rejected: " + (note or "no findings listed"))[:300],
+    )
+
+
 def receipt_digest_of(ledger, aid):
     for row in ledger.status():
         if row["id"] == aid and row.get("receipt"):
@@ -547,7 +571,8 @@ def tick(
     view = lane_view(lanes, now)
     readiness = readiness_view(ledger, lanes, now)
     scorecard = ledger.scorecard()
-    for task_id, (path, task) in load_board(board_dir).items():
+    board = load_board(board_dir)
+    for task_id, (path, task) in board.items():
         if task["state"] != "ready":
             continue
         clash = shadowing_names(task)
@@ -687,10 +712,15 @@ def tick(
             else:
                 if review["verdict"] != "approved":
                     findings = review.get("findings")
-                    count = len(findings) if isinstance(findings, list) else 0
+                    findings = (
+                        [f for f in findings if isinstance(f, dict)]
+                        if isinstance(findings, list)
+                        else []
+                    )
                     passed = False
                     result = "review_rejected"
-                    summary = f"review rejected with {count} finding(s)"
+                    summary = f"review rejected with {len(findings)} finding(s)"
+                    propagate_rejection(board, task_id, findings)
         ledger.record_outcome(aid, task["category"], passed, note=(summary or "")[:300])
         if passed:
             if task["author_family"] is None:
