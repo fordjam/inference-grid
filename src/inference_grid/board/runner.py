@@ -65,6 +65,23 @@ def save_task(path, task, **changes):
     return updated
 
 
+def duplicate_basenames(task, key):
+    """Declared paths in one task list sharing a basename: [(later, earlier)], in order.
+
+    Flat tasks copy by basename, so the later file silently replaces the earlier one in
+    the scratch directory; tree tasks keep paths but unittest discovery refuses duplicate
+    test-module basenames. Either way, not every declared file can run.
+    """
+    seen, dupes = {}, []
+    for name in task[key]:
+        base = Path(name).name
+        if base in seen:
+            dupes.append((name, seen[base]))
+        else:
+            seen[base] = name
+    return dupes
+
+
 def shadowing_names(task):
     """Basename collisions between tests and artifacts or staged inputs, if any.
 
@@ -73,7 +90,23 @@ def shadowing_names(task):
     it — most dangerously an artifact named like a coordinator test, which swaps the
     acceptance test for provider-authored code. Identical paths listed twice (a test
     that is also a staged input) are harmless; only different files colliding block.
+
+    Duplicate basenames within one declared list block where the silent replacement
+    actually happens: all three lists in flat tasks (copies land on one basename), and
+    tests in tree tasks (unittest discovery refuses duplicate module basenames). Tree
+    inputs and artifacts keep their full paths, so same-basename files there — two
+    __init__.py, most commonly — are distinct staged files, not collisions.
     """
+
+    keys = ["tests"] if tree_task(task) else ["tests", "inputs", "artifacts"]
+    problems = []
+    for key in keys:
+        kind = key[:-1]
+        for later, earlier in duplicate_basenames(task, key):
+            problems.append(
+                f"{kind} {later} and {kind} {earlier} share a basename; only one can"
+                " run in the scratch directory"
+            )
 
     if tree_task(task):
         # Tree tasks keep full relative paths in the scratch directory, so basenames cannot
@@ -83,12 +116,11 @@ def shadowing_names(task):
         clashes = [a for a in task["artifacts"] if a in tests]
         if clashes:
             return "artifact would replace the test file at: " + ", ".join(sorted(clashes))
-        return ""
+        return "; ".join(problems)
 
     def by_base(key):
         return {Path(name).name: name for name in task[key]}
 
-    problems = []
     artifacts, tests, inputs = by_base("artifacts"), by_base("tests"), by_base("inputs")
     for base, name in sorted(artifacts.items()):
         if base in tests:

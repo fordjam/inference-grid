@@ -517,6 +517,60 @@ def test_a_test_sharing_an_input_basename_blocks_too(world):
     assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
 
 
+def test_duplicate_test_basenames_block_before_dispatch(world):
+    # review-board-runner-4's case: two declared tests sharing a basename both copied to
+    # scratch/test_mod2.py, the lenient one overwriting the strict one, and an artifact
+    # that failed a declared coordinator test was accepted. Blocks now.
+    clash = make_task("clash", "brief.txt")
+    clash["tests"] = ["strict/test_mod2.py", "lenient/test_mod2.py"]
+    (world["board"] / "clash.json").write_text(json.dumps(clash))
+    (world["board"] / "copy-ok.json").unlink()
+    (world["board"] / "copy-wrong.json").unlink()
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "blocked: name collision"
+    task = json.loads((world["board"] / "clash.json").read_text())
+    assert task["state"] == "blocked"
+    assert "strict/test_mod2.py" in task["blocked_reason"]
+    assert "lenient/test_mod2.py" in task["blocked_reason"]
+    assert world["ledger"].status() == []  # blocked before any attempt existed
+
+
+def test_duplicate_basenames_within_one_declared_list_block():
+    # The same rule holds within inputs in flat tasks (a slash in an artifact would make
+    # the task tree, so flat artifact duplicates cannot be declared).
+    flat = make_task("x", "brief.txt")
+    flat["inputs"] = ["brief.txt", "mod.py", "dup/mod.py"]
+    assert "mod.py" in runner.shadowing_names(flat)
+    flat = make_task("x", "brief.txt")
+    flat["tests"] = ["strict/test_mod2.py", "lenient/test_mod2.py"]
+    assert "strict/test_mod2.py" in runner.shadowing_names(flat)
+    # Tree tasks flag duplicate test basenames...
+    tree = dict(
+        make_task("t", "brief.txt"),
+        inputs=["brief.txt"],
+        tests=["tests/a/test_pkg.py", "tests/b/test_pkg.py"],
+        artifacts=["pkg/mod2.py"],
+    )
+    problem = runner.shadowing_names(tree)
+    assert "tests/a/test_pkg.py" in problem and "tests/b/test_pkg.py" in problem
+    # ...while distinct basenames — and same-basename tree inputs like two __init__.py —
+    # are distinct staged files, not collisions.
+    tree["tests"] = ["tests/test_pkg.py"]
+    tree["inputs"] = ["brief.txt", "pkg/__init__.py", "tests/__init__.py"]
+    assert runner.shadowing_names(tree) == ""
+
+
 def test_stage_packet_refuses_colliding_input_names(world):
     task = make_task("collide", "brief.txt")
     task["inputs"] = ["brief.txt", "a/config.json", "b/config.json"]
