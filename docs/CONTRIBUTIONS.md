@@ -96,16 +96,11 @@ Learning: size hints are harmful for Cline: a passing artifact was destroyed to 
 
 Learning: GOAT with `--tools-all` and `--max-turns 12` finished a multi-file job in four model requests; the ~16.5k-token system overhead grew to ~25k input per request with tool context, so GOAT suits jobs whose output justifies roughly 100k input tokens. GOAT's `--effort` persists to user configuration, but the ModApi `setEffort` does not; a workspace-local mod loaded with `--mod` gives a session-scoped override, verified by native event evidence rather than exit status. The held first canary was an adapter bug (final result uses `finalText`), not a provider failure; the ledger's immutable-task and workspace/account exclusion checks correctly refused re-dispatch under the same ids, so the retry ran as a new task on a fresh packet ledger.
 
-## Handoff fixes A1–A5, 2026-09-13 (GLM-5.3-Flash through interactive ZCode)
+## Handoff round A1–A5 and B1–B5, 2026-09-13 (GLM-5.3-Flash through interactive ZCode)
 
-Defects found by the Kimi review round, fixed per `docs/handoff-glm.md`:
+A-items are defects found by the Kimi review round, fixed per `docs/handoff-glm.md`; B-items are the operating-model features from the same brief:
 
-Operating-model features B1–B5, same round:
-
-| Item | Change | Evidence |
-| --- | --- | --- |
-
-| Item | Fix | Evidence |
+| Item | Fix / Change | Evidence |
 | --- | --- | --- |
 | A1 | `parse_review` (and the staged `grid/tests/test_review_schema.py`) tolerate fences with or without a newline and raise `ValueError` for anything that is not a verdict object; the tick treats any exception as `review_unreadable`, so a malformed reply can never abort the tick and strand later tasks | `test_parse_review_accepts_fences_and_refuses_non_verdicts`, `test_unreadable_fenced_reply_blocks_the_review_without_crashing_the_tick` |
 | A2 | The verify-only follow-up now fires only for deadline-shaped holds — the ledger reason contains `timeout` or the lane verdict reports `wall_deadline` — so a receipt refusal (unexpected model, escaping artifact name) with complete files stays held for the operator instead of being re-run | `test_held_attempt_with_complete_files_gets_a_verify_followup` (reshaped to a real wall-deadline verdict), `test_receipt_refusal_hold_gets_no_followup` |
@@ -114,5 +109,6 @@ Operating-model features B1–B5, same round:
 | A5 | A rejected review now blocks its source task too, carrying the first three findings as `location — observed` in the source's `blocked_reason`, instead of leaving it `review_pending` with no evidence | `test_rejected_review_blocks_the_task` (source task `calc` asserted blocked with the finding text) |
 | B1 | `readiness_view` counts active attempts (queued/dispatching) per lane account and marks a lane `busy` at its `max_concurrency`; `select_lane` then skips it and `tick` reports `lane_busy` when every allowed lane is busy, instead of colliding with a refused 'account busy' dispatch | `test_busy_lane_reports_lane_busy_and_skips_dispatch` (two ready tasks, one lane, concurrency 1), `test_lane_within_concurrency_still_dispatches` |
 | B2 | `doctor` gains a read-only `boards` section: per board directory passed via `--json` (cap 8), task counts by state, with unreadable files as `invalid` and absent directories as `missing`; subdirectory staging (e.g. `review/`) is not scanned, and no dispatch happens | `test_board_counts_and_missing_dirs_are_reported_read_only` |
-| B4 | `inference-grid board-new --json {board_dir, project_root, task}` validates a task and writes its board file plus an empty brief, and for `independent_review` also the review schema test; existing files are refused, never edited, and an invalid task writes nothing | `tests/test_board_new.py` (creation, review schema, refusals, no-partial-write) |
 | B3 | The capacity feeds accept a `scorecard` overlay (rows from `ledger.scorecard()`, overlay-only) and both dashboard shells render an Evidence section per family/model/category with attempts, acceptances and acceptance rate; `clean_scorecard` strips every unknown key from uploaded rows and drops rows without identity, and the upload rejects a non-list scorecard | `tests/test_capacity.py`, `test_cloud.py::test_scorecard_upload_is_sanitized_to_evidence_keys`, `test_display.cjs` (evidence rows) |
+| B4 | `inference-grid board-new --json {board_dir, project_root, task}` validates a task and writes its board file plus an empty brief, and for `independent_review` also the review schema test; existing files are refused, never edited, and an invalid task writes nothing | `tests/test_board_new.py` (creation, review schema, refusals, no-partial-write) |
+| B5 | Skipped — not authored. `~/insta-saved/docs/handoff-glm-flash.md` items A1–A6 are already implemented and tested in that repository: `parse_saved_collections_html` exists (A1), `normalise_key` is canonical in `igsaved/text.py` with the copies removed (A2), `--batch-size` is wired with `ClassifyBatchSizeFlagTests` (A3), per-command test classes exist for search/export/stats/unlabelled/index/import/label (A4), the three-consecutive-failure stop lives in `igsaved/runner.py` with `FetchFailureTests` (A5), and the optional-dependency groups are in `pyproject.toml` (A6). All 139 offline tests pass (`python3 -m unittest discover -s tests`, 0.8 s). Dispatching board tasks for merged, tested work would spend quota re-doing it, so no `~/insta-saved/grid/board/*.json` were written | verification above; no files changed in that repository |
