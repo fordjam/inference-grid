@@ -24,6 +24,9 @@ ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions"
 USER_AGENT = "inference-grid-lane/1.0"
 MAX_BODY = 4 * 1024 * 1024
 MAX_CONTENT = 40000
+# Generous room for the reply itself when a thinking budget caps max_tokens; the reply
+# is a single JSON object.
+CONTENT_ALLOWANCE = 4000
 
 
 class RefusedRedirects(urllib.request.HTTPRedirectHandler):
@@ -122,6 +125,36 @@ def qualify(response, model):
     return None
 
 
+def reasoning_overrun(response, max_tokens):
+    """The refusal for a length stop with no content: the model thought its whole output away.
+
+    Carries the usage reasoning count and the cap so the hold reason and board-status name
+    the overrun instead of a generic did-not-stop. None when the reply produced text
+    (plain truncation stays generic) or stopped any other way.
+    """
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    if choices[0].get("finish_reason") != "length":
+        return None
+    message = choices[0].get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str) and content.strip():
+        return None
+    usage = response.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    reasoning = usage.get("reasoning_tokens")
+    details = usage.get("completion_tokens_details")
+    if reasoning is None and isinstance(details, dict):
+        reasoning = details.get("reasoning_tokens")
+    if type(reasoning) is not int:
+        reasoning = usage.get("completion_tokens")
+    return (
+        "reasoning_overrun: finish_reason length with no content"
+        + f" (reasoning_tokens {reasoning} of max_tokens {max_tokens})"
+    )
+
+
 def expected_code(content):
     """The python source of the {"code": ...} object the brief demands, or a refusal reason."""
     try:
@@ -178,6 +211,17 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
     verdict["transport_timeout"] = transport_timeout
     verdict["task_wall_seconds"] = task_wall
     verdict["lane_wall_seconds"] = lane_wall
+    # The task's reasoning budget reaches the request only through max_tokens: the
+    # endpoint's documented request schema honours no token-count reasoning field for the
+    # model (only categorical reasoning_effort), so the verdict says the budget itself
+    # could not be forwarded while the cap keeps a reasoning model from thinking its
+    # whole output away.
+    thinking_tokens = request.get("thinking_tokens")
+    if type(thinking_tokens) is int and thinking_tokens > 0:
+        max_tokens = thinking_tokens + CONTENT_ALLOWANCE
+        verdict["reasoning_budget"] = "unsupported"
+        verdict["thinking_tokens"] = thinking_tokens
+    verdict["max_tokens"] = max_tokens
     body = {
         "model": request["model"],
         "messages": [{"role": "user", "content": prompt}],
@@ -213,7 +257,7 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
             verdict["finish_reason"] = choices[0].get("finish_reason")
     problem = qualify(response, request["model"])
     if problem:
-        verdict["refusal"] = problem
+        verdict["refusal"] = reasoning_overrun(response, max_tokens) or problem
         return None, verdict
     name, problem = expected_artifact(work)
     if problem:

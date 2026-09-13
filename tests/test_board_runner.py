@@ -1144,6 +1144,50 @@ def test_transport_timeout_hold_names_the_bounds(world, monkeypatch):
     )
 
 
+def test_reasoning_overrun_hold_names_the_counts(world, monkeypatch):
+    # A kimi-style overrun (length with no content) blocks the task with the refusal and
+    # both counts, so neither the hold reason nor board-status says "did not stop
+    # normally".
+    (world["board"] / "copy-wrong.json").unlink()
+    counts = "reasoning_tokens 16000 of max_tokens 10000"
+    overrun = world["lanes_path"].parent / "overrun_adapter.py"
+    overrun.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "request = json.load(sys.stdin)\n"
+        "attempt = Path(request['output_directory']).parent\n"
+        "verdict = {\n"
+        "    'refusal': 'reasoning_overrun: finish_reason length with no content"
+        " (" + counts + ")',\n"
+        "    'finish_reason': 'length',\n"
+        "    'max_tokens': 10000,\n"
+        "}\n"
+        "(attempt / 'verdict.json').write_text(json.dumps(verdict))\n"
+        "sys.exit(1)\n"
+    )
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(overrun)])
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "held"
+    task = json.loads((world["board"] / "copy-ok.json").read_text())
+    assert task["blocked_reason"] == (
+        "attempt "
+        + results[0]["attempt"]
+        + " held: reasoning_overrun: finish_reason length with no content"
+        + " (" + counts + "); resolve with evidence"
+    )
+
+
 def test_a_hold_without_a_transport_verdict_keeps_the_plain_reason(world, monkeypatch):
     (world["board"] / "copy-wrong.json").unlink()
     crashing = world["lanes_path"].parent / "crashing_adapter.py"

@@ -315,6 +315,70 @@ class GoLaneTests(unittest.TestCase):
         self.assertEqual(sender.recorded["timeout"], 400)
         self.assertIsNone(verdict["task_wall_seconds"])
 
+    def test_thinking_budget_rides_on_max_tokens(self):
+        # The endpoint's documented request schema honours no token-count reasoning field
+        # for the model, so the task's thinking budget caps max_tokens (plus a generous
+        # content allowance) and the verdict records that the budget itself could not be
+        # forwarded.
+        request, attempt = self.attempt(expected=["out.py"])
+        sender = self.send(self.native())
+        receipt, verdict = go.run(
+            dict(request, thinking_tokens=6000), self.lane, attempt, send=sender
+        )
+        self.assertIsNone(verdict["refusal"], verdict)
+        self.assertEqual(sender.recorded["body"]["max_tokens"], 10000)
+        self.assertNotIn("thinking_tokens", sender.recorded["body"])
+        self.assertEqual(verdict["reasoning_budget"], "unsupported")
+        self.assertEqual((verdict["thinking_tokens"], verdict["max_tokens"]), (6000, 10000))
+        self.assertTrue((attempt / "artifacts/out.py").is_file())
+
+    def test_reasoning_overrun_is_its_own_refusal(self):
+        # kimi-k3 answering with finish_reason length, all reasoning tokens and no content
+        # must be named as an overrun with both counts, not a generic did-not-stop.
+        request, attempt = self.attempt(expected=["out.py"])
+        response = self.native(finish_reason="length", content="")
+        response["usage"] = {"completion_tokens": 16000, "reasoning_tokens": 16000}
+        receipt, verdict = go.run(
+            dict(request, thinking_tokens=6000), self.lane, attempt, send=self.send(response)
+        )
+        self.assertIsNone(receipt)
+        self.assertEqual(
+            verdict["refusal"],
+            "reasoning_overrun: finish_reason length with no content"
+            " (reasoning_tokens 16000 of max_tokens 10000)",
+        )
+        self.assertEqual(verdict["finish_reason"], "length")
+        self.assertTrue((attempt / "native.json").is_file())
+        self.assertFalse((attempt / "artifacts/out.py").exists())
+        # The nested completion_tokens_details form is read too, falling back to
+        # completion_tokens when no reasoning count is reported at all.
+        request, attempt = self.attempt(expected=["out.py"])
+        response = self.native(finish_reason="length", content=None)
+        response["usage"] = {
+            "completion_tokens": 9000,
+            "completion_tokens_details": {"reasoning_tokens": 9000},
+        }
+        _, verdict = go.run(request, self.lane, attempt, send=self.send(response))
+        self.assertEqual(
+            verdict["refusal"],
+            "reasoning_overrun: finish_reason length with no content"
+            " (reasoning_tokens 9000 of max_tokens 16000)",
+        )
+        request, attempt = self.attempt(expected=["out.py"])
+        response = self.native(finish_reason="length", content=None)
+        response["usage"] = {"completion_tokens": 8000}
+        _, verdict = go.run(request, self.lane, attempt, send=self.send(response))
+        self.assertIn("reasoning_tokens 8000 of max_tokens 16000", verdict["refusal"])
+        # A length stop that did produce text stays a generic truncation refusal.
+        request, attempt = self.attempt(expected=["out.py"])
+        _, verdict = go.run(
+            request,
+            self.lane,
+            attempt,
+            send=self.send(self.native(finish_reason="length")),
+        )
+        self.assertEqual(verdict["refusal"], "final native request did not stop normally")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -295,6 +295,7 @@ def dispatch(
         # The lane transport reads the task's own budget, not just the lane record's.
         "wall_seconds": task["budget"]["wall_seconds"],
         "output_bytes": task["budget"]["output_bytes"],
+        "thinking_tokens": task["budget"]["thinking_tokens"],
         "inputs": manifest,
         "input_root": str(input_dir),
         "manifest_sha256": digest(manifest),
@@ -369,7 +370,12 @@ def hold_block_reason(aid, verdict, state):
     if verdict is None:
         return None
     refusal = verdict.get("refusal")
-    if not (isinstance(refusal, str) and refusal.startswith("transport_error")):
+    if not isinstance(refusal, str):
+        return None
+    if refusal.startswith("reasoning_overrun"):
+        # The overrun refusal already carries the counts the operator needs.
+        return f"attempt {aid} held: {refusal}; resolve with evidence"
+    if not refusal.startswith("transport_error"):
         return None
 
     def bound(value):

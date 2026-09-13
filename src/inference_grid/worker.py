@@ -106,6 +106,7 @@ def execute(ledger, aid, generation):
             # The submitting board's task budget, for lanes that shape their own transport
             # bounds; absent when the spec does not carry one.
             wall_seconds=spec.get("wall_seconds"),
+            thinking_tokens=spec.get("thinking_tokens"),
         )
         # Credentials belong to the trusted adapter, not task arguments or this ledger.
         env = {k: os.environ[k] for k in ("PATH", "LANG", "SYSTEMROOT") if k in os.environ}
