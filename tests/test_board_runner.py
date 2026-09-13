@@ -1100,3 +1100,69 @@ def test_lane_records_carry_metadata_without_confusing_the_classifier(world):
         )
     assert "unsupported_until" in record
     assert lane_readiness(classifier_view(record), now + 1)["state"] == "ready"
+
+
+def test_transport_timeout_hold_names_the_bounds(world, monkeypatch):
+    # A hold whose verdict records a transport timeout blocks the task with the refusal
+    # and the three bounds, so the operator needs no packet dig to know what clipped.
+    (world["board"] / "copy-wrong.json").unlink()
+    slow = world["lanes_path"].parent / "slow_adapter.py"
+    slow.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "request = json.load(sys.stdin)\n"
+        "attempt = Path(request['output_directory']).parent\n"
+        "verdict = {\n"
+        "    'refusal': 'transport_error: TimeoutError',\n"
+        "    'transport_timeout': 400,\n"
+        "    'task_wall_seconds': 600,\n"
+        "    'lane_wall_seconds': 400,\n"
+        "}\n"
+        "(attempt / 'verdict.json').write_text(json.dumps(verdict))\n"
+        "sys.exit(1)\n"
+    )
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(slow)])
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "held"
+    task = json.loads((world["board"] / "copy-ok.json").read_text())
+    assert task["blocked_reason"] == (
+        "attempt "
+        + results[0]["attempt"]
+        + " held: transport_error: TimeoutError"
+        + " (transport 400 s, task 600 s, lane 400 s); resolve with evidence"
+    )
+
+
+def test_a_hold_without_a_transport_verdict_keeps_the_plain_reason(world, monkeypatch):
+    (world["board"] / "copy-wrong.json").unlink()
+    crashing = world["lanes_path"].parent / "crashing_adapter.py"
+    crashing.write_text("import sys\nsys.exit(1)\n")
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(crashing)])
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "held"
+    task = json.loads((world["board"] / "copy-ok.json").read_text())
+    assert task["blocked_reason"] == (
+        "attempt " + results[0]["attempt"] + " held; resolve with evidence"
+    )

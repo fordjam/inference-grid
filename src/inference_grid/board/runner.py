@@ -351,25 +351,56 @@ def deadline_hold(ledger, packet_dir, aid):
     return isinstance(supervisor, dict) and supervisor.get("reason") == "wall_deadline"
 
 
+def read_verdict(packet_dir, aid):
+    """The verdict.json beside a held attempt, or None when there is none."""
+    try:
+        verdict = json.loads((Path(packet_dir) / "attempts" / aid / "verdict.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return verdict if isinstance(verdict, dict) else None
+
+
+def hold_block_reason(aid, verdict, state):
+    """The blocked_reason for a held attempt; transport timeouts carry their bounds.
+
+    The operator otherwise has to open verdict.json to learn a hold was a transport
+    timeout and which of the task/lane/transport budgets clipped it.
+    """
+    if verdict is None:
+        return None
+    refusal = verdict.get("refusal")
+    if not (isinstance(refusal, str) and refusal.startswith("transport_error")):
+        return None
+
+    def bound(value):
+        return f"{value} s" if type(value) in (int, float) else "unknown"
+
+    return (
+        f"attempt {aid} held: {refusal}"
+        f" (transport {bound(verdict.get('transport_timeout'))}"
+        f", task {bound(verdict.get('task_wall_seconds'))}"
+        f", lane {bound(verdict.get('lane_wall_seconds'))}); resolve with evidence"
+    )
+
+
 def note_model_refusal(ledger, lanes, lane_id, packet_dir, aid):
     """Record unsupported_until when the endpoint answered 401/403 for the lane's model.
 
     The verdict beside the held attempt is the only evidence read; the merge keeps the
     stored record classifier-valid and drops already-expired entries.
     """
-    try:
-        verdict = json.loads((Path(packet_dir) / "attempts" / aid / "verdict.json").read_text())
-    except (OSError, ValueError):
-        return
-    refusal = verdict.get("refusal") if isinstance(verdict, dict) else None
+    verdict = read_verdict(packet_dir, aid)
+    refusal = verdict.get("refusal") if verdict else None
     if not isinstance(refusal, str) or not (
         "endpoint returned HTTP 401" in refusal or "endpoint returned HTTP 403" in refusal
     ):
         return
     with ledger.engine.connect() as con:
-        row = con.execute(
-            select(lane_records).where(lane_records.c.provider == lane_id)
-        ).mappings().first()
+        row = (
+            con.execute(select(lane_records).where(lane_records.c.provider == lane_id))
+            .mappings()
+            .first()
+        )
     if row is None:
         return
     record = dict(row["record"])
@@ -782,15 +813,14 @@ def tick(
             continue
         if state != "completed":
             # The attempt is held in the ledger; outcomes attach after the operator resolves
-            # it, so the board only records the block with the hold reason. A 401/403 from
-            # the endpoint also excludes the model from this lane for a day.
+            # it, so the board only records the block with the hold reason. A transport
+            # timeout names its bounds, and a 401/403 from the endpoint excludes the model
+            # from this lane for a day.
             note_model_refusal(ledger, lanes, lane_id, packet_dir, aid)
-            save_task(
-                path,
-                task,
-                state="blocked",
-                blocked_reason=f"attempt {aid} {state}; resolve with evidence",
+            reason = hold_block_reason(aid, read_verdict(packet_dir, aid), state) or (
+                f"attempt {aid} {state}; resolve with evidence"
             )
+            save_task(path, task, state="blocked", blocked_reason=reason)
             results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"})
             continue
         try:
