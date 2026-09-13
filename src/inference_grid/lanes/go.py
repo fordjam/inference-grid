@@ -145,6 +145,15 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=150)
     work.mkdir(mode=0o700)
     stage_inputs(request, work)
     prompt = (work / "brief.txt").read_text().strip()
+    # One request, no tools: every other staged text input travels in the prompt itself.
+    for name in staged:
+        if name in ("brief.txt", "expected.json"):
+            continue
+        try:
+            content = (work / name).read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        prompt += "\n\n=== " + name + " ===\n" + content
     session = request["attempt"]
     verdict = {
         "supervisor": None,
