@@ -11,7 +11,7 @@
   "src/inference_grid/goat_outcomes.py"
  ],
  "tests": [
-  "grid/tests/test_goat.py"
+  "grid/tests/test_goat_lane.py"
  ],
  "artifacts": [
   "goat.py",

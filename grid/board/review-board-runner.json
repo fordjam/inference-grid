@@ -23,6 +23,6 @@
   "output_bytes": 2000000,
   "thinking_tokens": 6000
  },
- "state": "passed",
- "blocked_reason": null
+ "state": "blocked",
+ "blocked_reason": "review rejected with 6 findings (attempt 6b7fde2c): follow-up retry, dispatched state, held outcomes, run_tests exceptions, review-task creation, name collisions; all six fixed with tests 2026-09-13, re-review queued as review-board-runner-2"
 }

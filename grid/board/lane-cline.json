@@ -13,7 +13,7 @@
   "src/inference_grid/cline_outcomes.py"
  ],
  "tests": [
-  "grid/tests/test_cline.py"
+  "grid/tests/test_cline_lane.py"
  ],
  "artifacts": [
   "cline.py",

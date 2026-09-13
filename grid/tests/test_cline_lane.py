@@ -82,9 +82,9 @@ class ClineLaneTests(unittest.TestCase):
         self.fake.write_text(FAKE_CLINE)
         os.chmod(self.fake, 0o755)
         self.cred = self.base / "cline-cred.json"
-        self.cred.write_text(json.dumps({"api_key": "sk-coord-cline-secret"}))
+        self.cred.write_text(json.dumps({"api_key": "coord-key-1"}))
         os.chmod(self.cred, 0o600)
-        self.key = "sk-coord-cline-secret"
+        self.key = "coord-key-1"
 
     def attempt(self, name):
         attempt_dir = self.base / name / "attempt"

@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from ..flash_window import flash_window
@@ -237,7 +238,15 @@ def dispatch(
         "input_root": str(input_dir),
         "manifest_sha256": digest(manifest),
     }
-    task_id = task["id"] + "-" + time.strftime("%Y%m%dT%H%M%S", time.gmtime(time.time()))
+    # Ledger task ids are immutable; a timestamp plus a random tail keeps concurrent boards
+    # (and shared test databases) from colliding within one second.
+    task_id = (
+        task["id"]
+        + "-"
+        + time.strftime("%Y%m%dT%H%M%S", time.gmtime(time.time()))
+        + "-"
+        + uuid.uuid4().hex[:6]
+    )
     if input_dir.name == "input-verify":
         task_id += "-verify"
     ledger.submit(task_id, Path(project_root).name, spec)
