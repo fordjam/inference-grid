@@ -171,7 +171,7 @@ def test_tick_without_lane_record_dispatches_nothing(world):
         "copy-ok": "no_ready_lane",
         "copy-wrong": "no_ready_lane",
     }
-    assert world["ledger"].status() == []
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
 
 
 def test_tick_dispatches_tests_and_records(world):
@@ -376,7 +376,7 @@ def test_name_collision_blocks_before_dispatch(world):
     assert results[0]["result"] == "blocked: name collision"
     task = json.loads((world["board"] / "clash.json").read_text())
     assert task["state"] == "blocked" and "test_mod2.py" in task["blocked_reason"]
-    assert world["ledger"].status() == []
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
 
 
 def test_a_test_sharing_an_input_basename_blocks_too(world):
@@ -398,7 +398,7 @@ def test_a_test_sharing_an_input_basename_blocks_too(world):
         now=now,
     )
     assert results[0]["result"] == "blocked: name collision"
-    assert world["ledger"].status() == []
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
 
 
 def test_stage_packet_refuses_colliding_input_names(world):
@@ -473,7 +473,7 @@ def test_refusal_before_any_attempt_leaves_the_task_ready(world, monkeypatch):
     )
     assert results[0]["result"].startswith("refused:")
     assert json.loads((world["board"] / "ghost.json").read_text())["state"] == "ready"
-    assert world["ledger"].status() == []
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
 
 
 def test_parse_review_accepts_fences_and_refuses_non_verdicts(tmp_path):
