@@ -16,8 +16,10 @@ def git(repo, *argv):
     )
 
 
-def commit(repo, message, trailer=None):
+def commit(repo, message, trailer=None, body=None):
     args = ["commit", "-q", "-m", message]
+    if body:
+        args += ["-m", body]
     if trailer:
         args += ["-m", trailer]
     git(repo, "-c", "user.name=Dev", "-c", "user.email=dev@example.com", *args)
@@ -169,3 +171,136 @@ def test_review_branch_overrides_lanes_and_budget(tmp_path):
     task = json.loads(Path(created["task"]).read_text())
     assert task["lanes"] == ["go-kimi", "go-deepseek"]
     assert task["budget"]["thinking_tokens"] == 12000
+
+
+def layered_repo(tmp_path, groups=3, files_per_group=2, size=300):
+    """A repo whose range is `groups` commits of `files_per_group` new ~`size`-byte files."""
+    repo = tmp_path / "factory-frontend"
+    (repo / "src").mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "src/seed.py").write_text("SEED = 0\n")
+    git(repo, "add", "-A")
+    commit(repo, "base")
+    base = rev(repo, "HEAD")
+    hashes = []
+    for i in range(groups):
+        for j in range(files_per_group):
+            (repo / f"src/f{i}_{j}.py").write_text("VALUE = " + "x" * size + f"\n#{i} {j}\n")
+        git(repo, "add", "-A")
+        commit(
+            repo,
+            f"change group {i}",
+            trailer="Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>",
+            body=f"body line for group {i}",
+        )
+        hashes.append(rev(repo, "HEAD"))
+    return repo, base, hashes[-1], hashes
+
+
+def test_generated_and_locked_content_is_excluded_and_named_in_the_brief(tmp_path):
+    repo, base, tip = reviewed_repo(tmp_path)
+    lock = {"name": "web/package-lock.json", "content": '{"lockfileVersion": 3}\n'}
+    fixture = {"name": "src/fixtures/samples.json", "content": '{"sample": 1}\n'}
+    (repo / "web").mkdir()
+    for item in (lock, fixture):
+        path = repo / item["name"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(item["content"])
+    git(repo, "add", "-A")
+    commit(repo, "add fixtures and a lockfile")
+    tip = rev(repo, "HEAD")
+    board, project = board_and_project(tmp_path)
+    created = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}
+    )
+    task = json.loads(Path(created["task"]).read_text())
+    assert all(lock["name"] not in p for p in task["inputs"])
+    assert all(fixture["name"] not in p for p in task["inputs"])
+    assert created["omitted"] == [fixture["name"], lock["name"]]
+    brief = Path(created["brief"]).read_text()
+    assert "2 generated file(s) omitted" in brief
+    assert fixture["name"] in brief and lock["name"] in brief
+
+
+def test_oversized_files_are_represented_by_their_hunks_only(tmp_path):
+    repo, base, tip = reviewed_repo(tmp_path)
+    big = (repo / "src/big.py")
+    big.write_text("BIG = [\n" + "".join(f'    "line {i} pad pad pad",\n' for i in range(1200)) + "]\n")
+    assert big.stat().st_size > branch_review.MAX_FILE_BYTES
+    git(repo, "add", "-A")
+    commit(repo, "add a big table")
+    tip = rev(repo, "HEAD")
+    board, project = board_and_project(tmp_path)
+    created = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}
+    )
+    task = json.loads(Path(created["task"]).read_text())
+    assert created["oversized"] == ["src/big.py"]
+    assert all("src/big.py" not in p for p in task["inputs"] if p != task["inputs"][-1])
+    patch = (project / f"grid/board/review/{created['id']}/diff.patch").read_text()
+    assert "line 1199" in patch  # the hunks carry the file
+    brief = Path(created["brief"]).read_text()
+    assert "per-file cap" in brief and "src/big.py" in brief
+
+
+def test_an_over_budget_range_refuses_naming_the_commit_split(tmp_path):
+    repo, base, tip, hashes = layered_repo(tmp_path)
+    board, project = board_and_project(tmp_path)
+    with pytest.raises(ValueError, match="plan is:") as excinfo:
+        branch_review.review_branch(
+            board,
+            project,
+            {"repo": str(repo), "base": base, "tip": tip},
+            max_input_bytes=2000,
+            split="none",
+        )
+    message = str(excinfo.value)
+    assert "over the 2000-byte budget" in message
+    for digest in hashes:
+        assert f"review-factory-frontend-{digest[:7]}" in message
+
+
+def test_commit_split_authors_one_task_per_commit_with_disjoint_inputs(tmp_path):
+    repo, base, tip, hashes = layered_repo(tmp_path)
+    board, project = board_and_project(tmp_path)
+    created = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}, max_input_bytes=2000
+    )
+    assert set(created) == {"tasks"}
+    assert [t["id"] for t in created["tasks"]] == [
+        f"review-factory-frontend-{digest[:7]}" for digest in hashes
+    ]
+    inputs = [set(t["staged"]) for t in created["tasks"]]
+    assert inputs[0].isdisjoint(inputs[1]) and inputs[0].isdisjoint(inputs[2])
+    for index, entry in enumerate(created["tasks"]):
+        task = json.loads(Path(entry["task"]).read_text())
+        assert task["state"] == "ready" and entry["commits"] == 1
+        brief = Path(entry["brief"]).read_text()
+        assert f"change group {index}" in brief
+        assert f"body line for group {index}" in brief
+
+
+def test_an_explicit_commit_split_applies_even_under_budget(tmp_path):
+    repo, base, tip, hashes = layered_repo(tmp_path)
+    board, project = board_and_project(tmp_path)
+    created = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}, split="commit"
+    )
+    assert [t["id"] for t in created["tasks"]] == [
+        f"review-factory-frontend-{digest[:7]}" for digest in hashes
+    ]
+
+
+def test_a_commit_over_the_budget_alone_is_refused_with_file_sizes(tmp_path):
+    repo, base, tip, hashes = layered_repo(tmp_path, groups=2, files_per_group=2, size=600)
+    board, project = board_and_project(tmp_path)
+    with pytest.raises(ValueError, match="exceeds the 1500-byte budget") as excinfo:
+        branch_review.review_branch(
+            board,
+            project,
+            {"repo": str(repo), "base": base, "tip": tip},
+            max_input_bytes=1500,
+        )
+    message = str(excinfo.value)
+    assert "bytes:" in message and "src/f" in message  # the offending file sizes
+    assert not (board / "review").exists()  # nothing was written before the refusal
