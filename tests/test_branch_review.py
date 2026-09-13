@@ -304,3 +304,16 @@ def test_a_commit_over_the_budget_alone_is_refused_with_file_sizes(tmp_path):
     message = str(excinfo.value)
     assert "bytes:" in message and "src/f" in message  # the offending file sizes
     assert not (board / "review").exists()  # nothing was written before the refusal
+
+
+def test_the_brief_opens_with_a_single_review_prefix(tmp_path):
+    # review_brief_text prepends review- to the task id; a branch-review id already has
+    # it, and the live briefs read "task review-review-ff-glm-r6-…".
+    repo, base, tip = reviewed_repo(tmp_path)
+    board, project = board_and_project(tmp_path)
+    created = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}
+    )
+    brief = Path(created["brief"]).read_text()
+    assert brief.startswith(f"You are an independent reviewer for task {created['id']}. ")
+    assert "task review-review-" not in brief

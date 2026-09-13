@@ -535,8 +535,10 @@ def review_brief_text(task, context=None):
             "requirement is met, and defects you can demonstrate by quoting the "
             "artifact next to the brief requirement it violates."
         )
+    # Branch-review ids already carry the review- prefix; never double it.
+    review_label = task["id"] if task["id"].startswith("review-") else "review-" + task["id"]
     return (
-        "You are an independent reviewer for task review-" + task["id"] + ". "
+        "You are an independent reviewer for task " + review_label + ". "
         + context.strip()
         + " Read every staged file first. The coordinator's acceptance tests "
         "are staged too; a difference between them and the artifact's own tests is a finding. "
