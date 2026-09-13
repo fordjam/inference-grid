@@ -81,6 +81,11 @@ def shadowing_names(task):
             problems.append(
                 f"artifact {name} would replace the test {tests[base]} in the scratch directory"
             )
+        if base in inputs:
+            problems.append(
+                f"artifact {name} would replace the staged input {inputs[base]} "
+                "in the scratch directory"
+            )
     for base, name in sorted(tests.items()):
         if base in inputs and inputs[base] != name:
             problems.append(

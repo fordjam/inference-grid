@@ -716,3 +716,27 @@ def test_approved_review_accepts_source_and_lands_on_inbox(world, monkeypatch, t
     ).stdout.split()
     assert "grid/inbox/copy-ok/mod2.py" in tree and "grid/inbox/copy-ok.json" in tree
     assert not (project / "grid/inbox").exists()  # the operator's checkout is untouched
+
+
+def test_an_artifact_sharing_an_input_basename_blocks_too(world):
+    clash = make_task("clash", "brief.txt")
+    clash["artifacts"] = ["mod.py"]  # the artifact would silently replace the staged mod.py
+    (world["board"] / "clash.json").write_text(json.dumps(clash))
+    (world["board"] / "copy-ok.json").unlink()
+    (world["board"] / "copy-wrong.json").unlink()
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "blocked: name collision"
+    task = json.loads((world["board"] / "clash.json").read_text())
+    assert task["state"] == "blocked" and "staged input mod.py" in task["blocked_reason"]
+    assert world["ledger"].status() == []
