@@ -27,6 +27,12 @@ def board_tick(
     )
 
 
+def board_new(board_dir, project_root, task):
+    from .board.new import new_task
+
+    return new_task(board_dir, project_root, task)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Durable admission for trusted, bounded adapters")
     parser.add_argument(
@@ -54,6 +60,7 @@ def main():
             "outcome",
             "scorecard",
             "board-tick",
+            "board-new",
             "tick",
         ],
     )
@@ -81,6 +88,7 @@ def main():
             "lane",
             "outcome",
             "board-tick",
+            "board-new",
             "defer",
             "cooldown",
         }
@@ -108,6 +116,7 @@ def main():
         "outcome": ledger.record_outcome,
         "scorecard": ledger.scorecard,
         "board-tick": lambda **kw: board_tick(ledger, **kw),
+        "board-new": lambda **kw: board_new(**kw),
     }
     print(json.dumps(commands[args.command](**data), indent=2))
 
