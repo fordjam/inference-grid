@@ -61,6 +61,7 @@ def main():
             "scorecard",
             "board-tick",
             "board-new",
+            "board-status",
             "tick",
         ],
     )
@@ -89,6 +90,7 @@ def main():
             "outcome",
             "board-tick",
             "board-new",
+            "board-status",
             "defer",
             "cooldown",
         }
@@ -117,8 +119,15 @@ def main():
         "scorecard": ledger.scorecard,
         "board-tick": lambda **kw: board_tick(ledger, **kw),
         "board-new": lambda **kw: board_new(**kw),
+        "board-status": lambda **kw: board_status(ledger, **kw),
     }
     print(json.dumps(commands[args.command](**data), indent=2))
+
+
+def board_status(ledger, board_dir):
+    from .board.status import board_status as status
+
+    return status(ledger, board_dir)
 
 
 if __name__ == "__main__":
