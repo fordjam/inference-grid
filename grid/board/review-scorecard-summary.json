@@ -25,6 +25,6 @@
   "output_bytes": 2000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
- "blocked_reason": null
+ "state": "blocked",
+ "blocked_reason": "attempt a72e12f2-3df0-4775-9f26-106baea83dca held; resolve with evidence"
 }

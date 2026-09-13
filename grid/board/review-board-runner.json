@@ -23,6 +23,6 @@
   "output_bytes": 2000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
- "blocked_reason": null
+ "state": "blocked",
+ "blocked_reason": "superseded: review-board-runner-2 (rejected, 3 findings) and review-board-runner-3 re-review the fixed runner; do not dispatch against the pre-fix code"
 }

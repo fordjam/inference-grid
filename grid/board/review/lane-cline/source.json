@@ -1,0 +1,11 @@
+{
+ "task": "lane-cline",
+ "attempt": "d7c21653-8ba3-4066-afcb-dd3e500b8bd6",
+ "lane": "zcode",
+ "family": "glm",
+ "receipt_digest": "9503ebb2de6b4dcab73e4a9f0d8cbd36aea7fe9632a343470f89e281bb07ccf3",
+ "review_task": "review-lane-cline-2",
+ "review_attempt": "67295bc3-7305-4dcf-b606-1d47c1f79ea3",
+ "reviewer_family": "kimi",
+ "operator_accept": "2026-09-13 claude-code via inference-grid accept; module already integrated in src/inference_grid/lanes/ on 2026-09-12, no inbox landing"
+}

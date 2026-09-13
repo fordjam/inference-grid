@@ -1,9 +1,9 @@
 {
- "id": "review-board-runner-2",
+ "id": "review-board-runner-3",
  "category": "independent_review",
- "brief": "grid/briefs/review-board-runner-2.txt",
+ "brief": "grid/briefs/review-board-runner-3.txt",
  "inputs": [
-  "grid/briefs/review-board-runner-2.txt",
+  "grid/briefs/review-board-runner-3.txt",
   "docs/BOARD.md",
   "src/inference_grid/board/runner.py",
   "src/inference_grid/board/task.py",
@@ -17,15 +17,14 @@
   "reply.txt"
  ],
  "lanes": [
-  "zai",
   "go-kimi"
  ],
- "author_family": "claude",
+ "author_family": "glm",
  "budget": {
   "wall_seconds": 600,
   "output_bytes": 2000000,
   "thinking_tokens": 6000
  },
  "state": "blocked",
- "blocked_reason": "attempt a8547769-e91d-45d3-91b5-d61b9e414aec review rejected with 3 finding(s); all three fixed 2026-09-13 (A1 parse_review, A2 verify follow-up, A3 shadowing_names); re-reviewed as review-board-runner-3"
+ "blocked_reason": "attempt 73b6d80f-371c-4f17-8f28-5644ddc95385 held; resolve with evidence"
 }
