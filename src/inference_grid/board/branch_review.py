@@ -239,16 +239,21 @@ def _packet_notes(oversized, omitted):
     return notes
 
 
-def _write_task(board_dir, project_root, task_id, family, lanes, budget, context, staged, patch):
-    """Write one review task with its staging, brief and schema test; returns its dict."""
+def _plan_task(board_dir, project_root, task_id, family, lanes, budget, context, staged, patch):
+    """Build every file of one review task in memory: ([(path, bytes)], summary). No writes.
+
+    All refusals — an existing task or staging, guard patterns, task validation — happen
+    here, so a whole split can be planned before any part of it touches the board.
+    """
     board_dir = Path(board_dir)
     project_root = Path(project_root)
     task_file = board_dir / (task_id + ".json")
     if task_file.exists():
         raise FileExistsError(f"task file already exists: {task_file}")
+    # A staging directory without its task file is the leftover of an interrupted run of
+    # this same deterministic id; re-authoring overwrites it. The task-file check above
+    # is the one genuine already-authored refusal.
     stage = board_dir / "review" / task_id
-    if stage.exists() and any(stage.rglob("*")):
-        raise FileExistsError(f"review staging already exists: {stage}")
     problem = check_input("diff.patch", patch.encode())
     if problem:
         raise ValueError(f"diff.patch: {problem}")
@@ -269,28 +274,30 @@ def _write_task(board_dir, project_root, task_id, family, lanes, budget, context
     }
     task = validate_task(task)
 
-    stage.mkdir(parents=True, exist_ok=True)
-    for relative, data in staged:
-        target = stage / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-    (stage / "diff.patch").write_text(patch)
+    files = [(stage / relative, data) for relative, data in staged]
+    files.append((stage / "diff.patch", patch.encode()))
+    files.append((task_file, (json.dumps(task, indent=1) + "\n").encode()))
+    files.append((project_root / task["brief"], review_brief_text(task, context).encode()))
     schema_test = board_dir.parent / "tests" / "test_review_schema.py"
     if not schema_test.exists():
-        schema_test.parent.mkdir(parents=True, exist_ok=True)
-        schema_test.write_text(SCHEMA_TEST)
-    brief_path = project_root / task["brief"]
-    brief_path.parent.mkdir(parents=True, exist_ok=True)
-    brief_path.write_text(review_brief_text(task, context))
-    task_file.write_text(json.dumps(task, indent=1) + "\n")
-    return {
+        files.append((schema_test, SCHEMA_TEST.encode()))
+    summary = {
         "id": task_id,
         "task": str(task_file),
-        "brief": str(brief_path),
+        "brief": str(project_root / task["brief"]),
         "staged": task["inputs"][1:],
         "author_family": family,
         "commits": 1,
     }
+    return files, summary
+
+
+def _write_files(files):
+    """Move the planned files into place; every refusal has already happened in planning."""
+    for path, data in files:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
 
 
 def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_input_bytes=None, split=None):
@@ -352,7 +359,7 @@ def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_in
                 "violates." + _packet_notes(oversized, omitted)
             )
             short = re.sub(r"[^a-z0-9-]+", "", tip.lower())[:7]
-            created = _write_task(
+            files, created = _plan_task(
                 board_dir,
                 project_root,
                 f"review-{repo_name}-{short}"[:60],
@@ -368,6 +375,7 @@ def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_in
                 created["omitted"] = omitted
             if oversized:
                 created["oversized"] = oversized
+            _write_files(files)
             return created
         if split == "none":
             raise ValueError(
@@ -377,8 +385,10 @@ def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_in
             )
 
     # Split by commit: one packet per commit, in range order (oldest first), each
-    # measured on its own.
-    tasks = []
+    # measured on its own. Everything is planned before anything is written — the live
+    # round once wrote eight task files and then died on the first one's id — and a
+    # commit that already has its task on the board is skipped, so a re-run resumes.
+    plans, skipped = [], []
     for commit in reversed(commits):
         code, c_paths, err = run(
             ["git", "-C", repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit["hash"]]
@@ -413,11 +423,15 @@ def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_in
             "file next to the requirement it violates." + _packet_notes(oversized, omitted)
         )
         short = re.sub(r"[^a-z0-9-]+", "", commit["hash"].lower())[:7]
-        tasks.append(
-            _write_task(
+        task_id = f"review-{repo_name}-{short}"[:60]
+        if (board_dir / (task_id + ".json")).exists():
+            skipped.append({"id": task_id, "note": "already authored; skipped"})
+            continue
+        plans.append(
+            _plan_task(
                 board_dir,
                 project_root,
-                f"review-{repo_name}-{short}"[:60],
+                task_id,
                 family,
                 lanes,
                 budget,
@@ -426,9 +440,14 @@ def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_in
                 patch,
             )
         )
-    if not tasks:
+    for files, _ in plans:
+        _write_files(files)
+    result = {"tasks": [summary for _, summary in plans]}
+    if skipped:
+        result["skipped"] = skipped
+    if not result["tasks"] and not skipped:
         raise ValueError("every commit packet was empty; nothing to review")
-    return {"tasks": tasks}
+    return result
 
 
 def _plan(repo_name, repo, tip, commits, cache, attrs):

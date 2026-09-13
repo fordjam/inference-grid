@@ -365,3 +365,52 @@ def test_filter_patch_handles_both_seam_shapes():
     assert dropped == ["tests/fixtures/x.json"]
     assert "fixtures" not in filtered
     assert "VALUE = 2" in filtered and "diff --git a/src/app.py b/src/app.py" in filtered
+
+
+def test_a_mid_split_refusal_writes_nothing(tmp_path):
+    # The split once wrote eight task files and then died on the first one's id. Every
+    # part is planned before any part is written: a refusal mid-plan leaves the board
+    # untouched.
+    repo, base, tip, _ = layered_repo(tmp_path, groups=2, files_per_group=2, size=300)
+    # Grow the second group's files so only its packet blows a 2000-byte budget.
+    for j in range(2):
+        (repo / f"src/f1_{j}.py").write_text("VALUE = " + "x" * 3000 + f"\n#1 {j}\n")
+    git(repo, "add", "-A")
+    commit(repo, "grow group 1", trailer="Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>")
+    tip = rev(repo, "HEAD")
+    board, project = board_and_project(tmp_path)
+    with pytest.raises(ValueError, match="exceeds the 2000-byte budget"):
+        branch_review.review_branch(
+            board,
+            project,
+            {"repo": str(repo), "base": base, "tip": tip},
+            max_input_bytes=2000,
+        )
+    assert not (board / "review").exists() or not any((board / "review").rglob("*"))
+    assert not any(board.glob("review-*.json"))
+    assert not any((project / "grid/briefs").glob("review-factory-frontend-*"))
+
+
+def test_a_rerun_skips_commits_that_already_have_tasks(tmp_path):
+    repo, base, tip, hashes = layered_repo(tmp_path)
+    board, project = board_and_project(tmp_path)
+    first = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}, max_input_bytes=2000
+    )
+    assert len(first["tasks"]) == 3 and "skipped" not in first
+    # A re-run over the same range authors nothing and says what it skipped.
+    again = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}, max_input_bytes=2000
+    )
+    assert again["tasks"] == []
+    assert [entry["id"] for entry in again["skipped"]] == [
+        f"review-factory-frontend-{digest[:7]}" for digest in hashes
+    ]
+    # A partial board resumes: drop the middle task file and only it is re-authored.
+    middle = board / f"review-factory-frontend-{hashes[1][:7]}.json"
+    middle.unlink()
+    resumed = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}, max_input_bytes=2000
+    )
+    assert [t["id"] for t in resumed["tasks"]] == [f"review-factory-frontend-{hashes[1][:7]}"]
+    assert len(resumed["skipped"]) == 2
