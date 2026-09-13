@@ -824,6 +824,35 @@ def test_lane_within_concurrency_still_dispatches(world):
     }
 
 
+def test_a_hold_mid_tick_makes_the_next_task_lane_busy(world, monkeypatch):
+    # Busy used to be evaluated once per tick: the first task's attempt went held
+    # mid-tick and the second task on the same account was still dispatched and refused
+    # 'account busy'. The tick must re-evaluate after every dispatch.
+    crashing = world["lanes_path"].parent / "crashing_adapter.py"
+    crashing.write_text("import sys\nsys.exit(1)\n")
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(crashing)])
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    by_task = {r["task"]: r for r in results}
+    assert by_task["copy-ok"]["result"] == "held"
+    assert by_task["copy-wrong"]["result"] == "lane_busy"
+    assert by_task["copy-wrong"]["attempt"] is None
+    assert json.loads((world["board"] / "copy-wrong.json").read_text())["state"] == "ready"
+    # The second task never reached the lane: one attempt exists and nothing was refused.
+    attempts = [r for r in world["ledger"].status() if r["account"] == world["account"]]
+    assert len(attempts) == 1 and attempts[0]["state"] == "held"
+
+
 def test_a_held_attempt_makes_the_lane_busy(world):
     # A held attempt still occupies the account slot in the ledger, so after a hold the
     # lane must be busy, not three refused dispatches waiting to happen.

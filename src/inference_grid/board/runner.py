@@ -804,6 +804,9 @@ def tick(
                         input_dir=followup,
                     )
         except Refused as exc:
+            # A claim refused late still leaves its queued attempt occupying the account;
+            # the next task must see the busy lane, not the pre-dispatch view.
+            readiness = readiness_view(ledger, lanes, now, accounts_by_lane)
             reason = "refused: " + str(exc)[:200]
             if aid is None:
                 # Staging or admission refused before any attempt existed; the task stays ready.
@@ -817,6 +820,10 @@ def tick(
                 )
             results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": reason})
             continue
+        # The attempt now occupies its account slot (a hold stays ACTIVE), so re-evaluate
+        # the busy count before the next task in this tick is selected — dispatching on a
+        # stale view collided with a refused 'account busy' attempt. One query.
+        readiness = readiness_view(ledger, lanes, now, accounts_by_lane)
         if state != "completed":
             # The attempt is held in the ledger; outcomes attach after the operator resolves
             # it, so the board only records the block with the hold reason. A transport
