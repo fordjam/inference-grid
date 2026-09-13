@@ -27,9 +27,30 @@ def board_tick(
     )
 
 
-def board_new(board_dir, project_root, task):
-    from .board.new import new_task
+def board_new(
+    board_dir,
+    project_root,
+    task=None,
+    retry=None,
+    change=None,
+    budget=None,
+    lanes=None,
+    author_family=None,
+):
+    from .board.new import new_task, retry_task
 
+    if retry is not None:
+        return retry_task(
+            board_dir,
+            project_root,
+            retry,
+            change,
+            budget=budget,
+            lanes=lanes,
+            author_family=author_family,
+        )
+    if task is None:
+        raise ValueError("board-new needs either a task or a retry")
     return new_task(board_dir, project_root, task)
 
 
