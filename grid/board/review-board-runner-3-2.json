@@ -1,9 +1,9 @@
 {
- "id": "review-board-runner-3",
+ "id": "review-board-runner-3-2",
  "category": "independent_review",
- "brief": "grid/briefs/review-board-runner-3.txt",
+ "brief": "grid/briefs/review-board-runner-3-2.txt",
  "inputs": [
-  "grid/briefs/review-board-runner-3.txt",
+  "grid/briefs/review-board-runner-3-2.txt",
   "docs/BOARD.md",
   "src/inference_grid/board/runner.py",
   "src/inference_grid/board/task.py",
@@ -21,10 +21,10 @@
  ],
  "author_family": "glm",
  "budget": {
-  "wall_seconds": 600,
+  "wall_seconds": 900,
   "output_bytes": 2000000,
   "thinking_tokens": 6000
  },
  "state": "blocked",
- "blocked_reason": "superseded: review-board-runner-3-2 \u2014 go-kimi transport_error TimeoutError at 400 s with no reply on 2026-09-13; retried with a 900 s task budget now that the Go transport honours the task wall (handoff-2 A3)"
+ "blocked_reason": "attempt 69826e3a-7389-4197-92e6-9ed1fa294cde held; resolve with evidence"
 }

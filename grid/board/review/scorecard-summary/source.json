@@ -6,5 +6,10 @@
  "receipt_digest": "f168d533a1ccaf342192713e424b21f25777477fc3d6dc6dd3c2edc2c7546b50",
  "artifacts": [
   "scorecard_summary.py"
+ ],
+ "review_task": "review-scorecard-summary-2-2",
+ "review_task_history": [
+  "review-scorecard-summary",
+  "review-scorecard-summary-2"
  ]
 }

@@ -1,9 +1,9 @@
 {
- "id": "review-scorecard-summary",
+ "id": "review-scorecard-summary-2",
  "category": "independent_review",
- "brief": "grid/briefs/review-scorecard-summary.txt",
+ "brief": "grid/briefs/review-scorecard-summary-2.txt",
  "inputs": [
-  "grid/briefs/review-scorecard-summary.txt",
+  "grid/briefs/review-scorecard-summary-2.txt",
   "grid/board/review/scorecard-summary/scorecard_summary.py",
   "grid/briefs/scorecard-summary.txt",
   "grid/tests/test_scorecard_summary.py",
@@ -21,10 +21,10 @@
  ],
  "author_family": "glm",
  "budget": {
-  "wall_seconds": 600,
+  "wall_seconds": 900,
   "output_bytes": 2000000,
   "thinking_tokens": 6000
  },
  "state": "blocked",
- "blocked_reason": "superseded: review-scorecard-summary-2 \u2014 go-kimi transport_error TimeoutError at 400 s with no reply on 2026-09-13; retried with a 900 s task budget now that the Go transport honours the task wall (handoff-2 A3)"
+ "blocked_reason": "superseded: review-scorecard-summary-2-2 \u2014 kimi rejected solely on the original brief's 45-line size hint (artifact is 51 lines); size hints are advisory per docs/CONTRIBUTIONS.md evaluation policy. Review brief amended to say so; behaviour and the coordinator tests are the contract."
 }

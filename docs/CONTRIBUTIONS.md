@@ -156,3 +156,15 @@ From the operator round: what had to be done by hand, and what has never run for
 
 
 
+
+## Live round 2, 2026-09-13 17:22–17:50 UTC (coordinator: Claude Code) — first automated inbox landing
+
+Both held reviews were retried with `board-new --retry` (handoff-3 B1) at a 900 s task budget; the source link for `scorecard-summary` had to be moved to the retry by hand (handoff-5 A1).
+
+| Task | Attempt | Outcome |
+| --- | --- | --- |
+| `review-board-runner-3-2` | `69826e3a…` | Held: kimi-k3 answered in ~5 min with `finish_reason: length` — 16,000 completion tokens, all reasoning, no content. `go.py` sends a fixed `max_tokens=16000` and no reasoning budget; the task's `thinking_tokens` never reaches the request. Resolved `consumed`. The same tick then dispatched the next task to the same account and was refused busy: readiness is evaluated once per tick. |
+| `review-scorecard-summary-2` | `18cd4b62…` | Completed (5.5k reasoning, `stop`), **rejected** on one finding: 51 lines against the original brief's 45-line hint. Rejection propagated to the source (handoff-2 A5). Size hints are advisory by recorded policy; the generated review brief did not say so. |
+| `review-scorecard-summary-2-2` | `6aa00179…` | Brief amended (size hints advisory). **Approved, 0 findings, 11 checked.** Runner accepted `314872c5…`, marked `scorecard-summary` accepted and landed it on `grid/inbox` at `ba6e6ea` — artifact byte-identical to the reviewed staging copy, record complete, operator tree untouched. First real `land_in_inbox`, matching `tests/test_board_end_to_end.py`. |
+
+Learning: the go-kimi "transport timeouts" of the morning were most likely reasoning overruns hitting the wall first; the lane needs a reasoning budget and a `reasoning_overrun` refusal. Three findings from this round (source-link move on retry, retry suffix stacking, advisory size hints) plus the two above are `docs/handoff-glm-5.md`.
