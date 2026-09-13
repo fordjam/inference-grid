@@ -728,8 +728,16 @@ def tick(
     packets_root,
     now=None,
     prepare_argv=None,
+    dry_run=False,
 ):
-    """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records."""
+    """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records.
+
+    With dry_run the tick stops at select_lane for every ready task — readiness view,
+    campaign windows, busy accounts, family exclusion, unsupported_until — and returns
+    {"readiness": view, "plan": [{"task", "lane", "reason"}, ...]} instead: the plan a
+    real tick would follow, without creating an attempt, writing a task file or touching
+    a packet directory.
+    """
     now = time.time() if now is None else now
     results = []
     view = lane_view(lanes, now)
@@ -741,12 +749,13 @@ def tick(
             continue
         clash = shadowing_names(task)
         if clash:
-            save_task(
-                path,
-                task,
-                state="blocked",
-                blocked_reason=("task file names collide: " + clash)[:300],
-            )
+            if not dry_run:
+                save_task(
+                    path,
+                    task,
+                    state="blocked",
+                    blocked_reason=("task file names collide: " + clash)[:300],
+                )
             results.append(
                 {
                     "task": task_id,
@@ -773,6 +782,12 @@ def tick(
             results.append({"task": task_id, "lane": None, "attempt": None, "result": reason})
             continue
         lane_id = choice["lane"]
+        if dry_run:
+            # The plan stops here: no dispatched state, no packet, no attempt.
+            results.append(
+                {"task": task_id, "lane": lane_id, "attempt": None, "result": choice["reason"]}
+            )
+            continue
         packet_dir = Path(packets_root) / task_id / time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
         if prepare_argv:
             # Refresh account observations right before the claim; a long tick outlives them.
@@ -940,4 +955,11 @@ def tick(
                 "result": result,
             }
         )
+    if dry_run:
+        return {
+            "readiness": readiness,
+            "plan": [
+                {"task": r["task"], "lane": r["lane"], "reason": r["result"]} for r in results
+            ],
+        }
     return results

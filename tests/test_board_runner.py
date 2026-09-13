@@ -895,6 +895,61 @@ def test_lane_within_concurrency_still_dispatches(world):
     }
 
 
+def test_dry_run_plans_without_touching_anything(world):
+    # The plan a tick would follow, without the dispatch: one task selects the free lane,
+    # one is skipped on the busy account, one on family exclusion — and nothing on disk
+    # or in the ledger moves.
+    (world["board"] / "copy-ok.json").write_text(
+        json.dumps(dict(make_task("copy-ok", "brief.txt"), lanes=["go", "zai"]))
+    )
+    (world["board"] / "review-fam.json").write_text(
+        json.dumps(
+            dict(make_review_task("review-fam", "brief-approve.txt"), lanes=["zai"])
+        )
+    )
+    lanes = dict(world["lanes"])
+    lanes["zai"] = dict(
+        world["lanes"]["go"],
+        family="claude",
+        model="kimi-k3",
+        categories=["pure_function", "independent_review"],
+    )
+    world["ledger"].configure_account(
+        "zai-acct",
+        1,
+        {"five_hour": 10, "weekly": 20},
+        time.time() + 600,
+        ["kimi-k3"],
+        ["zai-alias"],
+    )
+    seed_active_attempt(world, "seed-busy")  # the go account is at capacity
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    world["ledger"].record_lane("zai", dict(ready_record(now), provider="zai"))
+    before = {p.name: p.read_bytes() for p in world["board"].glob("*.json")}
+    plan = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        lanes,
+        world["lanes_path"],
+        {"go": world["account"], "zai": "zai-alias"},
+        world["packets"],
+        now=now,
+        dry_run=True,
+    )
+    assert plan["readiness"] == {"go": {"state": "busy"}, "zai": {"state": "ready"}}
+    assert plan["plan"] == [
+        {"task": "copy-ok", "lane": "zai", "reason": "selected"},
+        {"task": "copy-wrong", "lane": None, "reason": "lane_busy"},
+        {"task": "review-fam", "lane": None, "reason": "no_independent_family"},
+    ]
+    # Nothing was dispatched, written or staged.
+    assert {p.name: p.read_bytes() for p in world["board"].glob("*.json")} == before
+    assert len(world["ledger"].status()) == 1  # only the seeded attempt exists
+    assert not world["packets"].exists()
+
+
 def test_a_hold_mid_tick_makes_the_next_task_lane_busy(world, monkeypatch):
     # Busy used to be evaluated once per tick: the first task's attempt went held
     # mid-tick and the second task on the same account was still dispatched and refused
