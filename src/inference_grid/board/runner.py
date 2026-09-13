@@ -405,8 +405,9 @@ def hold_block_reason(aid, verdict, state):
     refusal = verdict.get("refusal")
     if not isinstance(refusal, str):
         return None
-    if refusal.startswith("reasoning_overrun"):
-        # The overrun refusal already carries the counts the operator needs.
+    if refusal.startswith("reasoning_overrun") or refusal.startswith("tool_markup"):
+        # The overrun and tool-markup refusals already carry what the operator needs;
+        # both are named holds a re-dispatch can answer, not blind-retry candidates.
         return f"attempt {aid} held: {refusal}; resolve with evidence"
     if not refusal.startswith("transport_error"):
         return None
@@ -546,7 +547,9 @@ def review_brief_text(task, context=None):
         'checked and move on. Any line, size or length budget in the original brief is '
         "advisory: it is a hint, not a requirement, and exceeding it is not a finding. "
         'Then decide "approved" if no demonstrated defect changes '
-        'behavior, otherwise "rejected". OUTPUT FORMAT, mandatory: the entire reply is one '
+        'behavior, otherwise "rejected". You have no tools; every file you need is in '
+        "this message. Do not emit tool calls. "
+        "OUTPUT FORMAT, mandatory: the entire reply is one "
         'JSON object {"verdict": "approved" or "rejected", "findings": [{"location": '
         '"<file and function>", "input": "<concrete input>", "expected": "<what the '
         'brief requires>", "observed": "<what the artifact does>"}], "checked": ["<rule '

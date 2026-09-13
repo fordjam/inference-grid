@@ -525,3 +525,58 @@ class ReplyModeTests(unittest.TestCase):
             self.assertEqual((attempt / "artifacts/reply.txt").read_text(), verdict_text)
         finally:
             tmp.cleanup()
+
+
+class ToolMarkupTests(unittest.TestCase):
+    def test_a_tool_call_transcript_is_its_own_refusal(self):
+        import tempfile
+
+        # review-ff-glm-r6-c8e5c2c came back as a tool-calling transcript; the schema
+        # test failed it correctly but only as a bare failed_tests. The lane names it.
+        transcript = '<|open|>tools<|sep|><|open|>call tool="bash" ls -la'
+        for expected in (["out.py"], ["reply.txt"]):
+            tmp = tempfile.TemporaryDirectory(dir="/private/tmp")
+            try:
+                root = Path(tmp.name)
+                cred = root / "auth.json"
+                cred.write_text(json.dumps({"opencode-go": {"type": "api", "key": KEY}}))
+                cred.chmod(0o600)
+                attempt = root / "attempt"
+                (attempt / "inputs").mkdir(parents=True)
+                (attempt / "artifacts").mkdir()
+                (attempt / "inputs/brief.txt").write_text("review this")
+                (attempt / "inputs/expected.json").write_text(json.dumps(expected))
+                request = {
+                    "attempt": "a",
+                    "generation": 1,
+                    "model": MODEL,
+                    "manifest_sha256": "m" * 64,
+                    "input_directory": str(attempt / "inputs"),
+                    "output_directory": str(attempt / "artifacts"),
+                }
+                receipt, verdict = go.run(
+                    request,
+                    {"credential_path": str(cred), "wall_seconds": 60},
+                    attempt,
+                    send=self_response_sender(transcript),
+                )
+                self.assertIsNone(receipt)
+                self.assertTrue(verdict["refusal"].startswith("tool_markup:"), verdict)
+                self.assertIn('call tool="bash"', verdict["refusal"])
+                self.assertLessEqual(len(verdict["refusal"]), 200)
+                self.assertTrue((attempt / "native.json").is_file())
+            finally:
+                tmp.cleanup()
+
+
+def self_response_sender(content):
+    """An injected send answering with a stop reply whose text is `content`."""
+
+    def send(body, key, session, timeout):
+        return {
+            "model": body["model"],
+            "choices": [{"finish_reason": "stop", "message": {"content": content}}],
+            "usage": {"completion_tokens": 10},
+        }
+
+    return send

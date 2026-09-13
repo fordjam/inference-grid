@@ -1509,3 +1509,51 @@ def test_a_hold_without_a_transport_verdict_keeps_the_plain_reason(world, monkey
     assert task["blocked_reason"] == (
         "attempt " + results[0]["attempt"] + " held; resolve with evidence"
     )
+
+
+def test_review_briefs_forbid_tool_calls():
+    # review-ff-glm-r6-c8e5c2c emitted a tool-calling transcript; every generated brief
+    # now tells the model it has no tools, just before the output-format rule.
+    task = {"id": "review-x", "artifacts": ["reply.txt"], "brief": "b.txt"}
+    text = runner.review_brief_text(task)
+    sentence = "You have no tools; every file you need is in this message. Do not emit tool calls."
+    assert sentence in text
+    assert text.index("Do not emit tool calls.") < text.index("OUTPUT FORMAT")
+    # Branch-review briefs build on the same function and carry the sentence too.
+    branch_text = runner.review_brief_text(task, context="The work under review is a range.")
+    assert sentence in branch_text
+
+
+def test_a_tool_markup_hold_names_the_transcript(world, monkeypatch):
+    (world["board"] / "copy-wrong.json").unlink()
+    transcript = '<|open|>tools<|sep|><|open|>call tool="bash" ls -la'
+    overrun = world["lanes_path"].parent / "markup_adapter.py"
+    overrun.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "request = json.load(sys.stdin)\n"
+        "attempt = Path(request['output_directory']).parent\n"
+        "verdict = {'refusal': 'tool_markup: the reply is a tool-calling transcript, "
+        "not a verdict: " + transcript + "'}\n"
+        "(attempt / 'verdict.json').write_text(json.dumps(verdict))\n"
+        "sys.exit(1)\n"
+    )
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(overrun)])
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "held"
+    task = json.loads((world["board"] / "copy-ok.json").read_text())
+    assert task["blocked_reason"] == (
+        "attempt " + results[0]["attempt"] + " held: tool_markup: the reply is a "
+        "tool-calling transcript, not a verdict: " + transcript + "; resolve with evidence"
+    )

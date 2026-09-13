@@ -169,6 +169,32 @@ def region_optin_refusal(error):
     return None
 
 
+def _content_of(response):
+    """The reply text of the first choice, or None."""
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    message = choices[0].get("message")
+    return message.get("content") if isinstance(message, dict) else None
+
+
+def tool_markup_refusal(content):
+    """`tool_markup` when the reply is a tool-calling transcript instead of the verdict.
+
+    review-ff-glm-r6-c8e5c2c came back as <|open|>tools<|sep|><|open|>call tool="bash"…;
+    the schema test failed it correctly but only as failed_tests. The refusal carries the
+    first 120 characters so the hold reason shows what came back.
+    """
+    if not isinstance(content, str):
+        return None
+    if content.lstrip().startswith("<|") or "call tool=" in content:
+        return (
+            "tool_markup: the reply is a tool-calling transcript, not a verdict: "
+            + content.strip()[:120]
+        )
+    return None
+
+
 def reasoning_overrun(response, max_tokens):
     """The refusal for a length stop with no content: the model thought its whole output away.
 
@@ -181,8 +207,7 @@ def reasoning_overrun(response, max_tokens):
         return None
     if choices[0].get("finish_reason") != "length":
         return None
-    message = choices[0].get("message")
-    content = message.get("content") if isinstance(message, dict) else None
+    content = _content_of(response)
     if isinstance(content, str) and content.strip():
         return None
     usage = response.get("usage")
@@ -311,6 +336,10 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
     problem = qualify(response, request["model"])
     if problem:
         verdict["refusal"] = reasoning_overrun(response, max_tokens) or problem
+        return None, verdict
+    markup = tool_markup_refusal(_content_of(response))
+    if markup:
+        verdict["refusal"] = markup
         return None, verdict
     name, problem = expected_artifact(work)
     if problem:
