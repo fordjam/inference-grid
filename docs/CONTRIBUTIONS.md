@@ -127,3 +127,12 @@ The board had idled since 02:23 UTC (the tick is not loaded in launchd). `review
 `lane-cline` (`d7c21653…`) and `lane-goat` (`e3991a48…`) were accepted in the ledger by the operator with reviewer family `kimi`; the runner could not do it itself because `review-lane-cline-2` does not map back to `lane-cline` by prefix and the goat `source.json` predates `write_source_link`. Both modules were already integrated into `src/inference_grid/lanes/` on 2026-09-12, so no inbox landing was made. `scorecard-summary` remains `review_pending`.
 
 Learning: after a held attempt on `go-kimi`, the same tick still dispatched three more tasks there and each was `refused: account busy` — held attempts hold the slot but are not counted by the B1 busy rule. Two of four kimi-k3 reviews timed out at 400 s regardless of packet size; the lane is intermittently slow, and the task budget (600 s) never reaches the transport timeout. Both are recorded with three other findings in `docs/handoff-glm-2.md`.
+
+
+## Handoff 2 round, 2026-09-13 (GLM-5.3-Flash through interactive ZCode)
+
+Defects and features observed on the live board during the first operator-driven review round, per `docs/handoff-glm-2.md`:
+
+| Item | Fix / Change | Evidence |
+| --- | --- | --- |
+| A1 | `readiness_view` counts every state the ledger treats as ACTIVE (queued, dispatching, held) toward `max_concurrency`, importing the set from `ledger.py`; a held attempt now makes the lane busy instead of leaving room for refused dispatches | `test_a_held_attempt_makes_the_lane_busy` |

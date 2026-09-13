@@ -23,7 +23,7 @@ from pathlib import Path
 
 from ..flash_window import flash_window
 from ..lane_readiness import lane_readiness
-from ..ledger import Refused, digest, lanes as lane_records, select
+from ..ledger import ACTIVE, Refused, digest, lanes as lane_records, select
 from ..ledger import aliases as alias_records, attempts as attempt_records
 from ..worker import execute
 from .guard import check_input
@@ -140,18 +140,18 @@ def lane_view(lanes, now):
 def readiness_view(ledger, lanes, now, accounts_by_lane=None):
     """Lane records classified now; a lane without a record is stale, never ready.
 
-    A lane whose account already carries its max_concurrency of active attempts is busy:
-    select_lane treats any non-ready state as unavailable, so the tick can skip to another
-    lane or report lane_busy instead of colliding with a refused 'account busy' dispatch.
+    A lane whose account already carries its max_concurrency of ACTIVE attempts (the
+    ledger's own set: queued, dispatching and held — a hold still occupies the account
+    slot) is busy: select_lane treats any non-ready state as unavailable, so the tick can
+    skip to another lane or report lane_busy instead of colliding with a refused 'account
+    busy' dispatch.
     """
     with ledger.engine.connect() as con:
         records = {r["provider"]: r["record"] for r in con.execute(select(lane_records)).mappings()}
         alias_map = {r["id"]: r["account"] for r in con.execute(select(alias_records)).mappings()}
         active = {}
         for row in con.execute(
-            select(attempt_records.c.account).where(
-                attempt_records.c.state.in_(("queued", "dispatching"))
-            )
+            select(attempt_records.c.account).where(attempt_records.c.state.in_(ACTIVE))
         ).mappings():
             active[row["account"]] = active.get(row["account"], 0) + 1
     view = {}

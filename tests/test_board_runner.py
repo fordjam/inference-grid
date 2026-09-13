@@ -824,3 +824,31 @@ def test_lane_within_concurrency_still_dispatches(world):
         "copy-ok": "passed",
         "copy-wrong": "failed_tests",
     }
+
+
+def test_a_held_attempt_makes_the_lane_busy(world):
+    # A held attempt still occupies the account slot in the ledger, so after a hold the
+    # lane must be busy, not three refused dispatches waiting to happen.
+    aid, _ = seed_active_attempt(world, "seed-hold")
+    world["ledger"].hold(aid, "Refused: timeout: provider acceptance may be ambiguous")
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    view = runner.readiness_view(
+        world["ledger"], world["lanes"], now, {"go": world["account"]}
+    )
+    assert view["go"]["state"] == "busy"
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert {r["task"]: r["result"] for r in results} == {
+        "copy-ok": "lane_busy",
+        "copy-wrong": "lane_busy",
+    }
+    assert len(world["ledger"].status()) == 1  # nothing new dispatched
