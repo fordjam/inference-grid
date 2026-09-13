@@ -1,9 +1,9 @@
 {
- "id": "review-board-runner-3-2",
+ "id": "review-board-runner-4",
  "category": "independent_review",
- "brief": "grid/briefs/review-board-runner-3-2.txt",
+ "brief": "grid/briefs/review-board-runner-4.txt",
  "inputs": [
-  "grid/briefs/review-board-runner-3-2.txt",
+  "grid/briefs/review-board-runner-4.txt",
   "docs/BOARD.md",
   "src/inference_grid/board/runner.py",
   "src/inference_grid/board/task.py",
@@ -25,6 +25,6 @@
   "output_bytes": 2000000,
   "thinking_tokens": 6000
  },
- "state": "blocked",
- "blocked_reason": "superseded: review-board-runner-4 \u2014 reasoning_overrun at endpoint default max (16000 reasoning tokens, no content); retried with reasoning_effort=high (handoff-6 A1). Standalone review: no source link to move (handoff-7 A1)."
+ "state": "dispatched",
+ "blocked_reason": null
 }

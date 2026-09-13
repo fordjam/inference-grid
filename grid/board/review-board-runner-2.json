@@ -27,5 +27,5 @@
   "thinking_tokens": 6000
  },
  "state": "blocked",
- "blocked_reason": "attempt a8547769-e91d-45d3-91b5-d61b9e414aec review rejected with 3 finding(s); all three fixed 2026-09-13 (A1 parse_review, A2 verify follow-up, A3 shadowing_names); re-reviewed as review-board-runner-3"
+ "blocked_reason": "superseded: review-board-runner-3 \u2014 attempt a8547769 rejected with 3 findings (A1\u2013A3), all fixed 2026-09-13"
 }
