@@ -1,9 +1,15 @@
 """Board runner: one tick dispatches ready tasks to selected lanes and tests what comes back.
 
 A board is a directory of task JSON files (validated by board.task) beside a project. The tick
-never edits the project: inputs are copied into a packet, the attempt runs through the ledger on
-the packaged lane runner, and the task's tests run against the returned artifacts in a scratch
-directory. Results land back in the task file as state changes with recorded reasons.
+writes only board-owned state: task files, review staging under <board>/review/<task-id>/ and
+generated review briefs beside the board; it never edits project sources. Inputs are copied
+into a packet, the attempt runs through the ledger on the packaged lane runner, and the task's
+tests run against the returned artifacts in a scratch directory. Results land back in the task
+file as state changes with recorded reasons.
+
+A review task (author_family set) passes only on an "approved" verdict in its reply artifact;
+a rejected verdict blocks the task with the finding count. A passing work task gets a
+review-<id> task created for it; acceptance itself stays an operator action.
 """
 
 import hashlib
@@ -44,6 +50,55 @@ def save_task(path, task, **changes):
     return updated
 
 
+def shadowing_names(task):
+    """Basename collisions between tests and artifacts or staged inputs, if any.
+
+    run_tests copies inputs and tests into the scratch directory and then the artifacts
+    over them, so a file sharing a basename with another staged file silently replaces
+    it — most dangerously an artifact named like a coordinator test, which swaps the
+    acceptance test for provider-authored code. Identical paths listed twice (a test
+    that is also a staged input) are harmless; only different files colliding block.
+    """
+
+    if tree_task(task):
+        # Tree tasks keep full relative paths in the scratch directory, so basenames cannot
+        # collide — but an artifact claiming a test's exact path would still replace the
+        # coordinator's test with provider-authored code.
+        tests = set(task["tests"])
+        clashes = [a for a in task["artifacts"] if a in tests]
+        if clashes:
+            return "artifact would replace the test file at: " + ", ".join(sorted(clashes))
+        return ""
+
+    def by_base(key):
+        return {Path(name).name: name for name in task[key]}
+
+    problems = []
+    artifacts, tests, inputs = by_base("artifacts"), by_base("tests"), by_base("inputs")
+    for base, name in sorted(artifacts.items()):
+        if base in tests:
+            problems.append(
+                f"artifact {name} would replace the test {tests[base]} in the scratch directory"
+            )
+    for base, name in sorted(tests.items()):
+        if base in inputs and inputs[base] != name:
+            problems.append(
+                f"test {name} would replace the staged input {inputs[base]} in the scratch directory"
+            )
+    return "; ".join(problems)
+
+
+def parse_review(reply_path):
+    """The verdict object from a review artifact reply; ValueError when it is not one."""
+    text = Path(reply_path).read_text().strip()
+    if text.startswith("```"):
+        text = text.strip("`").split("\n", 1)[1].rsplit("```", 1)[0]
+    review = json.loads(text)
+    if not isinstance(review, dict) or review.get("verdict") not in ("approved", "rejected"):
+        raise ValueError("reply is not a review verdict object")
+    return review
+
+
 def lane_view(lanes, now):
     """Selection view of lanes.json: category list plus campaign-window state."""
     view = {}
@@ -77,24 +132,43 @@ def readiness_view(ledger, lanes, now):
     return view
 
 
+def tree_task(task):
+    """Package-shaped work: artifacts live at project-relative paths, tests run by discovery."""
+    return any("/" in a for a in task["artifacts"])
+
+
 def stage_packet(project_root, task, packet_dir):
-    """Copy task inputs and expected-artifact list into a packet; returns (input_dir, manifest)."""
+    """Copy task inputs and expected-artifact list into a packet; returns (input_dir, manifest).
+
+    Flat tasks stage inputs by basename; tree tasks keep every relative path so the packet is a
+    faithful slice of the project. The brief is always staged as brief.txt at the root.
+    """
     input_dir = Path(packet_dir) / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
+    tree = tree_task(task)
     manifest = {}
     for name in task["inputs"]:
         source = Path(project_root) / name
-        # Lane modules read the prompt from brief.txt whatever the project calls the file.
-        target = input_dir / ("brief.txt" if name == task["brief"] else Path(name).name)
+        if Path(name).name == "expected.json":
+            raise Refused(f"{task['id']}: expected.json is reserved for the artifact list")
+        if name == task["brief"]:
+            relative = "brief.txt"
+        else:
+            relative = name if tree else Path(name).name
+        if relative in manifest:
+            raise Refused(f"{task['id']}: staged input names must not collide: {relative}")
+        target = input_dir / relative
         if not source.is_file():
             raise Refused(f"{task['id']}: input missing: {name}")
         problem = check_input(name, source.read_bytes())
         if problem:
             raise Refused(f"{task['id']}: input refused: {name}: {problem}")
+        target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
-        manifest[target.name] = hashlib.sha256(target.read_bytes()).hexdigest()
+        manifest[relative] = hashlib.sha256(target.read_bytes()).hexdigest()
     expected = input_dir / "expected.json"
-    expected.write_text(json.dumps([Path(a).name for a in task["artifacts"]]))
+    names = task["artifacts"] if tree else [Path(a).name for a in task["artifacts"]]
+    expected.write_text(json.dumps(names))
     manifest["expected.json"] = hashlib.sha256(expected.read_bytes()).hexdigest()
     return input_dir, manifest
 
@@ -103,22 +177,26 @@ def run_tests(project_root, task, artifact_dir, scratch):
     """Run the task's tests beside the artifacts in a scratch directory; returns (passed, summary)."""
     scratch = Path(scratch)
     scratch.mkdir(parents=True, exist_ok=True)
+    tree = tree_task(task)
     for name in task["inputs"] + task["tests"]:
         source = Path(project_root) / name
-        if source.is_file():
-            shutil.copy2(source, scratch / Path(name).name)
+        if source.is_file() and name != task["brief"]:
+            target = scratch / (name if tree else Path(name).name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
     for name in task["artifacts"]:
-        shutil.copy2(Path(artifact_dir) / Path(name).name, scratch / Path(name).name)
+        relative = name if tree else Path(name).name
+        target = scratch / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(Path(artifact_dir) / relative, target)
     if not task["tests"]:
         return True, "no tests declared; artifact accepted on presence only"
-    modules = [Path(t).stem for t in task["tests"]]
-    proc = subprocess.run(
-        [sys.executable, "-m", "unittest", "-v", *modules],
-        cwd=scratch,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
+    if tree:
+        test_dir = str(Path(task["tests"][0]).parent) or "."
+        argv = [sys.executable, "-m", "unittest", "discover", "-s", test_dir, "-t", ".", "-v"]
+    else:
+        argv = [sys.executable, "-m", "unittest", "-v", *[Path(t).stem for t in task["tests"]]]
+    proc = subprocess.run(argv, cwd=scratch, capture_output=True, text=True, timeout=600)
     summary = (proc.stderr or proc.stdout).strip().splitlines()[-1:] or [""]
     return proc.returncode == 0, summary[0][:300]
 
@@ -185,7 +263,7 @@ def verify_followup(task, packet_dir, held_attempt_dir):
     recorded change of brief (run the tests, fix nothing unless they fail), never a blind retry.
     """
     work = Path(held_attempt_dir) / "work"
-    names = [Path(a).name for a in task["artifacts"]]
+    names = task["artifacts"] if tree_task(task) else [Path(a).name for a in task["artifacts"]]
     if not all((work / n).is_file() for n in names):
         return None
     source = Path(packet_dir) / "input"
@@ -194,8 +272,11 @@ def verify_followup(task, packet_dir, held_attempt_dir):
         shutil.rmtree(verify)
     shutil.copytree(source, verify)
     for n in names:
+        (verify / n).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(work / n, verify / n)
     tests = [Path(t).stem for t in task["tests"] if Path(t).name.startswith("test_")]
+    if tree_task(task):
+        tests = ["discover -s " + (str(Path(task["tests"][0]).parent) or ".") + " -t ."]
     (verify / "brief.txt").write_text(
         "Work only inside the current directory. The files "
         + ", ".join(names)
@@ -206,6 +287,86 @@ def verify_followup(task, packet_dir, held_attempt_dir):
         + "command once more. Then stop with a one-line summary stating pass or fail. No other commands, no network.\n"
     )
     return verify
+
+
+REVIEW_BUDGET = {"wall_seconds": 600, "output_bytes": 2000000, "thinking_tokens": 6000}
+
+
+def review_brief_text(task):
+    """The exact text sent to the reviewer: what was asked, what to check, verdict schema."""
+    artifacts = ", ".join(Path(a).name for a in task["artifacts"])
+    return (
+        "You are an independent reviewer for task review-" + task["id"] + ". "
+        "The artifact file(s) " + artifacts + " were authored "
+        "by one provider lane against the original brief, which is staged here as "
+        + Path(task["brief"]).name
+        + ". Read every staged file first. Review the artifact against the original brief only: "
+        "whether each stated requirement is met, and defects you can demonstrate by quoting the "
+        "artifact next to the brief requirement it violates. The coordinator's acceptance tests "
+        "are staged too; a difference between them and the artifact's own tests is a finding. "
+        "Do not report style preferences or hypothetical concerns; mark judgment calls as "
+        'checked and move on. Then decide "approved" if no demonstrated defect changes '
+        'behavior, otherwise "rejected". OUTPUT FORMAT, mandatory: the entire reply is one '
+        'JSON object {"verdict": "approved" or "rejected", "findings": [{"location": '
+        '"<file and function>", "input": "<concrete input>", "expected": "<what the '
+        'brief requires>", "observed": "<what the artifact does>"}], "checked": ["<rule '
+        'you verified>", ...]}; findings may be empty; rejected requires at least one; '
+        "no markdown, no code fence, no text before or after the object.\n"
+    )
+
+
+def create_review_task(board_dir, project_root, task, lane_id, lanes, output_dir):
+    """Stage the passing artifacts and write the review-<id> task (tick step 4).
+
+    Returns (review task dict or None, note). An existing review file is never overwritten.
+    The artifacts are staged under <board>/review/<task-id>/ so the review packet can carry
+    them although they are not project files; acceptance and integration stay operator steps.
+    """
+    review_id = "review-" + task["id"]
+    if len(review_id) > 60:
+        return None, "review id would exceed 60 chars"
+    board_dir = Path(board_dir)
+    review_path = board_dir / (review_id + ".json")
+    if review_path.exists():
+        return None, "review task already exists"
+    try:
+        board_rel = board_dir.resolve().relative_to(Path(project_root).resolve())
+    except ValueError:
+        return None, "board directory is not inside the project"
+    grid_rel = board_rel.parent
+    schema_test = str(grid_rel / "tests" / "test_review_schema.py")
+    if not (Path(project_root) / schema_test).is_file():
+        return None, "review schema test missing at " + schema_test
+    stage = board_dir / "review" / task["id"]
+    stage.mkdir(parents=True, exist_ok=True)
+    staged = []
+    for name in task["artifacts"]:
+        relative = name if tree_task(task) else Path(name).name
+        (stage / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(Path(output_dir) / relative, stage / relative)
+        staged.append(str(board_rel / "review" / task["id"] / relative))
+    brief_rel = str(grid_rel / "briefs" / (review_id + ".txt"))
+    brief_source = Path(project_root) / brief_rel
+    brief_source.parent.mkdir(parents=True, exist_ok=True)
+    brief_source.write_text(review_brief_text(task))
+    inputs = [brief_rel, task["brief"], *staged, *task["tests"], schema_test]
+    ordered = list(dict.fromkeys(inputs))
+    review = {
+        "id": review_id,
+        "category": "independent_review",
+        "brief": brief_rel,
+        "inputs": ordered,
+        "tests": [schema_test],
+        "artifacts": ["reply.txt"],
+        "lanes": sorted(lanes),
+        "author_family": lanes[lane_id]["family"],
+        "budget": dict(REVIEW_BUDGET),
+        "state": "ready",
+        "blocked_reason": None,
+    }
+    validate_task(review)
+    review_path.write_text(json.dumps(review, indent=1) + "\n")
+    return review, "created " + review_id
 
 
 def tick(
@@ -228,6 +389,23 @@ def tick(
     for task_id, (path, task) in load_board(board_dir).items():
         if task["state"] != "ready":
             continue
+        clash = shadowing_names(task)
+        if clash:
+            save_task(
+                path,
+                task,
+                state="blocked",
+                blocked_reason=("task file names collide: " + clash)[:300],
+            )
+            results.append(
+                {
+                    "task": task_id,
+                    "lane": None,
+                    "attempt": None,
+                    "result": "blocked: name collision",
+                }
+            )
+            continue
         allowed = {k: v for k, v in view.items() if k in task["lanes"]}
         choice = select_lane(
             {"category": task["category"], "author_family": task["author_family"]},
@@ -246,6 +424,11 @@ def tick(
         if prepare_argv:
             # Refresh account observations right before the claim; a long tick outlives them.
             subprocess.run(prepare_argv, capture_output=True, timeout=120)
+        # Mark the task dispatched before any dispatch so an overlapping or later tick can
+        # never submit a second attempt for it; a crashed tick leaves this state behind for
+        # the operator to resolve together with the ledger attempt.
+        save_task(path, task, state="dispatched", blocked_reason=None)
+        aid = None
         try:
             aid, state, output_dir = dispatch(
                 ledger,
@@ -260,6 +443,10 @@ def tick(
             if state != "completed":
                 followup = verify_followup(task, packet_dir, Path(packet_dir) / "attempts" / aid)
                 if followup is not None:
+                    # The one authorized recorded-change retry (BOARD.md): a deadline hold
+                    # whose expected files are all present is resolved consumed on that
+                    # evidence and followed by exactly one verify-only attempt under a new
+                    # ledger task id. Any other hold stays held for the operator.
                     ledger.resolve(
                         aid,
                         "consumed",
@@ -283,45 +470,91 @@ def tick(
                         input_dir=followup,
                     )
         except Refused as exc:
-            results.append(
-                {
-                    "task": task_id,
-                    "lane": lane_id,
-                    "attempt": None,
-                    "result": "refused: " + str(exc)[:200],
-                }
-            )
+            reason = "refused: " + str(exc)[:200]
+            if aid is None:
+                # Staging or admission refused before any attempt existed; the task stays ready.
+                save_task(path, task, state="ready", blocked_reason=None)
+            else:
+                save_task(
+                    path,
+                    task,
+                    state="blocked",
+                    blocked_reason=("attempt " + aid + " " + reason)[:300],
+                )
+            results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": reason})
             continue
         if state != "completed":
-            ledger_state = "held"
+            # The attempt is held in the ledger; outcomes attach after the operator resolves
+            # it, so the board only records the block with the hold reason.
             save_task(
                 path,
                 task,
                 state="blocked",
                 blocked_reason=f"attempt {aid} {state}; resolve with evidence",
             )
-            results.append(
-                {"task": task_id, "lane": lane_id, "attempt": aid, "result": ledger_state}
-            )
+            results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"})
             continue
-        passed, summary = run_tests(project_root, task, output_dir, packet_dir / "scratch")
-        ledger.record_outcome(aid, task["category"], passed, note=summary[:300])
-        if passed:
-            next_state = "review_pending" if task["author_family"] is None else "passed"
-            save_task(path, task, state=next_state, blocked_reason=None)
-        else:
+        try:
+            passed, summary = run_tests(project_root, task, output_dir, packet_dir / "scratch")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            # A harness failure (missing artifact, unreadable test, timeout) must not leave
+            # the task ready for a re-dispatch of the same completed attempt, nor stop the
+            # rest of the tick.
+            summary = ("test harness error: " + str(exc))[:200]
+            ledger.record_outcome(aid, task["category"], False, note=summary)
             save_task(
                 path,
                 task,
                 state="blocked",
-                blocked_reason=f"attempt {aid} failed tests: {summary}"[:300],
+                blocked_reason=("attempt " + aid + " " + summary)[:300],
+            )
+            results.append(
+                {"task": task_id, "lane": lane_id, "attempt": aid, "result": "test_error"}
+            )
+            continue
+        result = "passed" if passed else "failed_tests"
+        if passed and task["author_family"] is not None:
+            # A review task passes only on an approved verdict; the schema test alone never
+            # approves anything.
+            try:
+                review = parse_review(output_dir / "reply.txt")
+            except (OSError, ValueError) as exc:
+                passed, result = False, "review_unreadable"
+                summary = ("review artifact unusable: " + str(exc))[:200]
+            else:
+                if review["verdict"] != "approved":
+                    findings = review.get("findings")
+                    count = len(findings) if isinstance(findings, list) else 0
+                    passed = False
+                    result = "review_rejected"
+                    summary = f"review rejected with {count} finding(s)"
+        ledger.record_outcome(aid, task["category"], passed, note=(summary or "")[:300])
+        if passed:
+            if task["author_family"] is None:
+                next_state = "review_pending"
+                created, note = create_review_task(
+                    board_dir, project_root, task, lane_id, lanes, output_dir
+                )
+                if created is None and note != "review task already exists":
+                    result = ("passed; review task not created: " + note)[:200]
+            else:
+                next_state = "passed"
+            save_task(path, task, state=next_state, blocked_reason=None)
+        else:
+            if result == "failed_tests":
+                summary = "failed tests: " + summary
+            save_task(
+                path,
+                task,
+                state="blocked",
+                blocked_reason=("attempt " + aid + " " + summary)[:300],
             )
         results.append(
             {
                 "task": task_id,
                 "lane": lane_id,
                 "attempt": aid,
-                "result": "passed" if passed else "failed_tests",
+                "result": result,
             }
         )
     return results

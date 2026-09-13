@@ -14,7 +14,13 @@ from pathlib import Path
 
 from .config import validate_lane_config
 
-KINDS = {"zcode_cli": "zcode", "claude_headless": "zai", "go_http": "go"}
+KINDS = {
+    "zcode_cli": "zcode",
+    "claude_headless": "zai",
+    "go_http": "go",
+    "goat_cli": "goat",
+    "cline_cli": "cline",
+}
 
 
 def load_lanes(path):
