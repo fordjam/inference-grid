@@ -13,6 +13,7 @@ board-new ever makes to an existing file.
 """
 
 import json
+import re
 from pathlib import Path
 
 from .task import validate_task
@@ -74,9 +75,39 @@ def new_task(board_dir, project_root, task):
     return created
 
 
+def stored_task(board_dir, task_id):
+    """The task dict stored for task_id, or None when the file is missing or unreadable."""
+    try:
+        return json.loads((Path(board_dir) / (task_id + ".json")).read_text())
+    except (OSError, ValueError):
+        return None
+
+
 def next_retry_id(board_dir, task_id):
-    """The first unused `<task-id>-N` suffix on the board, N starting at 2."""
+    """The id a retry of task_id takes; a chain of retries reads as a sequence.
+
+    When task_id already ends in `-<n>` and that task is itself a retry — its
+    blocked_reason starts with `superseded:`, or its own predecessor (the same id with
+    one lower suffix, or the plain id for `-2`) sits on the board — the numeric suffix
+    increments (`x-2` → `x-3`), skipping ids already taken. A first retry of a plain id
+    still gets `-2`. Existing files are never renamed, so a stacked legacy id such as
+    `x-3-2` keeps its shape and its retry is `x-3-3`.
+    """
     board_dir = Path(board_dir)
+    match = re.fullmatch(r"(.+)-(\d+)", task_id)
+    if match:
+        base, n = match.group(1), int(match.group(2))
+        predecessor = base if n == 2 else f"{base}-{n - 1}"
+        task = stored_task(board_dir, task_id)
+        continues_chain = (
+            str((task or {}).get("blocked_reason") or "").startswith("superseded:")
+            or (board_dir / (predecessor + ".json")).exists()
+        )
+        if continues_chain:
+            n += 1
+            while (board_dir / f"{base}-{n}.json").exists():
+                n += 1
+            return f"{base}-{n}"
     n = 2
     while (board_dir / f"{task_id}-{n}.json").exists():
         n += 1

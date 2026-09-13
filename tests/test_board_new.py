@@ -181,3 +181,51 @@ def test_retry_of_a_missing_task_refuses(tmp_path):
     board.mkdir(parents=True)
     with pytest.raises(FileNotFoundError):
         retry_task(board, tmp_path, "ghost", "nothing to retry")
+
+
+def test_retry_of_a_plain_id_gets_the_first_suffix(tmp_path):
+    from inference_grid.board.new import next_retry_id
+
+    board = tmp_path / "grid/board"
+    new_task(board, tmp_path, task(tid="x", brief="grid/briefs/x.txt"))
+    assert next_retry_id(board, "x") == "x-2"
+
+
+def test_retry_of_a_retry_increments_the_suffix(tmp_path):
+    # A chain of retries must read as a sequence (x, x-2, x-3, ...), not stack suffixes.
+    from inference_grid.board.new import next_retry_id, retry_task
+
+    board = tmp_path / "grid/board"
+    new_task(board, tmp_path, task(tid="x", brief="grid/briefs/x.txt"))
+    retry_task(board, tmp_path, "x", "first retry")
+    assert next_retry_id(board, "x-2") == "x-3"
+    retry_task(board, tmp_path, "x-2", "second retry")
+    assert next_retry_id(board, "x-3") == "x-4"
+    assert json.loads((board / "x-3.json").read_text())["state"] == "ready"
+
+
+def test_a_superseded_suffixed_task_counts_on_without_its_predecessor(tmp_path):
+    # The blocked_reason alone marks the id as part of a retry chain.
+    from inference_grid.board.new import next_retry_id
+
+    board = tmp_path / "grid/board"
+    board.mkdir(parents=True)
+    superseded = task(tid="x-2", brief="grid/briefs/x.txt")
+    superseded["state"] = "blocked"
+    superseded["blocked_reason"] = "superseded: x-3 — earlier chain"
+    (board / "x-2.json").write_text(json.dumps(superseded))
+    assert next_retry_id(board, "x-2") == "x-3"
+
+
+def test_a_stacked_legacy_id_is_left_alone_and_its_retry_continues_it(tmp_path):
+    # review-board-runner-3-2 was produced before suffixes counted; it is never renamed
+    # and its retry continues its own chain (x-3-2 → x-3-3).
+    from inference_grid.board.new import next_retry_id
+
+    board = tmp_path / "grid/board"
+    new_task(board, tmp_path, task(tid="x-3", brief="grid/briefs/x-3.txt"))
+    (board / "x-3-2.json").write_text(
+        (board / "x-3.json").read_text().replace('"id": "x-3"', '"id": "x-3-2"')
+    )
+    assert next_retry_id(board, "x-3-2") == "x-3-3"
+    assert json.loads((board / "x-3-2.json").read_text())["id"] == "x-3-2"
