@@ -62,7 +62,9 @@ def main():
     if args.command == "doctor":
         from .doctor import diagnose
 
-        report = diagnose(args.database)
+        extra = json.load(open(args.json)) if args.json else {}
+        boards = extra.get("boards") if isinstance(extra, dict) else None
+        report = diagnose(args.database, boards=boards)
         print(json.dumps(report, indent=2))
         raise SystemExit(0 if report["status"] == "checks_passed" else 1)
     if (

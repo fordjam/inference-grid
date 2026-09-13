@@ -1,5 +1,6 @@
 """Read-only local diagnostics; never authenticates or dispatches a provider."""
 
+import json
 import math
 import os
 from pathlib import Path
@@ -12,6 +13,28 @@ from sqlalchemy.engine import make_url
 from .collector import collection_claims
 from .lane_readiness import lane_readiness
 from .ledger import accounts, attempts, cooldowns, lanes, outbox, tasks
+
+MAX_BOARD_DIRS = 8
+
+
+def board_counts(board_dir):
+    """Task counts by state for one board directory; unreadable files count as invalid.
+
+    Read-only: only top-level task files are read, and nothing is dispatched or changed.
+    """
+    path = Path(board_dir)
+    if not path.is_dir():
+        return {"missing": 1}
+    from .board.task import validate_task
+
+    counts = {}
+    for file in sorted(path.glob("*.json")):
+        try:
+            state = validate_task(json.loads(file.read_text()))["state"]
+        except Exception:
+            state = "invalid"
+        counts[state] = counts.get(state, 0) + 1
+    return counts
 
 
 def executable_state(spec):
@@ -28,7 +51,7 @@ def executable_state(spec):
     return "present" if shutil.which(command) is not None else "missing"
 
 
-def diagnose(url, now=None):
+def diagnose(url, now=None, boards=None):
     now = time.time() if now is None else now
     result = {
         "scope": "ledger_and_adapter_executables",
@@ -39,6 +62,10 @@ def diagnose(url, now=None):
         "findings": [],
         "counts": {},
     }
+    if isinstance(boards, list):
+        named = [b for b in boards[:MAX_BOARD_DIRS] if isinstance(b, str) and b]
+        if named:
+            result["boards"] = {name: board_counts(name) for name in named}
     engine = None
     try:
         parsed = make_url(url)

@@ -144,3 +144,45 @@ def test_lane_records_are_classified_not_trusted(tmp_path):
     report = diagnose(url)
     assert {lane["provider"]: lane["state"] for lane in report["lanes"]}["opencode"] == "invalid"
     assert json.dumps(report).count("weekly reset") == 1
+
+
+def test_board_counts_and_missing_dirs_are_reported_read_only(tmp_path):
+    from inference_grid.doctor import board_counts, diagnose
+
+    board = tmp_path / "grid/board"
+    board.mkdir(parents=True)
+    def task(state, tid):
+        return json.dumps(
+            dict(
+                id=tid,
+                category="pure_function",
+                brief="grid/briefs/t1.txt",
+                inputs=["grid/briefs/t1.txt"],
+                tests=[],
+                artifacts=["out.py"],
+                lanes=["go"],
+                author_family=None,
+                budget={"wall_seconds": 60, "output_bytes": 1000, "thinking_tokens": None},
+                state=state,
+                blocked_reason="held for review" if state == "blocked" else None,
+            )
+        )
+
+    (board / "t1.json").write_text(task("ready", "t1"))
+    (board / "t2.json").write_text(task("blocked", "t2"))
+    (board / "junk.json").write_text("{not json")
+    staged = board / "review"
+    staged.mkdir()
+    (staged / "artifact.json").write_text('{"verdict": "approved"}')  # subdirectory: not a task
+    assert board_counts(board) == {"ready": 1, "blocked": 1, "invalid": 1}
+    assert board_counts(tmp_path / "absent") == {"missing": 1}
+
+    url = "sqlite:///" + str(tmp_path / "ledger.sqlite")
+    Ledger(url).initialize()
+    report = diagnose(url, boards=[str(board), str(tmp_path / "absent")])
+    assert report["boards"] == {
+        str(board): {"ready": 1, "blocked": 1, "invalid": 1},
+        str(tmp_path / "absent"): {"missing": 1},
+    }
+    # Boards are classified without touching anything.
+    assert board_counts(board)["ready"] == 1
