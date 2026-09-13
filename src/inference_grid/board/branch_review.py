@@ -239,6 +239,17 @@ def _packet_notes(oversized, omitted):
     return notes
 
 
+def _docs_only(paths):
+    """True when every changed path is under docs/ or is a markdown file.
+
+    Such a commit needs no reviewer: baseline logs and observation notes carry no
+    behaviour to demonstrate defects against.
+    """
+    return bool(paths) and all(
+        path.startswith("docs/") or PurePosixPath(path).name.endswith(".md") for path in paths
+    )
+
+
 def _plan_task(board_dir, project_root, task_id, family, lanes, budget, context, staged, patch):
     """Build every file of one review task in memory: ([(path, bytes)], summary). No writes.
 
@@ -300,14 +311,25 @@ def _write_files(files):
         path.write_bytes(data)
 
 
-def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_input_bytes=None, split=None):
+def review_branch(
+    board_dir,
+    project_root,
+    spec,
+    lanes=None,
+    budget=None,
+    max_input_bytes=None,
+    split=None,
+    include_docs=None,
+):
     """Author review task(s) judging a git range; one task, or one per commit when split.
 
     The whole-range packet is measured first: if it fits the byte budget a single task is
     written as before. Over budget, `split: "commit"` (also the fallback) authors one
     task per commit whose own packet fits, in range order; `split: "none"` refuses with
     the per-commit plan, and a commit whose packet alone exceeds the budget is refused
-    with its file sizes.
+    with its file sizes. Docs-only commits (all paths under docs/ or *.md) get no review
+    task by default and are listed in the result as `docs-only, not reviewed`;
+    `include_docs: true` reviews them too.
     """
     if not isinstance(spec, dict) or not all(
         isinstance(spec.get(key), str) and spec.get(key) for key in ("repo", "base", "tip")
@@ -388,7 +410,7 @@ def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_in
     # measured on its own. Everything is planned before anything is written — the live
     # round once wrote eight task files and then died on the first one's id — and a
     # commit that already has its task on the board is skipped, so a re-run resumes.
-    plans, skipped = [], []
+    plans, skipped, docs_only = [], [], []
     for commit in reversed(commits):
         code, c_paths, err = run(
             ["git", "-C", repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit["hash"]]
@@ -397,6 +419,16 @@ def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_in
             raise ValueError("git diff-tree refused: " + (err or "unknown")[:200])
         commit_paths = [line for line in c_paths.splitlines() if line.strip()]
         _check_paths(commit_paths)
+        if not include_docs and _docs_only(commit_paths):
+            short = re.sub(r"[^a-z0-9-]+", "", commit["hash"].lower())[:7]
+            docs_only.append(
+                {
+                    "commit": short,
+                    "note": "docs-only, not reviewed",
+                    "paths": commit_paths,
+                }
+            )
+            continue
         staged, oversized, omitted, file_bytes = _classify(repo, tip, cache, attrs, commit_paths)
         code, patch, err = run(
             ["git", "-C", repo, "diff-tree", "-p", "--no-commit-id", "--root", commit["hash"]]
@@ -445,7 +477,9 @@ def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_in
     result = {"tasks": [summary for _, summary in plans]}
     if skipped:
         result["skipped"] = skipped
-    if not result["tasks"] and not skipped:
+    if docs_only:
+        result["docs_only"] = docs_only
+    if not result["tasks"] and not skipped and not docs_only:
         raise ValueError("every commit packet was empty; nothing to review")
     return result
 

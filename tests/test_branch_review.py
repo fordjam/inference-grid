@@ -414,3 +414,31 @@ def test_a_rerun_skips_commits_that_already_have_tasks(tmp_path):
     )
     assert [t["id"] for t in resumed["tasks"]] == [f"review-factory-frontend-{hashes[1][:7]}"]
     assert len(resumed["skipped"]) == 2
+
+
+def test_docs_only_commits_get_no_reviewer_unless_asked(tmp_path):
+    repo, base, tip, hashes = layered_repo(tmp_path, groups=2)
+    (repo / "docs").mkdir()
+    (repo / "docs/observations.md").write_text("# Baseline log\n\nNothing behavioural.\n")
+    git(repo, "add", "-A")
+    commit(repo, "note the baseline", trailer="Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>")
+    tip = rev(repo, "HEAD")
+    board, project = board_and_project(tmp_path)
+    created = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}, max_input_bytes=2000
+    )
+    assert len(created["tasks"]) == 2  # the two code groups
+    assert created["docs_only"] == [
+        {"commit": tip[:7], "note": "docs-only, not reviewed", "paths": ["docs/observations.md"]}
+    ]
+    # include_docs on a re-run skips the two authored code tasks and reviews only the
+    # notes commit.
+    included = branch_review.review_branch(
+        board,
+        project,
+        {"repo": str(repo), "base": base, "tip": tip},
+        max_input_bytes=2000,
+        include_docs=True,
+    )
+    assert len(included["tasks"]) == 1 and "docs_only" not in included
+    assert len(included["skipped"]) == 2

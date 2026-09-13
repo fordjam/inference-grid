@@ -75,6 +75,7 @@ def board_new(
     review_branch=None,
     max_input_bytes=None,
     split=None,
+    include_docs=None,
 ):
     from .board.new import new_task, retry_task
 
@@ -89,6 +90,7 @@ def board_new(
             budget=budget,
             max_input_bytes=max_input_bytes,
             split=split,
+            include_docs=include_docs,
         )
     if retry is not None:
         return retry_task(
