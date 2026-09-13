@@ -513,21 +513,32 @@ def advisory_size_finding(finding):
     return bool(SIZE_HINT.search(expected)) and bool(SIZE_HINT.search(observed))
 
 
-def review_brief_text(task):
-    """The exact text sent to the reviewer: what was asked, what to check, verdict schema."""
-    artifacts = ", ".join(Path(a).name for a in task["artifacts"])
+def review_brief_text(task, context=None):
+    """The exact text sent to the reviewer: what was asked, what to check, verdict schema.
+
+    Without context (board work tasks) the framing is the original brief the artifact
+    was authored against. Branch reviews pass their own context — the git range, the
+    commit subjects and where the evidence is staged — in front of the shared rules,
+    which end with the mandatory output format either way.
+    """
+    if context is None:
+        artifacts = ", ".join(Path(a).name for a in task["artifacts"])
+        context = (
+            "The artifact file(s) " + artifacts + " were authored "
+            "by one provider lane against the original brief, which is staged here as "
+            + (
+                "original-brief.txt"
+                if Path(task["brief"]).name == "brief.txt"
+                else Path(task["brief"]).name
+            )
+            + ". Review the artifact against that brief only: whether each stated "
+            "requirement is met, and defects you can demonstrate by quoting the "
+            "artifact next to the brief requirement it violates."
+        )
     return (
         "You are an independent reviewer for task review-" + task["id"] + ". "
-        "The artifact file(s) " + artifacts + " were authored "
-        "by one provider lane against the original brief, which is staged here as "
-        + (
-            "original-brief.txt"
-            if Path(task["brief"]).name == "brief.txt"
-            else Path(task["brief"]).name
-        )
-        + ". Read every staged file first. Review the artifact against the original brief only: "
-        "whether each stated requirement is met, and defects you can demonstrate by quoting the "
-        "artifact next to the brief requirement it violates. The coordinator's acceptance tests "
+        + context.strip()
+        + " Read every staged file first. The coordinator's acceptance tests "
         "are staged too; a difference between them and the artifact's own tests is a finding. "
         "Do not report style preferences or hypothetical concerns; mark judgment calls as "
         'checked and move on. Any line, size or length budget in the original brief is '

@@ -44,9 +44,16 @@ def board_new(
     budget=None,
     lanes=None,
     author_family=None,
+    review_branch=None,
 ):
     from .board.new import new_task, retry_task
 
+    if review_branch is not None:
+        from .board.branch_review import review_branch as author_review_branch
+
+        return author_review_branch(
+            board_dir, project_root, review_branch, lanes=lanes, budget=budget
+        )
     if retry is not None:
         return retry_task(
             board_dir,
