@@ -442,3 +442,52 @@ def test_docs_only_commits_get_no_reviewer_unless_asked(tmp_path):
     )
     assert len(included["tasks"]) == 1 and "docs_only" not in included
     assert len(included["skipped"]) == 2
+
+
+def test_split_packets_stage_files_as_of_their_commit(tmp_path):
+    # review-ff-glm-r6-f383c9d was rejected on a ghost: the packet held the commit's own
+    # hunks but the file contents at the range tip, two rounds later. Split packets now
+    # stage git show <sha>:<path>; only the unsplit mode stages the tip.
+    repo = tmp_path / "factory-frontend"
+    (repo / "src").mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "src/seed.py").write_text("SEED = 0\n")
+    git(repo, "add", "-A")
+    commit(repo, "base")
+    base = rev(repo, "HEAD")
+    (repo / "src/app.py").write_text("VALUE = 1\n")
+    git(repo, "add", "-A")
+    commit(repo, "add app", trailer="Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>")
+    first = rev(repo, "HEAD")
+    (repo / "src/app.py").write_text("VALUE = 2\n# pytestmark added later\n")
+    git(repo, "add", "-A")
+    commit(repo, "evolve app", trailer="Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>")
+    tip = rev(repo, "HEAD")
+    board, project = board_and_project(tmp_path)
+
+    split = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}, split="commit"
+    )
+    by_id = {entry["id"]: entry for entry in split["tasks"]}
+    first_task_id = f"review-factory-frontend-{first[:7]}"
+    staged_first = next(
+        p for p in by_id[first_task_id]["staged"] if p.endswith("src/app.py")
+    )
+    at_commit = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{first}:src/app.py"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    staged_text = (project / staged_first).read_text()
+    assert staged_text == at_commit == "VALUE = 1\n"
+    assert "as of this commit" in Path(by_id[first_task_id]["brief"]).read_text()
+
+    # The unsplit mode still stages the tip version (its id would collide with the
+    # second split task's, so it lands on its own board).
+    whole = branch_review.review_branch(
+        project / "grid/board2", project, {"repo": str(repo), "base": base, "tip": tip}
+    )
+    staged_whole = next(p for p in whole["staged"] if p.endswith("src/app.py"))
+    tip_text = (project / staged_whole).read_text()
+    assert tip_text == "VALUE = 2\n# pytestmark added later\n"

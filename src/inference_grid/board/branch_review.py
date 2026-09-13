@@ -163,23 +163,33 @@ def _check_attr(repo, paths):
     return attrs
 
 
-def _fetch(repo, tip, cache, path):
-    """The tip version of one path, fetched once; binary content is refused."""
-    if path not in cache:
-        code, content, err = run(["git", "-C", repo, "show", f"{tip}:{path}"])
+def _fetch(repo, ref, cache, path, deleted_ok=False):
+    """One path's content at `ref`, fetched once; binary content is refused.
+
+    With deleted_ok, a path that does not exist at `ref` (a commit deleted it) returns
+    None instead of refusing — the patch carries the deletion.
+    """
+    key = (ref, path)
+    if key not in cache:
+        code, content, err = run(["git", "-C", repo, "show", f"{ref}:{path}"])
         if code != 0:
-            raise ValueError(f"git show refused {path}: " + (err or "unknown")[:200])
-        if "\x00" in content or "\ufffd" in content:
-            raise ValueError(f"{path}: binary input is not staged")
-        cache[path] = content
-    return cache[path]
+            if deleted_ok:
+                cache[key] = None
+            else:
+                raise ValueError(f"git show refused {path}: " + (err or "unknown")[:200])
+        else:
+            if "\x00" in content or "\ufffd" in content:
+                raise ValueError(f"{path}: binary input is not staged")
+            cache[key] = content
+    return cache[key]
 
 
-def _classify(repo, tip, cache, attrs, paths):
+def _classify(repo, ref, cache, attrs, paths, deleted_ok=False):
     """Split one packet's paths into staged contents, oversized, omitted — and the bytes.
 
     Nothing is written here: the caller measures the whole packet against the budget
-    before any file lands on the board.
+    before any file lands on the board. `ref` is the commit whose versions are staged —
+    the range tip for one-task packets, the commit itself for split packets.
     """
     staged, oversized, omitted = [], [], []
     total = 0
@@ -187,7 +197,9 @@ def _classify(repo, tip, cache, attrs, paths):
         if _generated(path, attrs):
             omitted.append(path)
             continue
-        content = _fetch(repo, tip, cache, path)
+        content = _fetch(repo, ref, cache, path, deleted_ok=deleted_ok)
+        if content is None:
+            continue
         problem = check_input(path, content.encode())
         if problem:
             raise ValueError(f"{path}: {problem}")
@@ -429,7 +441,11 @@ def review_branch(
                 }
             )
             continue
-        staged, oversized, omitted, file_bytes = _classify(repo, tip, cache, attrs, commit_paths)
+        # Split packets stage the file as of this commit, never the range tip: a
+        # reviewer comparing the commit's hunks against tip contents reports ghosts.
+        staged, oversized, omitted, file_bytes = _classify(
+            repo, commit["hash"], cache, attrs, commit_paths, deleted_ok=True
+        )
         code, patch, err = run(
             ["git", "-C", repo, "diff-tree", "-p", "--no-commit-id", "--root", commit["hash"]]
         )
@@ -450,9 +466,10 @@ def review_branch(
         context = (
             f"The work under review is commit {commit['hash']} in {repo_name}, one part of a "
             f"split review of {base}..{tip}. The commit message is: {message}. The changed "
-            "files are staged at their repository paths beside this brief, and the commit's "
-            "diff is staged as diff.patch; every finding must quote the diff or the staged "
-            "file next to the requirement it violates." + _packet_notes(oversized, omitted)
+            "files are staged at their repository paths as of this commit (not the range "
+            "tip), and the commit's diff is staged as diff.patch; every finding must quote "
+            "the diff or the staged file next to the requirement it violates."
+            + _packet_notes(oversized, omitted)
         )
         short = re.sub(r"[^a-z0-9-]+", "", commit["hash"].lower())[:7]
         task_id = f"review-{repo_name}-{short}"[:60]
