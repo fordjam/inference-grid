@@ -30,10 +30,16 @@ def board_counts(board_dir):
     counts = {}
     for file in sorted(path.glob("*.json")):
         try:
-            state = validate_task(json.loads(file.read_text()))["state"]
+            task = validate_task(json.loads(file.read_text()))
         except Exception:
-            state = "invalid"
-        counts[state] = counts.get(state, 0) + 1
+            counts["invalid"] = counts.get("invalid", 0) + 1
+            continue
+        # The board's recorded-change convention: a blocked_reason beginning with
+        # "superseded:" closes the predecessor of a retried task, so it is not open work.
+        if task["state"] == "blocked" and str(task["blocked_reason"]).startswith("superseded:"):
+            counts["superseded"] = counts.get("superseded", 0) + 1
+        else:
+            counts[task["state"]] = counts.get(task["state"], 0) + 1
     return counts
 
 

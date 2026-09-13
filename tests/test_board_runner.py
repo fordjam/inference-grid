@@ -773,9 +773,7 @@ def test_busy_lane_reports_lane_busy_and_skips_dispatch(world):
     seed_active_attempt(world, "seed-1")
     now = time.time()
     world["ledger"].record_lane("go", ready_record(now))
-    view = runner.readiness_view(
-        world["ledger"], world["lanes"], now, {"go": world["account"]}
-    )
+    view = runner.readiness_view(world["ledger"], world["lanes"], now, {"go": world["account"]})
     assert view["go"]["state"] == "busy"  # one active attempt, max_concurrency defaults to 1
     results = runner.tick(
         world["board"],
@@ -833,9 +831,7 @@ def test_a_held_attempt_makes_the_lane_busy(world):
     world["ledger"].hold(aid, "Refused: timeout: provider acceptance may be ambiguous")
     now = time.time()
     world["ledger"].record_lane("go", ready_record(now))
-    view = runner.readiness_view(
-        world["ledger"], world["lanes"], now, {"go": world["account"]}
-    )
+    view = runner.readiness_view(world["ledger"], world["lanes"], now, {"go": world["account"]})
     assert view["go"]["state"] == "busy"
     results = runner.tick(
         world["board"],
@@ -969,4 +965,50 @@ def test_a_retry_rejection_blocks_its_source(world, monkeypatch):
     )
     assert results[0]["result"] == "review_rejected"
     assert json.loads((world["board"] / "x.json").read_text())["state"] == "blocked"
-    assert "review rejected" in json.loads((world["board"] / "x.json").read_text())["blocked_reason"]
+    assert (
+        "review rejected" in json.loads((world["board"] / "x.json").read_text())["blocked_reason"]
+    )
+
+
+def test_superseded_sources_are_never_touched(world, monkeypatch):
+    (world["board"] / "copy-wrong.json").unlink()
+    adapter = world["lanes_path"].parent / "review_adapter.py"
+    adapter.write_text(REVIEW_ADAPTER.replace('reject = "reject" in', 'reject = "brief-reject" in'))
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(adapter)])
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    # The source is already closed as superseded by a recorded retry.
+    source = dict(
+        make_task("x", "brief.txt", state="blocked"),
+        blocked_reason="superseded: replaced by x-2 (review round 2)",
+    )
+    (world["board"] / "x.json").write_text(json.dumps(source))
+    write_link(world["board"], "x")
+    # An approving review of a superseded source accepts nothing.
+    approve = make_review_task("review-x", "brief-approve.txt")
+    (world["board"] / "review-x.json").write_text(json.dumps(approve))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    review_row = next(r for r in results if r["task"] == "review-x")
+    assert "superseded" in review_row["result"], review_row
+    task = json.loads((world["board"] / "x.json").read_text())
+    assert task["state"] == "blocked" and task["blocked_reason"].startswith("superseded:")
+    # A rejecting review of a superseded source leaves it alone too.
+    superseded_task = runner.superseded
+    assert superseded_task(task)
+    rejection = make_review_task("review-x", "brief-reject.txt")
+    rejection["state"] = "blocked"  # never dispatched; call propagate directly
+    board = runner.load_board(world["board"])
+    runner.propagate_rejection(
+        board, world["board"], "review-x", [{"location": "mod2.py", "observed": "VALUE = 2"}]
+    )
+    task = json.loads((world["board"] / "x.json").read_text())
+    assert task["blocked_reason"].startswith("superseded:")

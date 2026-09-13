@@ -26,6 +26,8 @@ Planned operating model for continuous Grid operation (agreed 2026-09-12). The G
 4. Run the task's tests on the artifact; record `outcome`; on pass, create the review task with `author_family` set.
 5. On an approved review from a different family, the runner calls `accept()` on the reviewed attempt, marks the source task `accepted`, and commits the artifacts plus a record (`grid/inbox/<task-id>.json`) to the project's `grid/inbox` branch through a separate worktree under `~/.grid-workspaces/inbox/`; tree tasks land at their project paths, flat tasks under `grid/inbox/<task-id>/`. Nothing is pushed or merged. The link between a review and the attempt it judges lives in `<board>/review/<task-id>/source.json`.
 
+Retries are new tasks with a recorded change; the predecessor's `blocked_reason` then begins with `superseded:` naming its successor. Doctor counts such a task under `superseded`, not `blocked`, and the runner never accepts or re-blocks a superseded source.
+
 Nothing merges automatically. Held attempts wait for `resolve` with evidence, with one exception the runner applies itself: an attempt held at its wall deadline whose expected files all exist in its workspace is resolved `consumed` and followed by a single verify-only attempt (a new ledger task id, a changed brief that only runs the tests, both recorded); anything else stays held.
 
 ## Coordinator schedule

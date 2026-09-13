@@ -151,6 +151,7 @@ def test_board_counts_and_missing_dirs_are_reported_read_only(tmp_path):
 
     board = tmp_path / "grid/board"
     board.mkdir(parents=True)
+
     def task(state, tid):
         return json.dumps(
             dict(
@@ -186,3 +187,35 @@ def test_board_counts_and_missing_dirs_are_reported_read_only(tmp_path):
     }
     # Boards are classified without touching anything.
     assert board_counts(board)["ready"] == 1
+
+
+def test_superseded_predecessors_are_counted_closed_not_blocked(tmp_path):
+    from inference_grid.doctor import board_counts
+
+    def task(state, tid, reason=None):
+        return json.dumps(
+            dict(
+                id=tid,
+                category="pure_function",
+                brief="grid/briefs/t.txt",
+                inputs=["grid/briefs/t.txt"],
+                tests=[],
+                artifacts=["out.py"],
+                lanes=["go"],
+                author_family=None,
+                budget={"wall_seconds": 60, "output_bytes": 1000, "thinking_tokens": None},
+                state=state,
+                blocked_reason=reason,
+            )
+        )
+
+    board = tmp_path / "board"
+    board.mkdir()
+    (board / "old.json").write_text(
+        task("blocked", "old", "superseded: replaced by new (review round 2)")
+    )
+    (board / "stuck.json").write_text(
+        task("blocked", "stuck", "attempt x held; resolve with evidence")
+    )
+    (board / "new.json").write_text(task("ready", "new"))
+    assert board_counts(board) == {"superseded": 1, "blocked": 1, "ready": 1}

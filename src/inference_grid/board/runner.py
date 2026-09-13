@@ -497,6 +497,11 @@ def find_source_link(board_dir, review_id):
         return None, legacy
 
 
+def superseded(task):
+    """True when a task is closed as the predecessor of a recorded retry (BOARD.md)."""
+    return task["state"] == "blocked" and str(task["blocked_reason"]).startswith("superseded:")
+
+
 def propagate_rejection(board, board_dir, review_id, findings):
     """Block the source task a rejected review refers to, carrying the findings summary.
 
@@ -509,7 +514,7 @@ def propagate_rejection(board, board_dir, review_id, findings):
     link, _ = find_source_link(board_dir, review_id)
     source_id = (link or {}).get("task") or review_id[len("review-") :]
     source = board.get(source_id)
-    if source is None or source[1]["state"] != "review_pending":
+    if source is None or source[1]["state"] != "review_pending" or superseded(source[1]):
         return
     note = "; ".join(
         f"{finding.get('location', '?')} — {finding.get('observed', '?')}"
@@ -581,6 +586,8 @@ def accept_reviewed(board_dir, project_root, ledger, lanes, review_lane, review_
     if link is None or not source_path.is_file():
         return result + "; source link missing, nothing accepted"
     source_task = validate_task(json.loads(source_path.read_text()))
+    if superseded(source_task):
+        return result + "; source superseded by a recorded retry, nothing accepted"
     reviewer_family = lanes[review_lane]["family"]
     try:
         ledger.accept(link["attempt"], link["receipt_digest"], reviewer_family, "approved")
@@ -655,9 +662,7 @@ def tick(
                 # Every allowed lane is at its concurrency cap; say so instead of the
                 # generic no-ready-lane reason.
                 reason = "lane_busy"
-            results.append(
-                {"task": task_id, "lane": None, "attempt": None, "result": reason}
-            )
+            results.append({"task": task_id, "lane": None, "attempt": None, "result": reason})
             continue
         lane_id = choice["lane"]
         packet_dir = Path(packets_root) / task_id / time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
