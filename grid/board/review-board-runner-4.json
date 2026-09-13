@@ -25,6 +25,6 @@
   "output_bytes": 2000000,
   "thinking_tokens": 6000
  },
- "state": "dispatched",
- "blocked_reason": null
+ "state": "blocked",
+ "blocked_reason": "attempt d36f530c-24b6-4917-808e-5b4cbb5438ad review rejected with 1 finding(s)"
 }

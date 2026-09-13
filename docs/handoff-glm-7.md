@@ -28,6 +28,25 @@ text, and say so in a `skipped` list with the successor id.
 - Tests in `tests/test_board_status.py`.
 - Size: small.
 
+#### A3. Test-vs-test basename collisions silently drop a declared test
+Found by `review-board-runner-4` (kimi-k3 at `reasoning_effort=high`, attempt `d36f530c…`, the
+first Go-lane review to complete since the effort fix). A flat task declaring
+`tests=["strict/test_mod2.py", "lenient/test_mod2.py"]` passes `validate_task` (entries are
+distinct), passes `shadowing_names` (which compares artifact↔test, artifact↔input and
+test↔input basenames but never test↔test), and `run_tests` copies both to
+`scratch/test_mod2.py` in list order — the lenient test overwrites the strict one, unittest runs
+`test_mod2` once, and an artifact that fails a declared coordinator test is accepted. BOARD.md:
+"name collisions between artifacts, tests and inputs block before dispatch" and every declared
+test runs before acceptance.
+- Extend `shadowing_names` to flag duplicate basenames within `tests` (and within `inputs`, and
+  within `artifacts`, for the same reason) in both flat and tree branches; block before dispatch
+  with the two colliding paths in the reason. Do not change the copy semantics — the block
+  makes them unreachable.
+- Tests in `tests/test_board_runner.py`: the reviewer's exact case blocks before dispatch; a
+  tree task with distinct paths and distinct basenames still dispatches.
+- Size: small. **Do this first**; then author nothing — the coordinator will re-review the runner
+  as `review-board-runner-5` once it lands.
+
 ## B — DeepSeek V4.1 Flash as a third review family (owner request, 2026-09-13)
 
 #### B1. Go lane support for `deepseek-v4-flash`
