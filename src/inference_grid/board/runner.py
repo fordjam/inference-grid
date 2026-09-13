@@ -276,6 +276,8 @@ def dispatch(
         "argv": RUNNER + [lane_id, "--config", str(lanes_path)],
         "workspace": str(workspace),
         "timeout": task["budget"]["wall_seconds"] + 40,
+        # The lane transport reads the task's own budget, not just the lane record's.
+        "wall_seconds": task["budget"]["wall_seconds"],
         "output_bytes": task["budget"]["output_bytes"],
         "inputs": manifest,
         "input_root": str(input_dir),

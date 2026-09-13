@@ -166,10 +166,18 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
     if problem:
         verdict["refusal"] = problem
         return None, verdict
-    # The transport waits as long as the lane budget allows, bounded: reviews at 16k output
-    # tokens outran the old fixed 150 s. An explicit timeout (tests) always wins.
-    transport_timeout = timeout if timeout is not None else min(lane["wall_seconds"], 600)
+    # The transport waits for the tighter of the task budget and the lane budget, bounded:
+    # 16k-token reviews outran a fixed bound, and a lane must never wait longer than its
+    # record allows. An explicit timeout (tests) always wins. Both bounds go to the verdict.
+    task_wall = request.get("wall_seconds")
+    lane_wall = lane["wall_seconds"]
+    bounds = [lane_wall, 600]
+    if type(task_wall) is int and task_wall > 0:
+        bounds.append(task_wall)
+    transport_timeout = timeout if timeout is not None else min(bounds)
     verdict["transport_timeout"] = transport_timeout
+    verdict["task_wall_seconds"] = task_wall
+    verdict["lane_wall_seconds"] = lane_wall
     body = {
         "model": request["model"],
         "messages": [{"role": "user", "content": prompt}],

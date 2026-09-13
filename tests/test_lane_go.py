@@ -274,6 +274,48 @@ class GoLaneTests(unittest.TestCase):
         self.assertEqual(verdict["transport_timeout"], 600)
 
 
+    def test_task_budget_bounds_the_transport_timeout(self):
+        # The attempt request carries the task's budget.wall_seconds; the transport waits
+        # for the tighter of task and lane bounds, never longer than the lane allows.
+        request, attempt = self.attempt(expected=["out.py"])
+        sender = self.send(self.native())
+        receipt, verdict = go.run(
+            dict(request, wall_seconds=600),
+            {"credential_path": str(self.credential), "wall_seconds": 400},
+            attempt,
+            send=sender,
+        )
+        self.assertIsNone(verdict["refusal"], verdict)
+        self.assertEqual(sender.recorded["timeout"], 400)
+        self.assertEqual(verdict["transport_timeout"], 400)
+        self.assertEqual((verdict["task_wall_seconds"], verdict["lane_wall_seconds"]), (600, 400))
+
+        request, attempt = self.attempt(expected=["out.py"])
+        sender = self.send(self.native())
+        receipt, verdict = go.run(
+            dict(request, wall_seconds=300),
+            {"credential_path": str(self.credential), "wall_seconds": 900},
+            attempt,
+            send=sender,
+        )
+        self.assertIsNone(verdict["refusal"], verdict)
+        self.assertEqual(sender.recorded["timeout"], 300)
+        self.assertEqual(verdict["transport_timeout"], 300)
+
+        # Without a task budget the lane bound alone applies (back-compat).
+        request, attempt = self.attempt(expected=["out.py"])
+        sender = self.send(self.native())
+        receipt, verdict = go.run(
+            request,
+            {"credential_path": str(self.credential), "wall_seconds": 400},
+            attempt,
+            send=sender,
+        )
+        self.assertIsNone(verdict["refusal"], verdict)
+        self.assertEqual(sender.recorded["timeout"], 400)
+        self.assertIsNone(verdict["task_wall_seconds"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

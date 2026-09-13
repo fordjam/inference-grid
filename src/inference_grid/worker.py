@@ -103,6 +103,9 @@ def execute(ledger, aid, generation):
             manifest_sha256=spec["manifest_sha256"],
             input_directory=str(directory / "inputs"),
             output_directory=str(output),
+            # The submitting board's task budget, for lanes that shape their own transport
+            # bounds; absent when the spec does not carry one.
+            wall_seconds=spec.get("wall_seconds"),
         )
         # Credentials belong to the trusted adapter, not task arguments or this ledger.
         env = {k: os.environ[k] for k in ("PATH", "LANG", "SYSTEMROOT") if k in os.environ}
