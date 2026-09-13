@@ -317,3 +317,51 @@ def test_the_brief_opens_with_a_single_review_prefix(tmp_path):
     brief = Path(created["brief"]).read_text()
     assert brief.startswith(f"You are an independent reviewer for task {created['id']}. ")
     assert "task review-review-" not in brief
+
+
+def test_fixture_hunks_are_filtered_out_of_the_patch_before_the_budget(tmp_path):
+    # The fixture-bundle commit was refused at 127,916 bytes although its staged source
+    # files totalled ~17 KB: the hunks of excluded paths stayed in diff.patch.
+    repo, base, _ = reviewed_repo(tmp_path)
+    bundle = repo / "tests" / "fixtures"
+    bundle.mkdir(parents=True)
+    (bundle / "samples.json").write_text('{"rows": "' + "y" * (200 * 1024) + '"}\n')
+    (repo / "src/small.py").write_text("SMALL = 1\n")
+    git(repo, "add", "-A")
+    commit(repo, "add the fixture bundle and one small module")
+    tip = rev(repo, "HEAD")
+    board, project = board_and_project(tmp_path)
+    created = branch_review.review_branch(
+        board,
+        project,
+        {"repo": str(repo), "base": base, "tip": tip},
+        max_input_bytes=10000,
+    )
+    assert created["omitted"] == ["tests/fixtures/samples.json"]
+    patch = (project / f"grid/board/review/{created['id']}/diff.patch").read_text()
+    assert "samples.json" not in patch  # the excluded hunks are gone
+    assert "SMALL = 1" in patch
+    assert len(patch.encode()) < 10000  # the packet fits where it used to blow up
+
+
+def test_filter_patch_handles_both_seam_shapes():
+    # Range output (git diff) and per-commit output (git diff-tree -p) are both blocks
+    # starting with 'diff --git'; excluded paths drop, the rest survives verbatim.
+    patch = (
+        "diff --git a/tests/fixtures/x.json b/tests/fixtures/x.json\n"
+        "--- a/tests/fixtures/x.json\n"
+        "+++ b/tests/fixtures/x.json\n"
+        "@@ -1 +1 @@\n"
+        "-a\n"
+        "+b\n"
+        "diff --git a/src/app.py b/src/app.py\n"
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+    filtered, dropped = branch_review._filter_patch(patch, {})
+    assert dropped == ["tests/fixtures/x.json"]
+    assert "fixtures" not in filtered
+    assert "VALUE = 2" in filtered and "diff --git a/src/app.py b/src/app.py" in filtered

@@ -200,6 +200,27 @@ def _classify(repo, tip, cache, attrs, paths):
     return staged, oversized, omitted, total
 
 
+def _filter_patch(patch, attrs):
+    """The patch reduced to the file blocks the review stages, plus the dropped paths.
+
+    Exclusions must apply to diff.patch too, or a fixtures-only commit blows the budget
+    with hunks that were never staged. Works on both shapes the seam produces — `git
+    diff` range output and `git diff-tree -p` per-commit output — since every file block
+    starts with a `diff --git` line; blocks are matched on their destination path.
+    """
+    kept, dropped = [], []
+    for block in re.split(r"(?m)^(?=diff --git )", patch):
+        if not block.strip():
+            continue
+        match = re.search(r"^diff --git a/(.+?) b/(.+)$", block, re.MULTILINE)
+        path = match.group(2) if match else None
+        if path is not None and _generated(path, attrs):
+            dropped.append(path)
+            continue
+        kept.append(block)
+    return "".join(kept), dropped
+
+
 def _packet_notes(oversized, omitted):
     """The brief sentences naming what was omitted or reduced to hunks."""
     notes = ""
@@ -314,7 +335,8 @@ def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_in
         code, diff, err = run(["git", "-C", repo, "diff", f"{base}..{tip}"])
         if code != 0:
             raise ValueError("git diff refused the range: " + (err or "unknown")[:200])
-        return diff
+        filtered, _ = _filter_patch(diff, attrs)
+        return filtered
 
     if split != "commit":
         staged, oversized, omitted, file_bytes = _classify(repo, tip, cache, attrs, paths)
@@ -371,6 +393,7 @@ def review_branch(board_dir, project_root, spec, lanes=None, budget=None, max_in
         )
         if code != 0:
             raise ValueError("git diff-tree refused: " + (err or "unknown")[:200])
+        patch, _ = _filter_patch(patch, attrs)
         total = file_bytes + len(patch.encode())
         if total > limit:
             sizes = ", ".join(
@@ -432,6 +455,7 @@ def _plan(repo_name, repo, tip, commits, cache, attrs):
         code, patch, _ = run(
             ["git", "-C", repo, "diff-tree", "-p", "--no-commit-id", "--root", commit["hash"]]
         )
+        patch, _ = _filter_patch(patch, attrs)
         total += len(patch.encode())
         entries.append(f"review-{repo_name}-{commit['hash'][:7]} ≈{total} bytes")
     return "; ".join(entries)
