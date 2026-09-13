@@ -95,3 +95,11 @@ Learning: Go handled a tightly specified pure validator with a complete ruleset 
 Learning: size hints are harmful for Cline: a passing artifact was destroyed to chase a line count. Give Cline an iteration budget that tolerates one verification run and forbid deleting passing files; consider snapshotting the workspace at each `iteration_end` so a later self-inflicted deletion cannot erase evidence. Admission stopped the retry at 80% weekly usage exactly as designed. Native readings taken by the collector immediately before and after the job: five-hour 0% → 2%, weekly 79% → 80%, monthly 39% → 40% (the weekly window was already at 79% from earlier runs, not 67% as a stale display had suggested). One interrupted 60-second job therefore cost about one weekly point; the lane was blocked by accumulated prior use, not by this job alone.
 
 Learning: GOAT with `--tools-all` and `--max-turns 12` finished a multi-file job in four model requests; the ~16.5k-token system overhead grew to ~25k input per request with tool context, so GOAT suits jobs whose output justifies roughly 100k input tokens. GOAT's `--effort` persists to user configuration, but the ModApi `setEffort` does not; a workspace-local mod loaded with `--mod` gives a session-scoped override, verified by native event evidence rather than exit status. The held first canary was an adapter bug (final result uses `finalText`), not a provider failure; the ledger's immutable-task and workspace/account exclusion checks correctly refused re-dispatch under the same ids, so the retry ran as a new task on a fresh packet ledger.
+
+## Handoff fixes A1–A5, 2026-09-13 (GLM-5.3-Flash through interactive ZCode)
+
+Defects found by the Kimi review round, fixed per `docs/handoff-glm.md`:
+
+| Item | Fix | Evidence |
+| --- | --- | --- |
+| A1 | `parse_review` (and the staged `grid/tests/test_review_schema.py`) tolerate fences with or without a newline and raise `ValueError` for anything that is not a verdict object; the tick treats any exception as `review_unreadable`, so a malformed reply can never abort the tick and strand later tasks | `test_parse_review_accepts_fences_and_refuses_non_verdicts`, `test_unreadable_fenced_reply_blocks_the_review_without_crashing_the_tick` |

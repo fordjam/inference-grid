@@ -9,7 +9,12 @@ class ReviewSchemaTests(unittest.TestCase):
     def test_reply_is_a_review(self):
         text = Path("reply.txt").read_text().strip()
         if text.startswith("```"):
-            text = text.strip("`").split("\n", 1)[1].rsplit("```", 1)[0]
+            body = text[3:]
+            newline = body.find("\n")
+            body = body[newline + 1 :] if newline != -1 else body[body.find("{") :]
+            if body.rstrip().endswith("```"):
+                body = body.rstrip()[:-3]
+            text = body.strip()
         review = json.loads(text)
         self.assertEqual(set(review), {"verdict", "findings", "checked"})
         self.assertIn(review["verdict"], ("approved", "rejected"))

@@ -90,10 +90,25 @@ def shadowing_names(task):
 
 
 def parse_review(reply_path):
-    """The verdict object from a review artifact reply; ValueError when it is not one."""
+    """The verdict object from a review artifact reply; ValueError when it is not one.
+
+    Tolerates code fences with or without a newline after the fence marker: a reply of
+    exactly ```json{...}``` is malformed output from a model, not a crash.
+    """
     text = Path(reply_path).read_text().strip()
     if text.startswith("```"):
-        text = text.strip("`").split("\n", 1)[1].rsplit("```", 1)[0]
+        body = text[3:]
+        newline = body.find("\n")
+        if newline != -1:
+            body = body[newline + 1 :]
+        else:
+            start = body.find("{")
+            if start == -1:
+                raise ValueError("fenced reply contains no JSON object")
+            body = body[start:]
+        if body.rstrip().endswith("```"):
+            body = body.rstrip()[:-3]
+        text = body.strip()
     review = json.loads(text)
     if not isinstance(review, dict) or review.get("verdict") not in ("approved", "rejected"):
         raise ValueError("reply is not a review verdict object")
@@ -634,7 +649,9 @@ def tick(
             # approves anything.
             try:
                 review = parse_review(output_dir / "reply.txt")
-            except (OSError, ValueError) as exc:
+            except Exception as exc:
+                # Any unreadable reply — missing file, fence without a newline, prose,
+                # non-verdict JSON — blocks this review task; it must never abort the tick.
                 passed, result = False, "review_unreadable"
                 summary = ("review artifact unusable: " + str(exc))[:200]
             else:

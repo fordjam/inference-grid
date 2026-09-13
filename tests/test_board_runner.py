@@ -483,12 +483,60 @@ def test_parse_review_accepts_fences_and_refuses_non_verdicts(tmp_path):
     fenced = tmp_path / "fenced.txt"
     fenced.write_text('```json\n{"verdict": "rejected", "findings": [], "checked": ["a"]}\n```\n')
     assert runner.parse_review(fenced)["verdict"] == "rejected"
+    one_line = tmp_path / "one-line.txt"
+    one_line.write_text('```json{"verdict": "approved", "findings": [], "checked": ["a"]}```')
+    assert runner.parse_review(one_line)["verdict"] == "approved"
+    bare_fence = tmp_path / "bare-fence.txt"
+    bare_fence.write_text('```{"verdict": "rejected", "findings": [], "checked": ["a"]}```')
+    assert runner.parse_review(bare_fence)["verdict"] == "rejected"
+    fence_no_object = tmp_path / "empty-fence.txt"
+    fence_no_object.write_text("```json```")
+    with pytest.raises(ValueError):
+        runner.parse_review(fence_no_object)
+    prose = tmp_path / "prose.txt"
+    prose.write_text("the review looked fine to me\n")
+    with pytest.raises(ValueError):
+        runner.parse_review(prose)
     bad = tmp_path / "bad.txt"
     bad.write_text('{"answer": 42}\n')
     with pytest.raises(ValueError):
         runner.parse_review(bad)
     with pytest.raises(OSError):
         runner.parse_review(tmp_path / "absent.txt")
+
+
+def test_unreadable_fenced_reply_blocks_the_review_without_crashing_the_tick(world, monkeypatch):
+    # A one-line fenced reply used to raise IndexError inside the tick, stranding every
+    # later task; it must block this review as unreadable and leave the tick alive.
+    fenced_adapter = world["lanes_path"].parent / "fenced_adapter.py"
+    fenced_adapter.write_text(
+        REVIEW_ADAPTER.replace(
+            'data = (json.dumps(review) + "\\n").encode()',
+            'data = b"i read the code, it looked fine"',
+        )
+    )
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(fenced_adapter)])
+    (world["board"] / "copy-ok.json").unlink()
+    (world["board"] / "copy-wrong.json").unlink()
+    review = make_review_task("rev-fence", "brief-approve.txt")
+    review["tests"] = []  # no schema test: the reply reaches parse_review unparsed
+    (world["board"] / "rev-fence.json").write_text(json.dumps(review))
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "review_unreadable"
+    task = json.loads((world["board"] / "rev-fence.json").read_text())
+    assert task["state"] == "blocked"
+    assert "review artifact unusable" in task["blocked_reason"]
 
 
 def test_tree_task_keeps_paths_and_discovers_tests(world):
