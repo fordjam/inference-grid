@@ -165,12 +165,18 @@ def main():
     ledger = Ledger(args.database)
     data = json.load(open(args.json)) if args.json else {}
     if args.command == "evaluation":
-        # Markdown, not JSON: the document goes to stdout, or to out (never into docs/).
-        from .evaluation import evaluation_document, write_document
+        # Markdown, not JSON: stdout by default, the out file otherwise. With
+        # replace_section the generated section is spliced into the file — the one
+        # sanctioned docs/ write — leaving every other line of it untouched.
+        from .evaluation import evaluation_document, write_document, write_section
 
         document = evaluation_document(ledger)
         out = data.get("out") if isinstance(data, dict) else None
-        if out:
+        section = data.get("replace_section") if isinstance(data, dict) else None
+        if out and section:
+            path = write_section(document, out, section)
+            print(json.dumps({"wrote": str(path), "section": section}, indent=2))
+        elif out:
             path = write_document(document, out)
             print(json.dumps({"wrote": str(path), "bytes": len(document)}, indent=2))
         else:

@@ -5,7 +5,11 @@ import uuid
 
 import pytest
 
-from inference_grid.evaluation import evaluation_document, write_document
+from inference_grid.evaluation import (
+    evaluation_document,
+    write_document,
+    write_section,
+)
 from inference_grid.ledger import Ledger, digest
 
 
@@ -115,3 +119,46 @@ def test_write_document_refuses_docs_and_writes_elsewhere(tmp_path):
     out = tmp_path / "rendered" / "evaluation.md"
     path = write_document("# x\n", out)
     assert path.read_text() == "# x\n"
+
+
+def test_replace_section_splices_only_that_section(tmp_path):
+    # The one sanctioned docs/ write: the scorecard section is replaced in place and the
+    # hand-written parts survive byte-identical.
+    target = tmp_path / "docs" / "EVALUATION.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "# Evaluation notes\n\n"
+        "Hand-written intro stays.\n\n"
+        "## Scorecard\n\n"
+        "| old | rows |\n"
+        "| --- | --- |\n"
+        "| x | 1 |\n\n"
+        "## Account readiness\n\n"
+        "Hand-written account notes.\n"
+    )
+    ledger = make_ledger(tmp_path)
+    aid = completed_attempt(ledger, "acct", "g1", "glm", "glm-5.3-flash")
+    ledger.record_outcome(aid, "pure_function", True, usage={"input": 300, "output": 1200})
+    path = write_section(evaluation_document(ledger), target, "## Scorecard")
+    text = path.read_text()
+    assert "Hand-written intro stays." in text
+    assert "Hand-written account notes." in text
+    assert "| old | rows |" not in text
+    assert text.count("## Scorecard") == 1
+    assert "| family | model | category" in text
+    assert "| 1 | 1 | 1 | 100% |" in text
+    before, after = text.split("## Scorecard", 1)
+    assert before == "# Evaluation notes\n\nHand-written intro stays.\n\n"
+    assert after.startswith("\n\n| family | model | category")
+    assert after.endswith("Hand-written account notes.\n")
+
+
+def test_an_absent_section_is_appended_and_an_unknown_section_is_refused(tmp_path):
+    target = tmp_path / "notes.md"
+    target.write_text("# Notes\n\nOnly prose.\n")
+    write_section(evaluation_document(make_ledger(tmp_path)), target, "## Scorecard")
+    text = target.read_text()
+    assert text.startswith("# Notes\n\nOnly prose.\n")
+    assert "## Scorecard" in text and "| family | model | category" in text
+    with pytest.raises(ValueError, match="no '## Missing' section"):
+        write_section(evaluation_document(make_ledger(tmp_path)), target, "## Missing")

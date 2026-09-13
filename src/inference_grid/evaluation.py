@@ -135,3 +135,62 @@ def write_document(text, out):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return path
+
+
+def _section_bounds(lines, heading):
+    """(start, end) of the heading's section: the heading line through the next same-level
+    heading or EOF; None when the heading is not in lines."""
+    start = None
+    for index, line in enumerate(lines):
+        if line.rstrip("\n") == heading:
+            start = index
+            break
+    if start is None:
+        return None
+    level = heading[: len(heading) - len(heading.lstrip("#"))]
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith(level + " "):
+            end = index
+            break
+    return start, end
+
+
+def extract_section(document, heading):
+    """The heading's section text from a generated document, or None when absent."""
+    lines = document.splitlines(keepends=True)
+    bounds = _section_bounds(lines, heading)
+    if bounds is None:
+        return None
+    start, end = bounds
+    return "".join(lines[start:end])
+
+
+def replace_section(existing, heading, section):
+    """`existing` with the heading's section replaced by `section`; other text byte-identical.
+
+    A heading absent from existing appends the section at the end, on its own paragraph.
+    """
+    lines = existing.splitlines(keepends=True)
+    bounds = _section_bounds(lines, heading)
+    if bounds is None:
+        base = existing if existing.endswith("\n") else existing + "\n"
+        return base + "\n" + section
+    start, end = bounds
+    return "".join(lines[:start]) + section + "".join(lines[end:])
+
+
+def write_section(document, out, heading):
+    """Splice the generated document's `heading` section into the file at out.
+
+    This is the one sanctioned docs/ write: the coordinator asks for the section by
+    name, and every other line of the target file survives untouched.
+    """
+    section = extract_section(document, heading)
+    if section is None:
+        raise ValueError(f"the generated document has no {heading!r} section")
+    path = Path(out)
+    existing = path.read_text() if path.is_file() else ""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(replace_section(existing, heading, section))
+    return path
