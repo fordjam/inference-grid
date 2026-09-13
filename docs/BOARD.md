@@ -41,6 +41,20 @@ Nothing merges automatically. Held attempts wait for `resolve` with evidence, wi
 
 The `go_http` request shapes reasoning explicitly, since kimi-k3 thought its whole output away at the endpoint's default effort: `lanes/go.py::REASONING_EFFORT` maps each model id to the `reasoning_effort` values its documented endpoint schema accepts (`kimi-k3` → `low`, `high`, `max`; the endpoint default is `max`), and `lanes/go.py::EFFORT_TIERS` is the coordinator's policy mapping the task's `thinking_tokens` to a tier — absent or at most 4 000 → `low`, at most 12 000 → `high`, beyond → `max` — so board review tasks (6 000) ask for `high`. The token count also caps `max_tokens` at `thinking_tokens + 4 000`. A model outside the map sends no effort field and the verdict records `reasoning_effort: unsupported` (plus `reasoning_budget: unsupported` when a thinking budget was requested); a `length` stop with no content is held as `reasoning_overrun` with both counts.
 
+## Authoring tools
+
+`board-new --json {task: …}` writes one validated task file with its empty brief (handoff-1 B4); `{retry, change, budget?, lanes?, author_family?}` authors the authorised retry — a new task with a `superseded:` predecessor, the source link moved for board-work reviews (handoff-5/7).
+
+`{review_branch: {repo, base, tip}}` authors independent_review task(s) from a git range, staging the changed files plus a generated `diff.patch` under `grid/board/review/<task-id>/`. The keys inside `review_branch` are exactly `repo`, `base`, `tip` — anything else is refused. The top-level knobs are:
+
+| Knob | Meaning |
+| --- | --- |
+| `max_input_bytes` | Packet budget in staged bytes (default 120 000 ≈ 30k tokens); over budget the range splits or refuses |
+| `split` | `"commit"` authors one task per commit (also the over-budget fallback); `"none"` keeps one task and refuses over budget |
+| `include_docs` | Review docs-only commits too (default: skipped, listed `docs-only, not reviewed`) |
+| `exclude_commits` | Sha prefixes to skip in a split, listed `excluded by operator` |
+| `lanes`, `budget` | The review task's lanes and budget (defaults `["go"]` and the review budget) |
+
 ## Packaged lanes
 
 `inference-grid-lane <lane-id> --config lanes.json` is the single trusted adapter argv for every packaged lane. The worker passes the attempt request on stdin; the runner validates the private `lanes.json`, dispatches to `inference_grid.lanes.<kind>`, writes `verdict.json` beside the attempt and prints one receipt. Refusals (no native terminal, unexpected provider or model, missing artifacts) exit non-zero so the ledger holds the attempt with the reason. Expected artifact names come from `inputs/expected.json`; without it, every new file at the workspace root is the artifact set, and a reply-only task publishes `reply.txt`. Packaged: `zcode_cli`, `claude_headless`, `go_http`, `goat_cli` and `cline_cli` (canaries `zcode-runner-canary-2`, `zai-runner-canary` and `go-runner-canary-1` completed through the ledger on 2026-09-12). Each lane uses a scratch HOME under the attempt directory; the real home is never a writable sandbox root.

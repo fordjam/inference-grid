@@ -491,3 +491,50 @@ def test_split_packets_stage_files_as_of_their_commit(tmp_path):
     staged_whole = next(p for p in whole["staged"] if p.endswith("src/app.py"))
     tip_text = (project / staged_whole).read_text()
     assert tip_text == "VALUE = 2\n# pytestmark added later\n"
+
+
+def test_exclude_commits_skips_the_listed_commits(tmp_path):
+    repo, base, tip, hashes = layered_repo(tmp_path, groups=3)
+    board, project = board_and_project(tmp_path)
+    created = branch_review.review_branch(
+        board,
+        project,
+        {"repo": str(repo), "base": base, "tip": tip},
+        max_input_bytes=2000,
+        split="commit",
+        exclude_commits=[hashes[1][:7]],
+    )
+    assert [t["id"] for t in created["tasks"]] == [
+        f"review-factory-frontend-{hashes[0][:7]}",
+        f"review-factory-frontend-{hashes[2][:7]}",
+    ]
+    assert created["excluded"] == [
+        {"commit": hashes[1][:7], "note": "excluded by operator"}
+    ]
+
+
+def test_exclude_commits_refuses_single_mode_and_unknown_spec_keys(tmp_path):
+    repo, base, tip, hashes = layered_repo(tmp_path, groups=2)
+    board, project = board_and_project(tmp_path)
+    with pytest.raises(ValueError, match="exclude_commits names commit"):
+        branch_review.review_branch(
+            board,
+            project,
+            {"repo": str(repo), "base": base, "tip": tip},
+            exclude_commits=[hashes[0][:7]],
+        )
+    with pytest.raises(ValueError, match="accepts only repo, base, tip") as excinfo:
+        branch_review.review_branch(
+            board,
+            project,
+            {"repo": str(repo), "base": base, "tip": tip, "max_input_bytes": 999},
+        )
+    assert "max_input_bytes" in str(excinfo.value)
+    with pytest.raises(ValueError, match="sha prefixes"):
+        branch_review.review_branch(
+            board,
+            project,
+            {"repo": str(repo), "base": base, "tip": tip},
+            exclude_commits=["not a sha"],
+        )
+    assert not (board / "review").exists() or not any((board / "review").rglob("*"))

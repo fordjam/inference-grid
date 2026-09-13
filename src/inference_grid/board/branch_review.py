@@ -323,6 +323,9 @@ def _write_files(files):
         path.write_bytes(data)
 
 
+REVIEW_BRANCH_KEYS = ("repo", "base", "tip")
+
+
 def review_branch(
     board_dir,
     project_root,
@@ -332,6 +335,7 @@ def review_branch(
     max_input_bytes=None,
     split=None,
     include_docs=None,
+    exclude_commits=None,
 ):
     """Author review task(s) judging a git range; one task, or one per commit when split.
 
@@ -341,14 +345,27 @@ def review_branch(
     the per-commit plan, and a commit whose packet alone exceeds the budget is refused
     with its file sizes. Docs-only commits (all paths under docs/ or *.md) get no review
     task by default and are listed in the result as `docs-only, not reviewed`;
-    `include_docs: true` reviews them too.
+    `include_docs: true` reviews them too. `exclude_commits: [sha, …]` (sha prefixes)
+    skips the listed commits in a split, listed as `excluded by operator`; in single
+    mode their changes ride in the whole-range diff, so such a range refuses.
     """
     if not isinstance(spec, dict) or not all(
-        isinstance(spec.get(key), str) and spec.get(key) for key in ("repo", "base", "tip")
+        isinstance(spec.get(key), str) and spec.get(key) for key in REVIEW_BRANCH_KEYS
     ):
         raise ValueError("review_branch needs repo, base and tip")
+    unknown = sorted(set(spec) - set(REVIEW_BRANCH_KEYS))
+    if unknown:
+        raise ValueError(
+            "review_branch accepts only repo, base, tip; unknown keys: " + ", ".join(unknown)
+        )
     if split not in (None, "commit", "none"):
         raise ValueError("split must be 'commit' or 'none'")
+    excluded = []
+    for sha in exclude_commits or []:
+        sha = str(sha).lower()
+        if not re.fullmatch(r"[0-9a-f]{4,40}", sha):
+            raise ValueError(f"exclude_commits entries must be commit sha prefixes: {sha!r}")
+        excluded.append(sha)
     repo, base, tip = spec["repo"], spec["base"], spec["tip"]
 
     code, changed, err = run(["git", "-C", repo, "diff", "--name-only", f"{base}..{tip}"])
@@ -366,6 +383,17 @@ def review_branch(
         raise ValueError("git log refused the range: " + (err or "unknown")[:200])
     commits = parse_commits(log)
     family = commits_family(commits)
+
+    def excluded_by(commit):
+        return any(commit["hash"].startswith(sha) for sha in excluded)
+
+    if split != "commit" and any(excluded_by(commit) for commit in commits):
+        matching = ", ".join(commit["hash"][:7] for commit in commits if excluded_by(commit))
+        raise ValueError(
+            "exclude_commits names commit(s) in this range ("
+            + matching
+            + "); their changes are part of the whole-range packet — re-run with split: commit"
+        )
     repo_name = re.sub(r"[^a-z0-9-]+", "-", PurePosixPath(repo).name.lower()).strip("-")
     limit = MAX_INPUT_BYTES if max_input_bytes is None else max_input_bytes
     board_dir = Path(board_dir)
@@ -422,7 +450,7 @@ def review_branch(
     # measured on its own. Everything is planned before anything is written — the live
     # round once wrote eight task files and then died on the first one's id — and a
     # commit that already has its task on the board is skipped, so a re-run resumes.
-    plans, skipped, docs_only = [], [], []
+    plans, skipped, docs_only, excluded_list = [], [], [], []
     for commit in reversed(commits):
         code, c_paths, err = run(
             ["git", "-C", repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit["hash"]]
@@ -431,8 +459,11 @@ def review_branch(
             raise ValueError("git diff-tree refused: " + (err or "unknown")[:200])
         commit_paths = [line for line in c_paths.splitlines() if line.strip()]
         _check_paths(commit_paths)
+        short = re.sub(r"[^a-z0-9-]+", "", commit["hash"].lower())[:7]
+        if excluded_by(commit):
+            excluded_list.append({"commit": short, "note": "excluded by operator"})
+            continue
         if not include_docs and _docs_only(commit_paths):
-            short = re.sub(r"[^a-z0-9-]+", "", commit["hash"].lower())[:7]
             docs_only.append(
                 {
                     "commit": short,
@@ -496,7 +527,9 @@ def review_branch(
         result["skipped"] = skipped
     if docs_only:
         result["docs_only"] = docs_only
-    if not result["tasks"] and not skipped and not docs_only:
+    if excluded_list:
+        result["excluded"] = excluded_list
+    if not result["tasks"] and not skipped and not docs_only and not excluded_list:
         raise ValueError("every commit packet was empty; nothing to review")
     return result
 
