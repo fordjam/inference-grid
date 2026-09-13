@@ -256,7 +256,11 @@ def test_held_attempt_with_complete_files_gets_a_verify_followup(world, monkeypa
         now=now,
     )
     assert results[0]["result"] == "passed"
-    states = sorted((r["task"].split("-2026")[0], r["state"]) for r in world["ledger"].status())
+    states = sorted(
+        (r["task"].split("-2026")[0], r["state"])
+        for r in world["ledger"].status()
+        if r["account"] == world["account"]
+    )
     assert states == [("copy-ok", "completed"), ("copy-ok", "failed")]
     assert json.loads((world["board"] / "copy-ok.json").read_text())["state"] == "review_pending"
 
