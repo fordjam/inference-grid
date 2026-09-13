@@ -91,6 +91,7 @@ def main():
             "board-tick",
             "board-new",
             "board-status",
+            "evaluation",
             "tick",
         ],
     )
@@ -128,6 +129,18 @@ def main():
         parser.error("this command requires --json")
     ledger = Ledger(args.database)
     data = json.load(open(args.json)) if args.json else {}
+    if args.command == "evaluation":
+        # Markdown, not JSON: the document goes to stdout, or to out (never into docs/).
+        from .evaluation import evaluation_document, write_document
+
+        document = evaluation_document(ledger)
+        out = data.get("out") if isinstance(data, dict) else None
+        if out:
+            path = write_document(document, out)
+            print(json.dumps({"wrote": str(path), "bytes": len(document)}, indent=2))
+        else:
+            print(document, end="")
+        return
     commands = {
         "init": ledger.initialize,
         "defer": ledger.defer,

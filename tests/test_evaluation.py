@@ -1,0 +1,117 @@
+"""evaluation: the scorecard as a document, plus the per-account readiness view."""
+
+import time
+import uuid
+
+import pytest
+
+from inference_grid.evaluation import evaluation_document, write_document
+from inference_grid.ledger import Ledger, digest
+
+
+def receipt(model, manifest):
+    return {
+        "status": "completed",
+        "finish_reason": "stop",
+        "actual_model": model,
+        "manifest_sha256": manifest,
+        "artifacts": [{"path": "out.py", "sha256": "a" * 64}],
+    }
+
+
+def completed_attempt(ledger, account, task_id, family, model):
+    spec = {
+        "authorized": True,
+        "model": model,
+        "family": family,
+        "argv": ["/usr/bin/true"],
+        "workspace": "/tmp/ws-" + uuid.uuid4().hex[:8],
+        "timeout": 60,
+        "output_bytes": 1000,
+        "inputs": {},
+        "manifest_sha256": digest({}),
+    }
+    ledger.submit(task_id, "project", spec)
+    aid, generation = ledger.claim(task_id, account, {"five_hour": 0.01, "weekly": 0.01})
+    ledger.start(aid, generation)
+    ledger.finish(aid, generation, receipt(model, spec["manifest_sha256"]))
+    return aid
+
+
+def make_ledger(tmp_path):
+    ledger = Ledger("sqlite:///" + str(tmp_path / "ledger.sqlite"))
+    ledger.initialize()
+    ledger.configure_account(
+        "acct",
+        2,
+        {"five_hour": 10, "weekly": 20},
+        time.time() + 600,
+        ["glm-5.3-flash", "kimi-k3"],
+    )
+    return ledger
+
+
+def test_scorecard_rows_render_rates_means_and_order(tmp_path):
+    ledger = make_ledger(tmp_path)
+    # glm: three attempts, two accepted, usage on every outcome (301..303 in, 1001..1003 out).
+    for i, ok in ((1, True), (2, True), (3, False)):
+        aid = completed_attempt(ledger, "acct", f"g{i}", "glm", "glm-5.3-flash")
+        ledger.record_outcome(aid, "pure_function", ok, usage={"input": 300 + i, "output": 1000 + i})
+    # kimi: one unaccepted attempt with no usage, in a different category and family.
+    aid = completed_attempt(ledger, "acct", "k1", "kimi", "kimi-k3")
+    ledger.record_outcome(aid, "independent_review", False)
+    document = evaluation_document(ledger, now=1_700_000_000)
+    lines = document.splitlines()
+    assert lines[0] == "# Evaluation"
+    header = next(line for line in lines if line.startswith("| family"))
+    assert all(
+        column in header
+        for column in ("attempts", "completed", "accepted", "acceptance rate", "last attempt")
+    )
+    glm = next(line for line in lines if line.startswith("| glm "))
+    kimi = next(line for line in lines if line.startswith("| kimi "))
+    assert "| 3 | 3 | 2 | 67% | 0 | 0 | 302 | 1002 |" in glm
+    assert "—" not in glm  # usage recorded and a last attempt time exists
+    assert "| 1 | 1 | 0 | 0% | 0 | 0 | — | — |" in kimi
+    assert lines.index(glm) < lines.index(kimi)  # sorted by family, model, category
+
+
+def test_account_readiness_renders_one_row_per_alias(tmp_path):
+    ledger = make_ledger(tmp_path)
+    ledger.configure_account(
+        "acct2",
+        3,
+        {"five_hour": 10, "weekly": 20},
+        time.time() + 600,
+        ["kimi-k3"],
+        ["go-alias"],
+    )
+    document = evaluation_document(ledger)
+    row = next(line for line in document.splitlines() if line.startswith("| go-alias "))
+    assert "| go-alias | acct2 | 0/3 | fresh (" in row
+    assert "kimi-k3" in row
+    # An account whose quota window has passed at render time still renders, stale.
+    stale_at = time.time() + 700
+    stale = next(
+        line
+        for line in evaluation_document(ledger, now=stale_at).splitlines()
+        if line.startswith("| go-alias ")
+    )
+    assert "| go-alias | acct2 | 0/3 | stale (" in stale
+
+
+def test_empty_ledger_renders_headers_only(tmp_path):
+    ledger = Ledger("sqlite:///" + str(tmp_path / "empty.sqlite"))
+    ledger.initialize()
+    document = evaluation_document(ledger)
+    assert "| family | model | category" in document
+    assert "| alias | account |" in document
+    assert document.count("\n|") == 4  # two header rows and their separators, nothing else
+
+
+def test_write_document_refuses_docs_and_writes_elsewhere(tmp_path):
+    with pytest.raises(ValueError, match="docs"):
+        write_document("# x\n", tmp_path / "docs" / "EVALUATION.md")
+    out = tmp_path / "rendered" / "evaluation.md"
+    path = write_document("# x\n", out)
+    assert path.read_text() == "# x\n"
