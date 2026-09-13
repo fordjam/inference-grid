@@ -746,3 +746,81 @@ def test_an_artifact_sharing_an_input_basename_blocks_too(world):
     task = json.loads((world["board"] / "clash.json").read_text())
     assert task["state"] == "blocked" and "staged input mod.py" in task["blocked_reason"]
     assert world["ledger"].status() == []
+
+
+def seed_active_attempt(world, task_id, alias=None):
+    """Submit and claim one attempt on the account, leaving it queued (active)."""
+    from inference_grid.ledger import digest
+
+    spec = {
+        "authorized": True,
+        "model": "glm-5.3-flash",
+        "family": "glm",
+        "argv": ["/usr/bin/true"],
+        "workspace": str(world["packets"] / (task_id + "-ws")),
+        "timeout": 60,
+        "output_bytes": 1000,
+        "inputs": {},
+        "manifest_sha256": digest({}),
+    }
+    world["ledger"].submit(task_id, "project", spec)
+    return world["ledger"].claim(
+        task_id, alias or world["account"], {"five_hour": 0.01, "weekly": 0.01}
+    )
+
+
+def test_busy_lane_reports_lane_busy_and_skips_dispatch(world):
+    seed_active_attempt(world, "seed-1")
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    view = runner.readiness_view(
+        world["ledger"], world["lanes"], now, {"go": world["account"]}
+    )
+    assert view["go"]["state"] == "busy"  # one active attempt, max_concurrency defaults to 1
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert {r["task"]: r["result"] for r in results} == {
+        "copy-ok": "lane_busy",
+        "copy-wrong": "lane_busy",
+    }
+    # Neither task was dispatched and neither left the ready state.
+    assert [r["attempt"] for r in results] == [None, None]
+    for tid in ("copy-ok", "copy-wrong"):
+        assert json.loads((world["board"] / f"{tid}.json").read_text())["state"] == "ready"
+    assert len(world["ledger"].status()) == 1  # only the seeded attempt exists
+
+
+def test_lane_within_concurrency_still_dispatches(world):
+    # A wider account and lane cap: one active attempt leaves room for the tick to work.
+    account = "go-wide-" + uuid.uuid4().hex[:8]
+    world["ledger"].configure_account(
+        account, 2, {"five_hour": 10, "weekly": 20}, time.time() + 600, ["glm-5.3-flash"]
+    )
+    seed_active_attempt(world, "seed-1", alias=account)
+    world["lanes"]["go"]["max_concurrency"] = 2
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    view = runner.readiness_view(world["ledger"], world["lanes"], now, {"go": account})
+    assert view["go"]["state"] == "ready"
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": account},
+        world["packets"],
+        now=now,
+    )
+    assert {r["task"]: r["result"] for r in results} == {
+        "copy-ok": "passed",
+        "copy-wrong": "failed_tests",
+    }

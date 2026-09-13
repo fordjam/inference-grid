@@ -24,6 +24,7 @@ from pathlib import Path
 from ..flash_window import flash_window
 from ..lane_readiness import lane_readiness
 from ..ledger import Refused, digest, lanes as lane_records, select
+from ..ledger import aliases as alias_records, attempts as attempt_records
 from ..worker import execute
 from .guard import check_input
 from .task import validate_task
@@ -136,10 +137,23 @@ def lane_view(lanes, now):
     return view
 
 
-def readiness_view(ledger, lanes, now):
-    """Lane records classified now; a lane without a record is stale, never ready."""
+def readiness_view(ledger, lanes, now, accounts_by_lane=None):
+    """Lane records classified now; a lane without a record is stale, never ready.
+
+    A lane whose account already carries its max_concurrency of active attempts is busy:
+    select_lane treats any non-ready state as unavailable, so the tick can skip to another
+    lane or report lane_busy instead of colliding with a refused 'account busy' dispatch.
+    """
     with ledger.engine.connect() as con:
         records = {r["provider"]: r["record"] for r in con.execute(select(lane_records)).mappings()}
+        alias_map = {r["id"]: r["account"] for r in con.execute(select(alias_records)).mappings()}
+        active = {}
+        for row in con.execute(
+            select(attempt_records.c.account).where(
+                attempt_records.c.state.in_(("queued", "dispatching"))
+            )
+        ).mappings():
+            active[row["account"]] = active.get(row["account"], 0) + 1
     view = {}
     for lane_id, lane in lanes.items():
         record = records.get(lane_id)
@@ -147,9 +161,15 @@ def readiness_view(ledger, lanes, now):
             view[lane_id] = {"state": "stale"}
             continue
         try:
-            view[lane_id] = {"state": lane_readiness(record, now)["state"]}
+            state = lane_readiness(record, now)["state"]
         except ValueError:
             view[lane_id] = {"state": "invalid"}
+            continue
+        if state == "ready" and accounts_by_lane:
+            account = alias_map.get(accounts_by_lane.get(lane_id))
+            if account is not None and active.get(account, 0) >= lane.get("max_concurrency", 1):
+                state = "busy"
+        view[lane_id] = {"state": state}
     return view
 
 
@@ -569,7 +589,7 @@ def tick(
     now = time.time() if now is None else now
     results = []
     view = lane_view(lanes, now)
-    readiness = readiness_view(ledger, lanes, now)
+    readiness = readiness_view(ledger, lanes, now, accounts_by_lane)
     scorecard = ledger.scorecard()
     board = load_board(board_dir)
     for task_id, (path, task) in board.items():
@@ -601,8 +621,13 @@ def tick(
             now,
         )
         if choice["lane"] is None:
+            reason = choice["reason"]
+            if allowed and all(readiness[k]["state"] == "busy" for k in allowed):
+                # Every allowed lane is at its concurrency cap; say so instead of the
+                # generic no-ready-lane reason.
+                reason = "lane_busy"
             results.append(
-                {"task": task_id, "lane": None, "attempt": None, "result": choice["reason"]}
+                {"task": task_id, "lane": None, "attempt": None, "result": reason}
             )
             continue
         lane_id = choice["lane"]

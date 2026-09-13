@@ -100,6 +100,11 @@ Learning: GOAT with `--tools-all` and `--max-turns 12` finished a multi-file job
 
 Defects found by the Kimi review round, fixed per `docs/handoff-glm.md`:
 
+Operating-model features B1–B5, same round:
+
+| Item | Change | Evidence |
+| --- | --- | --- |
+
 | Item | Fix | Evidence |
 | --- | --- | --- |
 | A1 | `parse_review` (and the staged `grid/tests/test_review_schema.py`) tolerate fences with or without a newline and raise `ValueError` for anything that is not a verdict object; the tick treats any exception as `review_unreadable`, so a malformed reply can never abort the tick and strand later tasks | `test_parse_review_accepts_fences_and_refuses_non_verdicts`, `test_unreadable_fenced_reply_blocks_the_review_without_crashing_the_tick` |
@@ -107,3 +112,4 @@ Defects found by the Kimi review round, fixed per `docs/handoff-glm.md`:
 | A3 | `shadowing_names` now also flags an artifact sharing a basename with a staged input — in flat tasks the artifact copy silently replaced the reference in the scratch directory | `test_an_artifact_sharing_an_input_basename_blocks_too`; the live board re-validates clean |
 | A4 | The Go lane transport timeout now derives from the lane budget — `min(wall_seconds, 600)` instead of a fixed 150 s (16k-token reviews outran it as `transport_error: TimeoutError`) — and the verdict records the bound used; an explicit timeout still wins | `GoLaneTests::test_transport_timeout_follows_the_lane_budget` (injected send asserts 240 and the 600 cap) |
 | A5 | A rejected review now blocks its source task too, carrying the first three findings as `location — observed` in the source's `blocked_reason`, instead of leaving it `review_pending` with no evidence | `test_rejected_review_blocks_the_task` (source task `calc` asserted blocked with the finding text) |
+| B1 | `readiness_view` counts active attempts (queued/dispatching) per lane account and marks a lane `busy` at its `max_concurrency`; `select_lane` then skips it and `tick` reports `lane_busy` when every allowed lane is busy, instead of colliding with a refused 'account busy' dispatch | `test_busy_lane_reports_lane_busy_and_skips_dispatch` (two ready tasks, one lane, concurrency 1), `test_lane_within_concurrency_still_dispatches` |
