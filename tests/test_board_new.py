@@ -315,12 +315,41 @@ def test_a_non_review_retry_touches_no_link(tmp_path):
     assert (board / "review/write-mod/source.json").read_text() == before
 
 
-def test_retry_of_a_review_without_a_source_link_refuses(tmp_path):
+def test_retry_of_a_standalone_review_copies_without_a_link(tmp_path):
+    # A standalone review — coordinator code with no board source task or review/
+    # directory at all — retries as a plain copy; nothing is moved or refused.
     from inference_grid.board.new import retry_task
 
     board = review_board(tmp_path)
-    with pytest.raises(ValueError, match="source"):
-        retry_task(board, tmp_path, "review-x", "nothing staged to retry")
+    created = retry_task(board, tmp_path, "review-x", "re-review after the fix")
+    assert created["id"] == "review-x-2"
+    assert created["standalone"] is True
+    assert "source_link" not in created
+    assert json.loads((board / "review-x-2.json").read_text())["state"] == "ready"
+    assert (tmp_path / "grid/briefs/review-x-2.txt").read_text() == (
+        tmp_path / "grid/briefs/review-x.txt"
+    ).read_text()
+
+
+def test_retry_refuses_when_the_source_directory_has_no_readable_link(tmp_path):
+    # A review/<source>/ directory makes the review linked, but without a readable
+    # source.json the link cannot be moved onto the retry — refuse and write nothing.
+    from inference_grid.board.new import retry_task
+
+    board = review_board(tmp_path)
+    (board / "review/x").mkdir(parents=True)
+    with pytest.raises(ValueError, match="link"):
+        retry_task(board, tmp_path, "review-x", "cannot move the link")
     assert not (board / "review-x-2.json").exists()
     assert not (tmp_path / "grid/briefs/review-x-2.txt").exists()
-    assert json.loads((board / "review-x.json").read_text())["state"] == "ready"
+
+
+def test_retry_leaves_a_link_that_names_a_different_review_alone(tmp_path):
+    from inference_grid.board.new import retry_task
+
+    board = review_board(tmp_path)
+    write_source_link(board, "y", "review-y")
+    before = (board / "review/y/source.json").read_bytes()
+    created = retry_task(board, tmp_path, "review-x", "an unrelated review retried")
+    assert created["standalone"] is True
+    assert (board / "review/y/source.json").read_bytes() == before

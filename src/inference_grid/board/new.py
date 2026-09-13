@@ -9,10 +9,12 @@ untouched (never overwritten) rather than blocking the second review task on a b
 retry_task is the authorised-retry path (BOARD.md: retries only as new tasks with a
 recorded change): it writes a new task file and a copied brief, and rewrites the
 predecessor's blocked_reason to `superseded: <new id> — <change>` — the one edit
-board-new ever makes to an existing file. Retrying an independent_review also moves the
-staged source link (`review/<source>/source.json`) to the new review id, recording the
-predecessor in `review_task_history`, so the retry's approval accepts the same source
-attempt instead of falling through to the prefix rule and finding nothing.
+board-new ever makes to an existing file. Retrying a *linked* independent_review also
+moves the staged source link (`review/<source>/source.json`) to the new review id,
+recording the predecessor in `review_task_history`, so the retry's approval accepts the
+same source attempt. A *standalone* review — coordinator code reviewed with no board
+source task at all — copies as-is and moves nothing; only a source directory whose link
+is missing or unreadable refuses, since the retry could not be moved onto it.
 """
 
 import json
@@ -138,16 +140,21 @@ def retry_task(board_dir, project_root, retry, change, budget=None, lanes=None, 
         )
     new_id = next_retry_id(board_dir, retry)
     link, link_path = None, None
+    standalone = False
     if predecessor["category"] == "independent_review":
-        # The retry must judge the same source: move the staged link to the new review
-        # id. Without a link the retry would resolve nothing and its approval would
-        # accept nothing — refuse instead of writing a board that cannot land.
+        # A linked review retries against its source: move the staged link to the new
+        # review id so its approval accepts the same attempt. A standalone review —
+        # coordinator code reviewed with no board source task — has nothing to move and
+        # copies as-is. A source directory whose link is missing or unreadable cannot be
+        # moved onto the retry, so that retry is refused instead of losing the source.
         link, link_path = find_source_link(board_dir, retry)
         if link is None:
-            raise ValueError(
-                f"no source link for review {retry}: the source directory is missing, "
-                "so the retry would judge nothing"
-            )
+            if (board_dir / "review" / retry[len("review-") :]).is_dir():
+                raise ValueError(
+                    f"the source directory for review {retry} has no readable link, so "
+                    "the retry could not be moved onto it; repair review/<source>/ first"
+                )
+            standalone = True
     old_brief = Path(predecessor["brief"])
     new_brief_rel = str(old_brief.with_name(new_id + old_brief.suffix))
     task = dict(predecessor)
@@ -191,4 +198,6 @@ def retry_task(board_dir, project_root, retry, change, budget=None, lanes=None, 
         link["review_task_history"] = history
         link_path.write_text(json.dumps(link, indent=1) + "\n")
         created["source_link"] = str(link_path)
+    if standalone:
+        created["standalone"] = True
     return created
