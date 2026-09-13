@@ -82,7 +82,10 @@ def test_status_rows_resolve_reviews_and_attempts(tmp_path):
     assert rows["fresh"]["state"] == "ready" and "review" not in rows["fresh"]
     assert rows["waited-on"]["review"] == {"task": "review-waited-on-2", "state": "dispatched"}
     assert rows["orphan"]["review"] == {"task": "review-orphan", "state": "missing"}
-    assert rows["stuck"]["attempt"] == aid and rows["stuck"]["attempt_state"] == "held"
+    assert rows["stuck"]["attempt"]["id"] == aid
+    assert rows["stuck"]["attempt"]["state"] == "held"
+    assert rows["stuck"]["attempt"]["refusal"] is None  # no verdict beside this attempt
+    assert rows["stuck"]["attempt"]["artifacts_present"] is False
     assert rows["fresh"]["blocked_reason"] is None
     # Read-only: every board file is byte-identical afterwards.
     assert {p.name: p.read_bytes() for p in board.glob("*.json")} == before
@@ -101,4 +104,55 @@ def test_reasons_are_bounded_and_a_dead_ledger_yields_unknown(tmp_path):
     rows = board_status(ledger, board)
     assert rows[0]["blocked_reason"].startswith("attempt 00000000")
     assert len(rows[0]["blocked_reason"]) == 80
-    assert rows[0]["attempt_state"] == "unknown"
+    assert rows[0]["attempt"]["state"] == "unknown"
+    assert rows[0]["attempt"]["refusal"] is None
+    assert rows[0]["attempt"]["transport_timeout"] is None
+    assert rows[0]["attempt"]["artifacts_present"] is False
+
+
+def test_attempt_detail_reads_the_verdict_and_artifacts(tmp_path):
+    board = tmp_path / "board"
+    board.mkdir()
+    write_task(
+        board, "stuck", "blocked", reason="attempt 00000000-0000-0000-0000-000000000000 held"
+    )
+    url = "sqlite:///" + str(tmp_path / "ledger.sqlite")
+    ledger = Ledger(url)
+    ledger.initialize()
+    account = "go-" + uuid.uuid4().hex[:8]
+    ledger.configure_account(
+        account, 1, {"five_hour": 10, "weekly": 20}, time.time() + 600, ["glm-5.3-flash"]
+    )
+    aid, generation = seed_attempt(ledger, account, "seed-1", tmp_path / "ws")
+    ledger.start(aid, generation)
+    ledger.hold(aid, "Refused: adapter exited without a successful terminal receipt")
+    stuck = json.loads((board / "stuck.json").read_text())
+    stuck["blocked_reason"] = f"attempt {aid} held; resolve with evidence"
+    (board / "stuck.json").write_text(json.dumps(stuck))
+    # A transport-timeout verdict and one artifact beside the attempt; the attempt
+    # directory is the worker's creation, so the test stages it here.
+    attempt_dir = tmp_path / "ws" / aid
+    attempt_dir.mkdir(parents=True)
+    (attempt_dir / "verdict.json").write_text(
+        json.dumps(
+            {
+                "refusal": "transport_error: TimeoutError",
+                "transport_timeout": 400,
+                "task_wall_seconds": 600,
+                "lane_wall_seconds": 400,
+            }
+        )
+    )
+    (attempt_dir / "artifacts").mkdir()
+    (attempt_dir / "artifacts" / "reply.txt").write_text("partial")
+    before = (attempt_dir / "verdict.json").read_bytes()
+    rows = board_status(ledger, board)
+    attempt = rows[0]["attempt"]
+    assert attempt == {
+        "id": aid,
+        "state": "held",
+        "refusal": "transport_error: TimeoutError",
+        "transport_timeout": 400,
+        "artifacts_present": True,
+    }
+    assert (attempt_dir / "verdict.json").read_bytes() == before  # read-only

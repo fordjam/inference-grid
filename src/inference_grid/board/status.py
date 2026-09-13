@@ -2,8 +2,9 @@
 
 Answers what a board is doing without five ledger queries and a JSON loop: per task the
 state, lanes, author family and bounded reason, the live review task for review_pending
-work (resolving retry reviews through their recorded source link), and the ledger state
-of any attempt a blocked reason names.
+work (resolving retry reviews through their recorded source link), and for a blocked
+reason that names an attempt, the ledger state plus what the attempt's verdict and
+artifacts show under its packet workspace.
 """
 
 import json
@@ -35,15 +36,49 @@ def review_candidates(board_dir, source_id):
     return list(dict.fromkeys(candidates))
 
 
+def attempt_detail(ledger, aid):
+    """Ledger state plus verdict facts for one attempt; unknowns when nothing is readable.
+
+    The verdict and artifact directory live under the attempt's recorded packet workspace;
+    everything here is a read.
+    """
+    detail = {
+        "id": aid,
+        "state": "unknown",
+        "refusal": None,
+        "transport_timeout": None,
+        "artifacts_present": False,
+    }
+    try:
+        rows = {r["id"]: r for r in ledger.status()}
+    except Exception:
+        return detail
+    row = rows.get(aid)
+    if row is None:
+        return detail
+    detail["state"] = row["state"]
+    workspace = row.get("workspace")
+    if not workspace:
+        return detail
+    root = Path(workspace) / aid
+    if (root / "verdict.json").is_file():
+        try:
+            document = json.loads((root / "verdict.json").read_text())
+        except (OSError, ValueError):
+            document = None
+        if isinstance(document, dict):
+            detail["refusal"] = document.get("refusal")
+            detail["transport_timeout"] = document.get("transport_timeout")
+    artifacts = root / "artifacts"
+    if artifacts.is_dir():
+        detail["artifacts_present"] = any(p.is_file() for p in artifacts.iterdir())
+    return detail
+
+
 def board_status(ledger, board_dir):
     """One status row per board task; the ledger is only read for attempt states."""
     board = load_board(board_dir)
-    attempts = {}
-    if any(t["state"] == "blocked" for _, t in board.values()):
-        try:
-            attempts = {r["id"]: r for r in ledger.status()}
-        except Exception:
-            attempts = {}
+    needs_ledger = any(t["state"] == "blocked" for _, t in board.values())
     rows = []
     for tid, (path, task) in board.items():
         row = {
@@ -67,8 +102,6 @@ def board_status(ledger, board_dir):
         if task["state"] == "blocked":
             match = ATTEMPT_IN_REASON.search(task["blocked_reason"] or "")
             if match:
-                aid = match.group(1)
-                row["attempt"] = aid
-                row["attempt_state"] = attempts.get(aid, {}).get("state", "unknown")
+                row["attempt"] = attempt_detail(ledger, match.group(1)) if needs_ledger else None
         rows.append(row)
     return rows
