@@ -9,13 +9,17 @@ untouched (never overwritten) rather than blocking the second review task on a b
 retry_task is the authorised-retry path (BOARD.md: retries only as new tasks with a
 recorded change): it writes a new task file and a copied brief, and rewrites the
 predecessor's blocked_reason to `superseded: <new id> — <change>` — the one edit
-board-new ever makes to an existing file.
+board-new ever makes to an existing file. Retrying an independent_review also moves the
+staged source link (`review/<source>/source.json`) to the new review id, recording the
+predecessor in `review_task_history`, so the retry's approval accepts the same source
+attempt instead of falling through to the prefix rule and finding nothing.
 """
 
 import json
 import re
 from pathlib import Path
 
+from .runner import find_source_link
 from .task import validate_task
 
 SCHEMA_TEST = '''"""Acceptance test for a review artifact: strict JSON verdict with demonstrable findings."""
@@ -133,6 +137,17 @@ def retry_task(board_dir, project_root, retry, change, budget=None, lanes=None, 
             "blocked task can be superseded"
         )
     new_id = next_retry_id(board_dir, retry)
+    link, link_path = None, None
+    if predecessor["category"] == "independent_review":
+        # The retry must judge the same source: move the staged link to the new review
+        # id. Without a link the retry would resolve nothing and its approval would
+        # accept nothing — refuse instead of writing a board that cannot land.
+        link, link_path = find_source_link(board_dir, retry)
+        if link is None:
+            raise ValueError(
+                f"no source link for review {retry}: the source directory is missing, "
+                "so the retry would judge nothing"
+            )
     old_brief = Path(predecessor["brief"])
     new_brief_rel = str(old_brief.with_name(new_id + old_brief.suffix))
     task = dict(predecessor)
@@ -163,9 +178,17 @@ def retry_task(board_dir, project_root, retry, change, budget=None, lanes=None, 
     new_file.write_text(json.dumps(task, indent=1) + "\n")
     new_brief.write_text((project_root / predecessor["brief"]).read_text())
     source_path.write_text(json.dumps(superseded, indent=1) + "\n")
-    return {
+    created = {
         "id": new_id,
         "task": str(new_file),
         "brief": str(new_brief),
         "superseded": str(source_path),
     }
+    if link is not None:
+        history = list(link.get("review_task_history") or [])
+        history.append(retry)
+        link["review_task"] = new_id
+        link["review_task_history"] = history
+        link_path.write_text(json.dumps(link, indent=1) + "\n")
+        created["source_link"] = str(link_path)
+    return created

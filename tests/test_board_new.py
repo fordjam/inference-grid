@@ -134,6 +134,8 @@ def test_retry_of_a_review_task_keeps_the_schema_test(tmp_path):
     new_task(board, tmp_path, review)
     schema = tmp_path / "grid/tests/test_review_schema.py"
     original = schema.read_text()
+    # A review retry needs a staged source link to move to the new review id.
+    write_source_link(board, "write-mod", "write-mod")
     retry_task(board, tmp_path, "write-mod", "reviewer family was wrong")
     retried = json.loads((board / "write-mod-2.json").read_text())
     assert retried["category"] == "independent_review"
@@ -229,3 +231,96 @@ def test_a_stacked_legacy_id_is_left_alone_and_its_retry_continues_it(tmp_path):
     )
     assert next_retry_id(board, "x-3-2") == "x-3-3"
     assert json.loads((board / "x-3-2.json").read_text())["id"] == "x-3-2"
+
+
+def write_source_link(board, source_id, review_task):
+    """A review source link; review_task None models a link written before the field existed."""
+    link = dict(
+        task=source_id,
+        attempt="a" * 8 + "-0000",
+        lane="go",
+        family="glm",
+        receipt_digest="d" * 64,
+        artifacts=["reply.txt"],
+    )
+    if review_task is not None:
+        link["review_task"] = review_task
+    stage = board / "review" / source_id
+    stage.mkdir(parents=True, exist_ok=True)
+    (stage / "source.json").write_text(json.dumps(link))
+    return link
+
+
+def review_board(tmp_path):
+    """A board holding one independent_review task with its schema test."""
+    board = tmp_path / "grid/board"
+    new_task(
+        board,
+        tmp_path,
+        task(
+            tid="review-x",
+            category="independent_review",
+            brief="grid/briefs/review-x.txt",
+        ),
+    )
+    return board
+
+
+def test_retry_of_a_review_moves_the_source_link(tmp_path):
+    from inference_grid.board.new import retry_task
+
+    board = review_board(tmp_path)
+    link = write_source_link(board, "x", "review-x")
+    created = retry_task(board, tmp_path, "review-x", "reviewer family was wrong")
+    assert created["id"] == "review-x-2"
+    assert created["source_link"].endswith("review/x/source.json")
+    moved = json.loads((board / "review/x/source.json").read_text())
+    assert moved["review_task"] == "review-x-2"
+    assert moved["review_task_history"] == ["review-x"]
+    # Everything else about the link is preserved.
+    assert moved["task"] == "x" and moved["attempt"] == link["attempt"]
+
+
+def test_retry_gives_a_legacy_link_its_review_task(tmp_path):
+    from inference_grid.board.new import retry_task
+
+    board = review_board(tmp_path)
+    write_source_link(board, "x", None)  # written before handoff-2 A2 named the review
+    retry_task(board, tmp_path, "review-x", "brief amended")
+    moved = json.loads((board / "review/x/source.json").read_text())
+    assert moved["review_task"] == "review-x-2"
+    assert moved["review_task_history"] == ["review-x"]
+
+
+def test_retry_history_accumulates_over_two_retries(tmp_path):
+    from inference_grid.board.new import retry_task
+
+    board = review_board(tmp_path)
+    write_source_link(board, "x", "review-x")
+    retry_task(board, tmp_path, "review-x", "first change")
+    retry_task(board, tmp_path, "review-x-2", "second change")
+    moved = json.loads((board / "review/x/source.json").read_text())
+    assert moved["review_task"] == "review-x-3"
+    assert moved["review_task_history"] == ["review-x", "review-x-2"]
+
+
+def test_a_non_review_retry_touches_no_link(tmp_path):
+    from inference_grid.board.new import retry_task
+
+    board = tmp_path / "grid/board"
+    new_task(board, tmp_path, task())
+    write_source_link(board, "write-mod", "review-write-mod")
+    before = (board / "review/write-mod/source.json").read_text()
+    retry_task(board, tmp_path, "write-mod", "wider budget")
+    assert (board / "review/write-mod/source.json").read_text() == before
+
+
+def test_retry_of_a_review_without_a_source_link_refuses(tmp_path):
+    from inference_grid.board.new import retry_task
+
+    board = review_board(tmp_path)
+    with pytest.raises(ValueError, match="source"):
+        retry_task(board, tmp_path, "review-x", "nothing staged to retry")
+    assert not (board / "review-x-2.json").exists()
+    assert not (tmp_path / "grid/briefs/review-x-2.txt").exists()
+    assert json.loads((board / "review-x.json").read_text())["state"] == "ready"
