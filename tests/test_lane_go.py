@@ -43,7 +43,7 @@ class GoLaneTests(unittest.TestCase):
         self.credential = self.root / "credential.json"
         self.credential.write_text(json.dumps({"opencode-go": {"type": "api", "key": KEY}}))
         self.credential.chmod(0o600)
-        self.lane = {"credential_path": str(self.credential)}
+        self.lane = {"credential_path": str(self.credential), "wall_seconds": 150}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -249,6 +249,35 @@ class GoLaneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+    def test_transport_timeout_follows_the_lane_budget(self):
+        # Without an explicit timeout the transport waits min(wall_seconds, 600), not the old
+        # fixed 150 s, and the verdict records which bound was used.
+        request, attempt = self.attempt(expected=["out.py"])
+        sender = self.send(self.native())
+        receipt, verdict = go.run(
+            request,
+            {"credential_path": str(self.credential), "wall_seconds": 240},
+            attempt,
+            send=sender,
+        )
+        self.assertIsNone(verdict["refusal"])
+        self.assertEqual(sender.recorded["timeout"], 240)
+        self.assertEqual(verdict["transport_timeout"], 240)
+
+        request, attempt = self.attempt(expected=["out.py"])
+        sender = self.send(self.native())
+        receipt, verdict = go.run(
+            request,
+            {"credential_path": str(self.credential), "wall_seconds": 900},
+            attempt,
+            send=sender,
+        )
+        self.assertIsNone(verdict["refusal"])
+        self.assertEqual(sender.recorded["timeout"], 600)
+        self.assertEqual(verdict["transport_timeout"], 600)
 
 
 class ReplyModeTests(unittest.TestCase):

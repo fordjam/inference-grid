@@ -138,7 +138,7 @@ def expected_code(content):
     return code, None
 
 
-def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=150):
+def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None):
     """Execute one attempt; return (receipt or None, verdict). The caller prints the receipt."""
     attempt_dir = Path(attempt_dir)
     work = attempt_dir / "work"
@@ -166,6 +166,10 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=150)
     if problem:
         verdict["refusal"] = problem
         return None, verdict
+    # The transport waits as long as the lane budget allows, bounded: reviews at 16k output
+    # tokens outran the old fixed 150 s. An explicit timeout (tests) always wins.
+    transport_timeout = timeout if timeout is not None else min(lane["wall_seconds"], 600)
+    verdict["transport_timeout"] = transport_timeout
     body = {
         "model": request["model"],
         "messages": [{"role": "user", "content": prompt}],
@@ -174,9 +178,9 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=150)
     }
     try:
         if send is not None:
-            response = send(body, key, session, timeout)
+            response = send(body, key, session, transport_timeout)
         else:
-            response = http_send(body, key, session, timeout)
+            response = http_send(body, key, session, transport_timeout)
     except urllib.error.HTTPError as exc:
         # The status code and a fixed reason only; the error body is never read or recorded.
         verdict["refusal"] = f"endpoint returned HTTP {exc.code}"
