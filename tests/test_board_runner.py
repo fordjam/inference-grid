@@ -1004,6 +1004,43 @@ def test_dry_run_plans_without_touching_anything(world):
     assert not world["packets"].exists()
 
 
+def test_two_boards_tick_in_order_and_share_the_busy_count(world, tmp_path, monkeypatch):
+    # board-tick-all looped configs; the packaged board-tick took one. With boards: [...]
+    # a call ticks each in order and readiness carries across: board A's held attempt
+    # makes board B's task lane_busy instead of colliding with the account.
+    from inference_grid.cli import board_tick
+
+    second = tmp_path / "grid2/board"
+    second.mkdir(parents=True)
+    (second / "task-b.json").write_text(json.dumps(make_task("task-b", "brief.txt")))
+    crashing = world["lanes_path"].parent / "crashing_adapter.py"
+    crashing.write_text("import sys\nsys.exit(1)\n")
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(crashing)])
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    shared = {
+        "project_root": str(world["project"]),
+        "lanes_path": str(world["lanes_path"]),
+        "accounts_by_lane": {"go": world["account"]},
+    }
+    report = board_tick(
+        world["ledger"],
+        boards=[
+            dict(shared, board_dir=str(world["board"]), packets_root=str(world["packets"] / "a")),
+            dict(shared, board_dir=str(second), packets_root=str(world["packets"] / "b")),
+        ],
+    )
+    assert [entry["board"] for entry in report] == [str(world["board"]), str(second)]
+    assert {r["task"]: r["result"] for r in report[0]["results"]} == {
+        "copy-ok": "held",
+        "copy-wrong": "lane_busy",  # board A's own second task already sees the hold
+    }
+    assert {r["task"]: r["result"] for r in report[1]["results"]} == {"task-b": "lane_busy"}
+    assert json.loads((second / "task-b.json").read_text())["state"] == "ready"
+    attempts = [r for r in world["ledger"].status() if r["account"] == world["account"]]
+    assert len(attempts) == 1 and attempts[0]["state"] == "held"
+
+
 def test_a_hold_mid_tick_makes_the_next_task_lane_busy(world, monkeypatch):
     # Busy used to be evaluated once per tick: the first task's attempt went held
     # mid-tick and the second task on the same account was still dispatched and refused

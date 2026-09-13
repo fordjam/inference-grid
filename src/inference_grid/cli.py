@@ -11,16 +11,44 @@ from .worker import execute
 
 def board_tick(
     ledger,
-    board_dir,
-    project_root,
-    lanes_path,
-    accounts_by_lane,
-    packets_root,
+    board_dir=None,
+    project_root=None,
+    lanes_path=None,
+    accounts_by_lane=None,
+    packets_root=None,
     prepare_argv=None,
     dry_run=False,
+    boards=None,
 ):
     from .board.runner import tick as board_run
     from .lanes.runner import load_lanes
+
+    if boards is not None:
+        # Several boards, one call, ticked in order. Readiness comes from the ledger at
+        # each tick's start (and after every dispatch within it), so busy counts carry
+        # across boards: a lane busy on board A is busy on board B without a re-dispatch.
+        return [
+            {
+                "board": config.get("board_dir"),
+                "results": board_tick(
+                    ledger,
+                    dry_run=dry_run,
+                    prepare_argv=config.get("prepare_argv", prepare_argv),
+                    **{
+                        key: config[key]
+                        for key in (
+                            "board_dir",
+                            "project_root",
+                            "lanes_path",
+                            "accounts_by_lane",
+                            "packets_root",
+                        )
+                        if key in config
+                    },
+                ),
+            }
+            for config in boards
+        ]
 
     return board_run(
         board_dir,
