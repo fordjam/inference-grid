@@ -305,3 +305,33 @@ def test_a_region_optin_refusal_is_shown_and_never_suggested(tmp_path):
     )
     assert "suggest" not in rows["stuck"]
     assert report["skipped"] == []
+
+
+def test_boards_list_reports_each_board_under_its_project(tmp_path):
+    first_project = tmp_path / "inference-grid"
+    second_project = tmp_path / "factory-frontend"
+    first_board = first_project / "grid/board"
+    second_board = second_project / "grid/board"
+    for board in (first_board, second_board):
+        board.mkdir(parents=True)
+    write_task(first_board, "waiting", "ready")
+    write_task(second_board, "their-task", "dispatched")
+    ledger = Ledger("sqlite:///" + str(tmp_path / "ledger.sqlite"))
+    ledger.initialize()
+    report = board_status(
+        ledger,
+        boards=[
+            {"board_dir": str(first_board), "project_root": str(first_project)},
+            {"board_dir": str(second_board), "project_root": str(second_project)},
+        ],
+    )
+    assert [entry["project"] for entry in report] == ["inference-grid", "factory-frontend"]
+    assert [r["id"] for r in report[0]["status"]] == ["waiting"]
+    assert report[1]["status"][0]["state"] == "dispatched"
+    # suggest mode keeps its rows/skipped shape inside each entry.
+    suggested = board_status(
+        ledger,
+        suggest=True,
+        boards=[{"board_dir": str(first_board), "project_root": str(first_project)}],
+    )
+    assert suggested[0]["status"] == {"rows": suggested[0]["status"]["rows"], "skipped": []}

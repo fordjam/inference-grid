@@ -100,18 +100,35 @@ def retry_suggestion(board_dir, task, detail):
     }
 
 
-def board_status(ledger, board_dir, suggest=False):
+def board_status(ledger, board_dir=None, suggest=False, boards=None):
     """One status row per board task; the ledger is only read for attempt states.
 
-    With suggest, a blocked task whose attempt refusal starts with transport_error and
-    whose artifacts are absent also carries the pre-filled board-new retry JSON
-    (handoff-4 B3) — print only, nothing is authored here. A blocked task whose id is
-    the predecessor of an existing task (`<id>-<n>` on the board) is never offered a
-    retry: its chain already moved on, whatever the reason text says (old reasons
-    predate the enforced `superseded:` convention); such tasks are named in the
-    `skipped` list with their successor. The suggest shape is
-    {"rows": [...], "skipped": [...]}; without suggest, the plain row list.
+    With boards: [...] (one config per project, like board-tick), each board is reported
+    under its project name: [{"board", "project", "status"}]. With suggest, a blocked
+    task whose attempt refusal starts with transport_error and whose artifacts are
+    absent also carries the pre-filled board-new retry JSON (handoff-4 B3) — print only,
+    nothing is authored here. A blocked task whose id is the predecessor of an existing
+    task (`<id>-<n>` on the board) is never offered a retry: its chain already moved on,
+    whatever the reason text says (old reasons predate the enforced `superseded:`
+    convention); such tasks are named in the `skipped` list with their successor. The
+    suggest shape is {"rows": [...], "skipped": [...]}; without suggest, the plain row
+    list.
     """
+    if boards is not None:
+        return [
+            {
+                "board": config.get("board_dir"),
+                "project": Path(config["project_root"]).name
+                if config.get("project_root")
+                else None,
+                "status": board_status(
+                    ledger,
+                    config.get("board_dir"),
+                    suggest=suggest,
+                ),
+            }
+            for config in boards
+        ]
     board = load_board(board_dir)
     needs_ledger = any(t["state"] == "blocked" for _, t in board.values())
     rows = []
