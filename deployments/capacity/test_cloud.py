@@ -73,6 +73,19 @@ class Tests(Base):
   s=self.sample();s['captured_at']='2026-09-12T12:00:00'
   with self.assertRaises(ValueError):clean_snapshot(s)
 
+ def test_scorecard_upload_is_sanitized_to_evidence_keys(self):
+  row=dict(family='glm',model='glm-5.3-flash',category='pure_function',attempts=7,completed=6,accepted=6,repairs=0,usage={'input_tokens':10,'output_tokens':5},task_names=['private task'],prompt='DO_NOT_SHARE')
+  s=self.sample();s['scorecard']=[row,{'family':'glm'},'junk']
+  data,_=clean_snapshot(s)
+  self.assertEqual(data['scorecard'],[dict(family='glm',model='glm-5.3-flash',category='pure_function',attempts=7,completed=6,accepted=6,repairs=0,usage={'input_tokens':10,'output_tokens':5})])
+  s['scorecard']='not-a-list'
+  with self.assertRaises(ValueError):clean_snapshot(s)
+  payload=json.dumps(self.sample()|{'scorecard':[dict(row,notes='DO_NOT_SHARE')]})
+  status,_,_=self.request('/api/snapshot','POST',payload,{'Authorization':'Bearer '+self.config['upload_token']})
+  self.assertEqual(status,200)
+  stored=json.dumps(self.store.get())
+  self.assertIn('glm-5.3-flash',stored);self.assertNotIn('DO_NOT_SHARE',stored);self.assertNotIn('private task',stored);self.assertNotIn('notes',stored)
+
  # --- Observable refresh requests (CLOUD-03) ---
  def session(self):return {'Cookie':COOKIE+'='+token(self.config['session_key']),'Origin':'https://dashboard.test'}
  def bearer(self):return {'Authorization':'Bearer '+self.config['upload_token'],'Content-Type':'application/json'}

@@ -83,3 +83,48 @@ def test_overlay_dict_supplies_zai_account_and_replaces_attempts():
         }
     ]
     assert project(raw, [])["attempts"][0]["task"] == "Unnamed claim"
+
+
+def test_scorecard_overlay_is_sanitized_and_upstream_rows_are_ignored():
+    rows = [
+        {
+            "family": "glm",
+            "model": "glm-5.3-flash",
+            "category": "pure_function",
+            "attempts": 7,
+            "completed": 6,
+            "accepted": 6,
+            "held": 0,
+            "resolved": 1,
+            "repairs": 0,
+            "usage_reported": 7,
+            "usage": {"input_tokens": 2641, "output_tokens": 10773},
+            "task_names": ["secret task"],  # unknown key: stripped
+            "prompt": "DO_NOT_SHARE",  # unknown key: stripped
+        },
+        {"family": "glm"},  # no model/category: dropped
+        "junk",  # not a dict: dropped
+    ]
+    result = project({"accounts": [], "scorecard": [{"family": "upstream"}]}, {"scorecard": rows})
+    assert result["scorecard"] == [
+        {
+            "family": "glm",
+            "model": "glm-5.3-flash",
+            "category": "pure_function",
+            "attempts": 7,
+            "completed": 6,
+            "accepted": 6,
+            "held": 0,
+            "resolved": 1,
+            "repairs": 0,
+            "usage_reported": 7,
+            "usage": {"input_tokens": 2641, "output_tokens": 10773},
+        }
+    ]
+
+
+def test_scorecard_defaults_to_empty_without_an_overlay():
+    result = project({"accounts": [], "scorecard": [{"family": "upstream"}]}, [])
+    assert result["scorecard"] == []
+    assert project({"accounts": []}, [])["scorecard"] == []
+    assert project({"accounts": []}, {"attempts": []})["scorecard"] == []

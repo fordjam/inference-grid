@@ -15,7 +15,7 @@ import sqlite3
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
-from capacity import project
+from capacity import clean_scorecard, project
 
 MAX_BODY=128*1024
 COOKIE='__Host-grid_session'
@@ -69,6 +69,10 @@ def clean_snapshot(raw, now=None):
     result=project({'accounts':accounts,'attempts':[]})
     # Never upload local task names, prompts, account IDs, cookies or credentials.
     result['attempts']=[]
+    scorecard=raw.get('scorecard',[])
+    if not isinstance(scorecard,list) or len(scorecard)>100:raise ValueError('invalid scorecard')
+    # Routing evidence only: clean_scorecard strips every unknown key from each row.
+    result['scorecard']=clean_scorecard(scorecard)
     result['captured_at']=captured
     return result,dt.timestamp()
 
@@ -113,7 +117,7 @@ class Store:
         return True
     def get(self):
         with sqlite3.connect(self.path) as c:row=c.execute('SELECT body FROM snapshot WHERE id=1').fetchone()
-        return json.loads(row[0]) if row else {'accounts':[],'attempts':[],'captured_at':None}
+        return json.loads(row[0]) if row else {'accounts':[],'attempts':[],'scorecard':[],'captured_at':None}
     # Refresh requests: queued -> collecting -> completed | cooldown | failed.
     # Rows are written by the phone (queue), the Mac (claim, complete) and expiry.
     @staticmethod

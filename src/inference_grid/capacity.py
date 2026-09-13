@@ -10,6 +10,55 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 PROVIDERS = {"codex", "claude", "clinepass", "command-code", "opencode", "zai"}
+SCORECARD_COUNTS = (
+    "attempts",
+    "completed",
+    "accepted",
+    "held",
+    "resolved",
+    "repairs",
+    "usage_reported",
+)
+
+
+def clean_scorecard(rows):
+    """Sanitize scorecard rows to their identity keys, counts and usage totals.
+
+    Unknown keys are stripped; rows without family/model/category are dropped. This is
+    routing evidence for the dashboard, never task names, attempts or credentials.
+    """
+    if not isinstance(rows, list):
+        return []
+    clean = []
+    for row in rows[:100]:
+        if not isinstance(row, dict):
+            continue
+        entry = {}
+        for key in ("family", "model", "category"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip():
+                entry[key] = value[:60]
+        if len(entry) != 3:
+            continue
+        for key in SCORECARD_COUNTS:
+            value = row.get(key)
+            if type(value) is int and not isinstance(value, bool) and 0 <= value <= 10**9:
+                entry[key] = value
+        usage = row.get("usage")
+        if isinstance(usage, dict):
+            safe_usage = {}
+            for name, value in list(usage.items())[:12]:
+                if (
+                    isinstance(name, str)
+                    and type(value) in (int, float)
+                    and math.isfinite(value)
+                    and value >= 0
+                ):
+                    safe_usage[name[:40]] = value
+            if safe_usage:
+                entry["usage"] = safe_usage
+        clean.append(entry)
+    return clean
 
 
 def timestamp(value):
@@ -20,10 +69,12 @@ def timestamp(value):
 
 
 def project(raw, overlays=()):
-    # An overlay is a list of account observations or {"accounts": [...], "attempts": [...]};
-    # overlay attempts replace the upstream activity list when present.
+    # An overlay is a list of account observations or {"accounts": [...], "attempts": [...],
+    # "scorecard": [...]}; overlay attempts replace the upstream activity list when present,
+    # and the scorecard (per model routing evidence) is accepted from the overlay only.
     overlay_accounts = overlays.get("accounts", []) if isinstance(overlays, dict) else overlays
     overlay_attempts = overlays.get("attempts") if isinstance(overlays, dict) else None
+    overlay_scorecard = overlays.get("scorecard") if isinstance(overlays, dict) else None
     accounts = {}
     for a in [*raw.get("accounts", []), *overlay_accounts]:
         if not isinstance(a, dict) or a.get("provider") not in PROVIDERS:
@@ -69,6 +120,7 @@ def project(raw, overlays=()):
             )[:30]
             if isinstance(a, dict)
         ],
+        scorecard=clean_scorecard(overlay_scorecard),
         served_at=datetime.now(timezone.utc).isoformat(),
     )
 
