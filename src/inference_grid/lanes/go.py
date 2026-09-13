@@ -143,7 +143,7 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=150)
     attempt_dir = Path(attempt_dir)
     work = attempt_dir / "work"
     work.mkdir(mode=0o700)
-    stage_inputs(request, work)
+    staged = stage_inputs(request, work)
     prompt = (work / "brief.txt").read_text().strip()
     # One request, no tools: every other staged text input travels in the prompt itself.
     for name in staged:
