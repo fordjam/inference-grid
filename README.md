@@ -20,20 +20,23 @@ The goal is **more accepted work from the capacity you already have**. Keeping e
 
 ## What works today
 
-**Experimental alpha:** the orchestration core is available, and the broader cloud-provider workflow is still being built. The [first release](https://github.com/fordjam/inference-grid/releases/tag/v0.1.0a1) is published; `main` also contains newer hardening work.
+The [first release](https://github.com/fordjam/inference-grid/releases/tag/v0.1.0a1) is published; `main` carries the newer board work, recorded row by row in [docs/CONTRIBUTIONS.md](docs/CONTRIBUTIONS.md).
 
 Today you can:
 
 - Define tasks, permitted models and account allowances, then run explicitly configured worker commands.
 - Reserve capacity across multiple usage windows and prevent duplicate queued deliveries from starting the same attempt again.
 - Record outputs, check their identity and contents, and hold uncertain results instead of silently retrying them.
-- Run a demonstration without calling a model or spending inference capacity.
-- Use a capacity dashboard with a separately supplied usage feed, and inspect local configuration with `inference-grid doctor`.
-- Persist account cooldowns and stop new inference from starting before its deadline.
+- Run a board of tasks unattended: the runner selects a lane per task, dispatches bounded attempts, runs the coordinator's tests on what comes back, and passes or blocks each task with recorded reasons ([docs/BOARD.md](docs/BOARD.md)).
+- Gate acceptance behind cross-family review: the packaged lanes (`zai`, `zcode`, `go`, `go-kimi`, `cline`, `goat`) have each completed board-driven attempts, and an approving review — never a mere pass — accepts the attempt (CONTRIBUTIONS, 2026-09-12/13).
+- Retry as a recorded change: `board-new --retry` supersedes the predecessor, moves the staged source link for board-work reviews, and copies standalone reviews as-is.
+- See what a board is doing without spending quota: `board-status` resolves live reviews and held attempts (refusal, bounds, artifacts), `--suggest` pre-fills the retry JSON for transport-dead tasks, and `board-tick --dry-run` prints the plan — lane or exact skip reason per ready task — before dispatching anything.
+- Land accepted work automatically: on 2026-09-13 the runner accepted its first reviewed attempt and committed the artifact and its record to the project's `grid/inbox` branch (CONTRIBUTIONS, "Live round 2").
+- Render the ledger's evidence as a document with `inference-grid evaluation`, use the capacity dashboard with a separately supplied usage feed, and inspect local configuration with `inference-grid doctor`.
 
-**Connecting your subscriptions is not yet a plug-and-play setup.** Native collectors and complete provider adapters are not bundled. A [dispatcher supervisor](docs/SERVICE.md) is available; automatic recovery, unified service installation and routing based on measured task quality remain [roadmap work](docs/ROADMAP.md). Small external-provider trials help test the design, but do not establish a complete integration.
+**Still true:** connecting your subscriptions is operator configuration (a private `lanes.json` and your own collectors), not a plug-and-play setup. A [dispatcher supervisor](docs/SERVICE.md) is available; automatic recovery, unified service installation and routing based on measured task quality remain [roadmap work](docs/ROADMAP.md).
 
-This alpha is for developers evaluating or extending the system. It runs trusted commands and is not a security sandbox.
+This runs trusted commands and is not a security sandbox.
 
 ## Try the demo
 
