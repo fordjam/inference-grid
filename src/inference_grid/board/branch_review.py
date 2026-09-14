@@ -461,7 +461,7 @@ def review_branch(
         if code != 0:
             raise ValueError("git diff-tree refused: " + (err or "unknown")[:200])
         commit_paths = [line for line in c_paths.splitlines() if line.strip()]
-        _check_paths(commit_paths)
+        _check_paths(commit_paths, prefixes)
         short = re.sub(r"[^a-z0-9-]+", "", commit["hash"].lower())[:7]
         if excluded_by(commit):
             excluded_list.append({"commit": short, "note": "excluded by operator"})

@@ -123,6 +123,23 @@ def test_review_branch_refuses_paths_outside_the_allow_list(tmp_path):
     assert not any(board.rglob("*.json"))  # nothing written
 
 
+def test_a_commit_split_honours_the_per_project_allow_list(tmp_path):
+    """The range check took allowed_prefixes but the per-commit check fell back to the
+    default list, so a project whose code lives under frontend/ could never split."""
+    repo, base, _ = reviewed_repo(tmp_path)
+    (repo / "frontend").mkdir()
+    (repo / "frontend/app.ts").write_text("export const V = 1;\n")
+    git(repo, "add", "-A")
+    commit(repo, "add the frontend", "Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>")
+    tip = rev(repo, "HEAD")
+    board, project = board_and_project(tmp_path)
+    out = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": f"{tip}^", "tip": tip},
+        split="commit", allowed_prefixes=["src/", "frontend/"],
+    )
+    assert len(out["tasks"]) == 1
+
+
 def test_review_branch_refuses_credential_looking_paths(tmp_path):
     repo, base, _ = reviewed_repo(tmp_path)
     (repo / "src/auth.json").write_text("{}\n")
