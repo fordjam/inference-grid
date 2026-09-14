@@ -368,3 +368,69 @@ def qualify_task(board_dir, project_root, lane_id, category):
         "lanes": [lane_id],
         "materialized": [str(project_dir)],
     }
+
+
+BOARD_README_TEMPLATE = """# Board rules — {project}
+
+This board is driven by `inference-grid board-tick`; acceptance and integration stay
+with the operator.
+
+- Repository tier: {tier}. T0 boards (package-only) may run work tasks; T1 boards
+  (first-party research and product code) run only reviews by an explicitly named
+  first-party lane, until the operator decides otherwise.
+- Allowed input prefixes for `--review-branch` and task staging: {prefixes}.
+- Inputs outside those prefixes are refused by the runner before dispatch; anything that
+  looks like a credential is refused by board.guard.
+- Every accepted attempt is reviewed by a different model family before it lands; size
+  hints in briefs are advisory and never a finding on their own.
+- Retries are recorded changes: `board-new --retry` supersedes the predecessor task.
+"""
+
+
+def board_init(project_root, board_name=None, allowed_prefixes=None, tier="T0"):
+    """Create the board skeleton in a git repository; idempotent, returns what exists.
+
+    Creates grid/board/, grid/briefs/, the shared review schema test and a grid/README.md
+    naming the board's rules, and prints the boards/<name>.json config for the operator
+    to place under ~/.local/share/inference-grid/boards/.
+    """
+    project_root = Path(project_root)
+    if not (project_root / ".git").exists():
+        raise ValueError("board-init needs a git repository: " + str(project_root))
+    name = board_name or project_root.name
+    prefixes = allowed_prefixes or ["src/", "tests/", "docs/", "scripts/", "grid/"]
+    board = project_root / "grid" / "board"
+    briefs = project_root / "grid" / "briefs"
+    created = []
+    for directory in (board, briefs):
+        if not directory.exists():
+            directory.mkdir(parents=True)
+            created.append(str(directory))
+    schema_test = project_root / "grid" / "tests" / "test_review_schema.py"
+    if not schema_test.exists():
+        schema_test.parent.mkdir(parents=True, exist_ok=True)
+        schema_test.write_text(SCHEMA_TEST)
+        created.append(str(schema_test))
+    readme = project_root / "grid" / "README.md"
+    if not readme.exists():
+        readme.write_text(
+            BOARD_README_TEMPLATE.format(
+                project=project_root.name,
+                tier=tier,
+                prefixes=", ".join(prefixes),
+            )
+        )
+        created.append(str(readme))
+    config = {
+        "board_dir": str(board),
+        "project_root": str(project_root),
+        "lanes_path": "<operator: absolute path to lanes.json>",
+        "accounts_by_lane": {"<lane_id>": "<alias>"},
+        "packets_root": "<operator: absolute packets root>",
+    }
+    return {
+        "project": project_root.name,
+        "created": created,
+        "board_config": config,
+        "boards_path": f"~/.local/share/inference-grid/boards/{name}.json",
+    }

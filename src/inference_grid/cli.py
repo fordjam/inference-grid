@@ -146,6 +146,7 @@ def main():
             "board-status",
             "inbox-integrate",
             "lane-init",
+            "board-init",
             "evaluation",
             "tick",
         ],
@@ -178,6 +179,7 @@ def main():
             "board-status",
             "inbox-integrate",
             "lane-init",
+            "board-init",
             "defer",
             "cooldown",
         }
@@ -226,6 +228,7 @@ def main():
         "board-new": lambda **kw: board_new(**kw),
         "board-status": lambda **kw: board_status(ledger, **kw),
         "lane-init": lambda **kw: lane_init(**kw),
+        "board-init": lambda **kw: board_init(**kw),
         "inbox-integrate": lambda **kw: inbox_integrate(
             kw["project_root"], kw["task_id"], dry_run=kw.get("dry_run", True)
         ),
@@ -250,6 +253,12 @@ def lane_init(lane_id, board_dir, project_root=None):
 
     root = project_root or str(Path(board_dir).parent.parent)
     return init(board_dir, root, lane_id)
+
+
+def board_init(project_root, board_name=None, allowed_prefixes=None, tier="T0"):
+    from .board.new import board_init as init
+
+    return init(project_root, board_name=board_name, allowed_prefixes=allowed_prefixes, tier=tier)
 
 
 if __name__ == "__main__":
