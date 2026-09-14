@@ -65,7 +65,7 @@ def test_passing_checks_do_not_claim_provider_health(tmp_path):
     ledger.configure_account("a", 1, {"weekly": 10}, time.time() + 60, ["m"])
     # Every packaged lane module is registered: nothing is missing for a passing report.
     now = time.time()
-    for provider in ("go", "goat", "cline", "zai", "zcode"):
+    for provider in ("go", "goat", "cline", "zai", "zcode", "codex"):
         ledger.record_lane(
             provider,
             {

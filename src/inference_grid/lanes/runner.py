@@ -20,6 +20,7 @@ KINDS = {
     "go_http": "go",
     "goat_cli": "goat",
     "cline_cli": "cline",
+    "codex_cli": "codex",
 }
 
 

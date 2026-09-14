@@ -1,3 +1,5 @@
+# Coordinator edit (handoff-13 L3): "codex_cli" added to the accepted kinds set; the
+# packaged lanes/codex.py cannot be registered without it. See docs/CONTRIBUTIONS.md.
 """Lane configuration validation. Authored by OpenCode Go (glm-5.3-flash) through a Grid attempt;
 integrated unmodified after local tests. See docs/CONTRIBUTIONS.md."""
 
@@ -10,7 +12,7 @@ def validate_lane_config(raw):
     lanes = raw["lanes"]
     if not isinstance(lanes, dict) or not lanes:
         raise ValueError("lanes: must be a non-empty dict")
-    kinds = {"go_http", "goat_cli", "cline_cli", "claude_headless", "zcode_cli"}
+    kinds = {"go_http", "goat_cli", "cline_cli", "claude_headless", "zcode_cli", "codex_cli"}
     allowed = {"provider", "family", "model", "kind", "credential_path", "executable", "plan_units", "window", "max_concurrency", "wall_seconds", "categories"}
     out = {}
     for lid, spec in lanes.items():
