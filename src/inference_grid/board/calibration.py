@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 
 from .guard import check_input, check_name
 from .branch_review import _plan_task, _safe_rel, _write_files
+from .runner import parse_review
 
 # Task-id charset: ids are `calib-<run_id>-<case>`, so both parts are constrained.
 NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
@@ -194,3 +195,219 @@ def author_calibration(board_dir, project_root, corpus_dir, lanes, run_id):
     )
     _write_files([file for plan in plans for file in plan] + keys)
     return {"tasks": summaries, "manifest": str(manifest)}
+
+
+# --- scoring (K3) ---
+
+
+def _names_file(location, file):
+    """True when a finding's location names the defect's file: the relative path or its
+    basename on word boundaries ("src/api/routes/views.py (handle_views)" matches both)."""
+    location = str(location).replace("\\", "/").lower()
+    file = str(file).lower()
+    if file in location:
+        return True
+    base = re.escape(PurePosixPath(file).name)
+    return re.search(r"(?<![a-z0-9._/-])" + base + r"(?![a-z0-9._-])", location) is not None
+
+
+def _finding_text(finding):
+    return " ".join(str(v) for v in finding.values() if isinstance(v, str)).lower()
+
+
+def _score_findings(findings, answer):
+    """Classify findings against one answer key; returns (recalled ids, false positives).
+
+    A defect is recalled when some finding names its file AND the finding's text carries
+    every must_mention string case-insensitively. A finding that recalls no defect is a
+    false positive — on a clean case every finding is one.
+    """
+    findings = [f for f in findings if isinstance(f, dict)]
+    matched = [False] * len(findings)
+    recalled = []
+    for defect in answer["defects"]:
+        hit = False
+        for index, finding in enumerate(findings):
+            if _names_file(finding.get("location"), defect["file"]) and all(
+                m.lower() in _finding_text(finding) for m in defect["must_mention"]
+            ):
+                matched[index] = hit = True
+        if hit:
+            recalled.append(defect["id"])
+    return recalled, findings, matched.count(False)
+
+
+def _find_packet(packets_root, task_id):
+    """The settled reviewer reply for a task under packets_root, or None.
+
+    The packet layout is the runner's: <packets_root>/<task-id>/<stamp>/attempts/<aid>/
+    artifacts/reply.txt. One attempt per task id is the board's rule; if several exist,
+    the latest (highest stamp/aid path) is the settled one.
+    """
+    root = Path(packets_root) / task_id
+    if not root.is_dir():
+        return None
+    replies = sorted(root.rglob("reply.txt"))
+    if not replies:
+        return None
+    reply = replies[-1]
+    aid = reply.parent.parent.name if reply.parent.name == "artifacts" else None
+    return reply, aid
+
+
+def _lane_from_ledger(ledger, aid):
+    """The lane id a dispatched attempt ran on, from the ledger task's argv."""
+    from sqlalchemy import select
+
+    from ..ledger import attempts as attempt_records, tasks as task_records
+
+    with ledger.engine.connect() as con:
+        row = con.execute(
+            select(task_records.c.spec)
+            .join(attempt_records, attempt_records.c.task == task_records.c.id)
+            .where(attempt_records.c.id == aid)
+        ).first()
+    spec = row[0] if row else None
+    argv = spec.get("argv") if isinstance(spec, dict) else None
+    return argv[3] if isinstance(argv, list) and len(argv) > 3 else None
+
+
+def _markdown_table(header, rows):
+    head = "| " + " | ".join(header) + " |"
+    rule = "|" + "|".join("---" for _ in header) + "|"
+    return "\n".join([head, rule] + ["| " + " | ".join(map(str, row)) + " |" for row in rows])
+
+
+def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None):
+    """Compare each calibration task's settled reply against its answer key.
+
+    Per lane: cases reviewed, defects total, recalled, recall, false positives,
+    precision, weighted recall (high=3, medium=2, low=1) and a per-case table. The
+    report is written to <board_dir>/calibration/<run_id>/report.json and a markdown
+    table is printed. Nothing reaches the ledger unless record=True — then each case's
+    attempt gets one `record_outcome` with category "calibration" and accepted = (all
+    defects recalled and no false positives).
+    """
+    run_dir = Path(board_dir) / "calibration" / run_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    lanes = manifest.get("lanes") or []
+    rows, per_lane = [], {}
+    for case, task_id in zip(manifest["cases"], manifest["tasks"]):
+        answer = json.loads((run_dir / (case + ".answer.json")).read_text())
+        packet = _find_packet(packets_root, task_id)
+        verdict, findings, aid, note = None, [], (packet[1] if packet else None), None
+        if packet is None:
+            note = "no settled reply found"
+        else:
+            try:
+                review = parse_review(packet[0])
+                verdict, findings = review["verdict"], review.get("findings")
+                if not isinstance(findings, list):
+                    findings = []
+            except Exception as exc:
+                note = f"reply unreadable: {exc}"[:200]
+        recalled, findings, false_positives = _score_findings(findings, answer)
+        total = len(answer["defects"])
+        accepted = packet is not None and len(recalled) == total and false_positives == 0
+        if len(lanes) == 1:
+            lane = lanes[0]
+        elif ledger is not None and aid is not None:
+            lane = _lane_from_ledger(ledger, aid) or "unknown"
+        else:
+            lane = "unknown"
+        weights = lambda ids: sum(  # noqa: E731
+            SEVERITY_WEIGHTS[d["severity"]] for d in answer["defects"] if d["id"] in ids
+        )
+        all_weights = weights([d["id"] for d in answer["defects"]])
+        row = {
+            "case": case,
+            "task": task_id,
+            "lane": lane,
+            "verdict": verdict or ("missing" if packet is None else "unreadable"),
+            "attempt": aid,
+            "defects": total,
+            "recalled": len(recalled),
+            "recalled_ids": recalled,
+            "missed": [d["id"] for d in answer["defects"] if d["id"] not in recalled],
+            "false_positives": false_positives,
+            "findings": len(findings),
+            "accepted": accepted,
+            "weighted_recalled": weights(recalled),
+            "weighted_total": all_weights,
+        }
+        if note:
+            row["note"] = note
+        rows.append(row)
+        per_lane.setdefault(lane, []).append(row)
+
+    report = {"run_id": run_id, "lanes": {}}
+    printed = []
+    for lane, lane_rows in sorted(per_lane.items()):
+        defects = sum(r["defects"] for r in lane_rows)
+        recalled = sum(r["recalled"] for r in lane_rows)
+        findings = sum(r["findings"] for r in lane_rows)
+        false_positives = sum(r["false_positives"] for r in lane_rows)
+        weighted_recalled = sum(r["weighted_recalled"] for r in lane_rows)
+        weighted_total = sum(r["weighted_total"] for r in lane_rows)
+        entry = {
+            "cases": len(lane_rows),
+            "defects": defects,
+            "recalled": recalled,
+            "recall": (recalled / defects) if defects else None,
+            "false_positives": false_positives,
+            "findings": findings,
+            "precision": ((findings - false_positives) / findings) if findings else None,
+            "weighted_recall": (weighted_recalled / weighted_total) if weighted_total else None,
+            "cases_detail": lane_rows,
+        }
+        report["lanes"][lane] = entry
+        printed.append(
+            [
+                lane,
+                entry["cases"],
+                defects,
+                recalled,
+                _percent(entry["recall"]),
+                false_positives,
+                _percent(entry["precision"]),
+                _percent(entry["weighted_recall"]),
+            ]
+        )
+    report["table"] = _markdown_table(
+        ["lane", "cases", "defects", "recalled", "recall", "false positives", "precision",
+         "weighted recall"],
+        printed,
+    )
+    report["cases"] = _markdown_table(
+        ["lane", "case", "verdict", "defects", "recalled", "false positives", "accepted"],
+        [
+            [r["lane"], r["case"], r["verdict"], r["defects"], r["recalled"],
+             r["false_positives"], r["accepted"]]
+            for r in rows
+        ],
+    )
+    if record:
+        if ledger is None:
+            raise ValueError("record=True needs the ledger")
+        for row in rows:
+            if row["attempt"] is None:
+                continue
+            try:
+                ledger.record_outcome(
+                    row["attempt"],
+                    "calibration",
+                    row["accepted"],
+                    note=f"calibration {run_id}/{row['case']}: {row['recalled']}/{row['defects']}"
+                    f" recalled, {row['false_positives']} false positive(s)",
+                )
+            except Exception as exc:
+                row["record_error"] = str(exc)[:200]
+    (run_dir / "report.json").write_text(json.dumps(report, indent=1) + "\n")
+    print(report["table"])
+    print()
+    print(report["cases"])
+    return report
+
+
+def _percent(value):
+    return "n/a" if value is None else f"{value:.2f}"

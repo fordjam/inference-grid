@@ -254,3 +254,204 @@ def test_authoring_refuses_a_bad_run_id_or_lane_list(tmp_path):
         calibration.author_calibration(board, project, corpus, ["go"], "Run A")
     with pytest.raises(ValueError, match="lanes"):
         calibration.author_calibration(board, project, corpus, [], "run-a")
+
+
+# --- scoring (K3) ---
+
+
+def finding(location, text):
+    return {"location": location, "input": "n/a", "expected": text, "observed": text}
+
+
+def reply(verdict, findings):
+    return json.dumps({"verdict": verdict, "findings": findings, "checked": ["a", "b", "c"]})
+
+
+def write_packet(packets_root, task_id, body, aid=None):
+    aid = aid or ("11111111-2222-3333-4444-" + str(abs(hash(task_id)) % 10**12).zfill(12))
+    artifacts = packets_root / task_id / "20260914T120000" / "attempts" / aid / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "reply.txt").write_text(body)
+    return aid
+
+
+AID = "11111111-2222-3333-4444-555555555555"
+
+
+def scoring_board(tmp_path):
+    """Four cases: full recall, a miss, a clean pass, a clean case with a spurious finding."""
+    board, project = board_and_project(tmp_path)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    write_case(
+        corpus,
+        "full-recall",
+        {"web/e2e/views.spec.ts": "spec\n"},
+        diff_block("web/e2e/views.spec.ts", "spec\n"),
+        "brief\n",
+        {"defects": [defect("d1", "web/e2e/views.spec.ts", ["put"], severity="high")], "clean": False},
+    )
+    write_case(
+        corpus,
+        "a-miss",
+        {"src/api/routes/views.py": "route\n"},
+        diff_block("src/api/routes/views.py", "route\n"),
+        "brief\n",
+        {"defects": [defect("d2", "src/api/routes/views.py", ["delete"], severity="low")], "clean": False},
+    )
+    write_case(corpus, "clean-pass", {"docs/note.md": "note\n"}, diff_block("docs/note.md", "note\n"), "brief\n", {"defects": [], "clean": True})
+    write_case(corpus, "clean-spurious", {"docs/other.md": "note\n"}, diff_block("docs/other.md", "note\n"), "brief\n", {"defects": [], "clean": True})
+    calibration.author_calibration(board, project, corpus, ["go"], "run1")
+    packets = tmp_path / "packets"
+    write_packet(
+        packets,
+        "calib-run1-full-recall",
+        reply("rejected", [finding("web/e2e/views.spec.ts (spec)", "the mock intercepts /api/views but the client sends PUT /api/views/<name>")]),
+        aid=AID,
+    )
+    write_packet(
+        packets,
+        "calib-run1-a-miss",
+        reply(
+            "rejected",
+            [
+                finding("src/api/routes/views.py", "the handler returns the wrong status"),
+                finding("src/api/other.py", "an unrelated concern"),
+            ],
+        ),
+    )
+    write_packet(packets, "calib-run1-clean-pass", reply("approved", []))
+    write_packet(packets, "calib-run1-clean-spurious", reply("rejected", [finding("docs/other.md", "a made-up problem")]))
+    return board, packets
+
+
+def test_scoring_reports_recall_false_positives_and_precision(tmp_path, capsys):
+    board, packets = scoring_board(tmp_path)
+    report = calibration.score_calibration(board, "run1", packets)
+    lane = report["lanes"]["go"]
+    assert lane["cases"] == 4
+    assert lane["defects"] == 2 and lane["recalled"] == 1 and lane["recall"] == 0.5
+    assert lane["false_positives"] == 3 and lane["findings"] == 4
+    assert lane["precision"] == 0.25
+    detail = {r["case"]: r for r in lane["cases_detail"]}
+    assert detail["full-recall"]["recalled_ids"] == ["d1"] and detail["full-recall"]["accepted"]
+    assert detail["a-miss"]["missed"] == ["d2"] and not detail["a-miss"]["accepted"]
+    assert detail["a-miss"]["false_positives"] == 2
+    assert detail["clean-pass"]["accepted"] and detail["clean-pass"]["false_positives"] == 0
+    assert not detail["clean-spurious"]["accepted"] and detail["clean-spurious"]["false_positives"] == 1
+    # Weighted recall: high (3) recalled, low (1) missed.
+    assert lane["weighted_recall"] == 0.75
+    assert (board / "calibration" / "run1" / "report.json").is_file()
+    out = capsys.readouterr().out
+    assert "| lane |" in out and "go" in out and "recall" in out
+
+
+def test_weighted_recall_arithmetic(tmp_path):
+    board, project = board_and_project(tmp_path)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    write_case(
+        corpus,
+        "two-defects",
+        {"src/a.py": "a\n", "src/b.py": "b\n"},
+        diff_block("src/a.py", "a\n") + "\n" + diff_block("src/b.py", "b\n"),
+        "brief\n",
+        {
+            "defects": [
+                defect("high-one", "src/a.py", ["alpha"], severity="high"),
+                defect("low-one", "src/b.py", ["beta"], severity="low"),
+            ],
+            "clean": False,
+        },
+    )
+    calibration.author_calibration(board, project, corpus, ["go"], "run1")
+    packets = tmp_path / "packets"
+    write_packet(
+        packets,
+        "calib-run1-two-defects",
+        reply("rejected", [finding("src/b.py", "beta is mishandled here")]),
+    )
+    report = calibration.score_calibration(board, "run1", packets)
+    lane = report["lanes"]["go"]
+    assert lane["recalled"] == 1 and lane["defects"] == 2
+    assert lane["recall"] == 0.5 and lane["weighted_recall"] == 0.25
+
+
+def test_a_basename_location_still_recalls_and_clean_cases_score(tmp_path):
+    board, project = board_and_project(tmp_path)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    write_case(
+        corpus,
+        "one-defect",
+        {"src/deep/views.py": "a\n"},
+        diff_block("src/deep/views.py", "a\n"),
+        "brief\n",
+        {"defects": [defect("d", "src/deep/views.py", ["nested"])], "clean": False},
+    )
+    write_case(corpus, "tidy", {"docs/n.md": "n\n"}, diff_block("docs/n.md", "n\n"), "brief\n", {"defects": [], "clean": True})
+    calibration.author_calibration(board, project, corpus, ["go"], "run1")
+    packets = tmp_path / "packets"
+    write_packet(
+        packets,
+        "calib-run1-one-defect",
+        reply("rejected", [finding("views.py (handle)", "the nested branch never runs")]),
+    )
+    write_packet(packets, "calib-run1-tidy", reply("approved", []))
+    report = calibration.score_calibration(board, "run1", packets)
+    lane = report["lanes"]["go"]
+    assert lane["recalled"] == 1 and lane["false_positives"] == 0
+    assert lane["recall"] == 1.0 and lane["precision"] == 1.0
+
+
+def test_scoring_without_record_writes_no_ledger_rows(tmp_path):
+    from inference_grid.ledger import Ledger
+
+    board, packets = scoring_board(tmp_path)
+    ledger = Ledger("sqlite:///" + str(tmp_path / "l.sqlite"))
+    ledger.initialize()
+    report = calibration.score_calibration(board, "run1", packets, record=False, ledger=ledger)
+    assert not any("record_error" in r for lane in report["lanes"].values() for r in lane["cases_detail"])
+    assert ledger.scorecard() == []
+
+
+def test_record_true_records_calibration_outcomes(tmp_path):
+    from sqlalchemy import select
+
+    from inference_grid.ledger import Ledger, attempts as attempts_t, events, tasks as tasks_t
+
+    board, packets = scoring_board(tmp_path)
+    ledger = Ledger("sqlite:///" + str(tmp_path / "l.sqlite"))
+    ledger.initialize()
+    with ledger.engine.begin() as con:
+        con.execute(tasks_t.insert().values(id="calib-run1-full-recall-20260914T120000-abc123", project="p", spec={}))
+        con.execute(
+            attempts_t.insert().values(
+                id=AID,
+                task="calib-run1-full-recall-20260914T120000-abc123",
+                account="a",
+                generation=1,
+                state="completed",
+                estimate={},
+                workspace="/w",
+                receipt={},
+                updated=0.0,
+            )
+        )
+    report = calibration.score_calibration(board, "run1", packets, record=True, ledger=ledger)
+    detail = {r["case"]: r for r in report["lanes"]["go"]["cases_detail"]}
+    assert "record_error" not in detail["full-recall"]
+    with ledger.engine.connect() as con:
+        recorded = list(
+            con.execute(select(events).where(events.c.kind == "outcome_recorded")).mappings()
+        )
+    assert len(recorded) == 1
+    assert recorded[0]["attempt"] == AID
+    assert recorded[0]["detail"]["category"] == "calibration"
+    assert recorded[0]["detail"]["accepted"] is True
+
+
+def test_record_true_without_a_ledger_refuses(tmp_path):
+    board, packets = scoring_board(tmp_path)
+    with pytest.raises(ValueError, match="ledger"):
+        calibration.score_calibration(board, "run1", packets, record=True)
