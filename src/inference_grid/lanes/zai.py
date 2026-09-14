@@ -24,6 +24,9 @@ from . import sandbox
 
 DEFAULT_CLAUDE = "/Users/fordjam/.local/bin/claude"
 DEFAULT_BASE_URL = "https://api.z.ai/api/anthropic"
+# First-party Max login: the CLI's own authentication, its native endpoint, its config.
+FIRST_PARTY_BASE_URL = "https://api.anthropic.com"
+DEFAULT_THINKING_TOKENS = 6000
 HAIKU_MODEL = "glm-5.3-flash"
 MAX_STDOUT = 4 * 1024 * 1024
 STRIPPED_ENV = (
@@ -85,13 +88,15 @@ def read_key(credential_path):
 
 
 def build_env(request, lane, home, work, key, *, thinking_tokens, base_url):
-    """Point Claude Code at the Z.ai endpoint; strip every other provider credential."""
+    """Point Claude Code at the endpoint; strip every other provider credential.
+
+    With no key (first-party Max login) the endpoint variables stay unset so the CLI
+    uses its own authentication and native endpoint.
+    """
     env = {name: value for name, value in os.environ.items() if name not in STRIPPED_ENV}
     env.update(
         {
             "HOME": str(home),
-            "ANTHROPIC_BASE_URL": base_url,
-            "ANTHROPIC_AUTH_TOKEN": key,
             "ANTHROPIC_DEFAULT_OPUS_MODEL": request["model"],
             "ANTHROPIC_DEFAULT_SONNET_MODEL": request["model"],
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": HAIKU_MODEL,
@@ -101,6 +106,9 @@ def build_env(request, lane, home, work, key, *, thinking_tokens, base_url):
             "TMPDIR": str(work),
         }
     )
+    if key is not None:
+        env["ANTHROPIC_BASE_URL"] = base_url
+        env["ANTHROPIC_AUTH_TOKEN"] = key
     return env
 
 
@@ -143,13 +151,33 @@ def run(
     *,
     claude=DEFAULT_CLAUDE,
     home=None,
-    thinking_tokens=6000,
-    base_url=DEFAULT_BASE_URL,
+    thinking_tokens=DEFAULT_THINKING_TOKENS,
+    base_url=None,
 ):
-    """Execute one attempt; return (receipt or None, verdict). The caller prints the receipt."""
+    """Execute one attempt; return (receipt or None, verdict). The caller prints the receipt.
+
+    A lane with a `credential_path` runs the Z.ai token flow (scratch HOME, endpoint
+    override). A lane with `credential_path: null` is the first-party Max login: the
+    CLI's own authentication and native endpoint, the real home for reads with only
+    `~/.claude` writable, and the task's thinking budget mapped onto MAX_THINKING_TOKENS.
+    """
     attempt_dir = Path(attempt_dir)
-    # Scratch HOME per attempt: the real home must never become a writable sandbox root.
-    home = Path(home or (attempt_dir / "home"))
+    first_party = lane.get("credential_path") is None
+    requested_thinking = request.get("thinking_tokens")
+    if type(requested_thinking) is int and requested_thinking > 0:
+        thinking_tokens = requested_thinking
+    if base_url is None:
+        base_url = FIRST_PARTY_BASE_URL if first_party else DEFAULT_BASE_URL
+    # Scratch HOME per attempt for the token flow; the real home must never become a
+    # writable sandbox root, so the first-party flow only opens ~/.claude for writes.
+    if first_party:
+        home = Path(home or Path.home())
+        extra_write_roots = (home / ".claude",)
+    else:
+        home = Path(home or (attempt_dir / "home"))
+        extra_write_roots = (home,)
+    for root in extra_write_roots:
+        root.mkdir(parents=True, exist_ok=True)
     home.mkdir(parents=True, exist_ok=True)
     work = attempt_dir / "work"
     work.mkdir(mode=0o700)
@@ -171,40 +199,43 @@ def run(
         "usage": None,
         "model_usage": None,
         "num_turns": None,
+        "thinking_tokens": thinking_tokens,
+        "first_party": first_party,
         "refusal": None,
     }
-    key, problem = read_key(lane["credential_path"])
-    if problem:
-        verdict["refusal"] = problem
-        return None, verdict
+    key = None
+    if not first_party:
+        key, problem = read_key(lane["credential_path"])
+        if problem:
+            verdict["refusal"] = problem
+            return None, verdict
     profile = sandbox.write_profile(
         work,
         attempt_dir / "claude.sb",
-        extra_write_roots=(home,),
+        extra_write_roots=extra_write_roots,
         deny_read_roots=sandbox.deny_read_roots(),
     )
     sandbox.probe(profile, work)
-    argv = sandbox.command(
-        profile,
-        [
-            claude,
-            "--print",
-            "--model",
-            request["model"],
-            "--tools",
-            "",
-            "--setting-sources",
-            "",
-            "--strict-mcp-config",
-            "--mcp-config",
-            '{"mcpServers":{}}',
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--max-turns",
-            "1",
-        ],
-    )
+    argv_tail = [
+        claude,
+        "--print",
+        "--model",
+        request["model"],
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--max-turns",
+        "1",
+    ]
+    if not first_party:
+        # The token flow has no login state; first-party uses the CLI's own config.
+        argv_tail += ["--setting-sources", ""]
+    argv = sandbox.command(profile, argv_tail)
     env = build_env(
         request, lane, home, work, key, thinking_tokens=thinking_tokens, base_url=base_url
     )

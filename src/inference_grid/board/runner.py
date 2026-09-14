@@ -167,7 +167,12 @@ def parse_review(reply_path):
 
 
 def lane_view(lanes, now):
-    """Selection view of lanes.json: category list plus campaign-window state."""
+    """Selection view of lanes.json: category list plus campaign-window state.
+
+    First-party families (claude, openai) are explicit_only: the runner never selects
+    them for a task whose `lanes` do not name them, so a first-party review lane runs
+    only where the author chose it.
+    """
     view = {}
     for lane_id, lane in lanes.items():
         active = None
@@ -178,6 +183,7 @@ def lane_view(lanes, now):
             "model": lane["model"],
             "categories": lane["categories"],
             "window_active": active,
+            "explicit_only": lane["family"] in ("claude", "openai"),
         }
     return view
 

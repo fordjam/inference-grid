@@ -37,6 +37,8 @@ Nothing merges automatically. Held attempts wait for `resolve` with evidence, wi
 
 ## Lane kinds
 
+First-party families (`claude`, `openai`) are `explicit_only` in the runner's lane view: a task's `lanes` must name them for them to be selected, so first-party review lanes run only where the author chose them.
+
 `go_http` (dedicated subscription endpoint, JSON schema gate), `goat_cli` (`--mod` session effort, `classify_goat`), `cline_cli` (write sandbox, snapshot supervision, `classify_cline`), `claude_headless` (Anthropic-compatible base URL, thinking budget), `zcode_cli` (bundled CLI, session-DB evidence, `~/.zcode` write allowance). Configuration lives in a private `lanes.json` validated by `inference_grid.lanes.config`.
 
 The `go_http` request shapes reasoning explicitly, since kimi-k3 thought its whole output away at the endpoint's default effort: `lanes/go.py::REASONING_EFFORT` maps each model id to the `reasoning_effort` values its documented endpoint schema accepts (`kimi-k3` → `low`, `high`, `max`; the endpoint default is `max`), and `lanes/go.py::EFFORT_TIERS` is the coordinator's policy mapping the task's `thinking_tokens` to a tier — absent or at most 4 000 → `low`, at most 12 000 → `high`, beyond → `max` — so board review tasks (6 000) ask for `high`. The token count also caps `max_tokens` at `thinking_tokens + 4 000`. A model outside the map sends no effort field and the verdict records `reasoning_effort: unsupported` (plus `reasoning_budget: unsupported` when a thinking budget was requested); a `length` stop with no content is held as `reasoning_overrun` with both counts.

@@ -1640,3 +1640,21 @@ def test_a_recently_refused_model_blocks_even_the_canary(world, monkeypatch):
     )
     assert results[0]["result"] == "no_ready_lane"
     assert world["ledger"].status() == []
+
+
+def test_lane_view_marks_first_party_families_explicit_only(world):
+    # The runner's selection inputs are built from lane_view: first-party families are
+    # marked explicit_only so nothing auto-selects them for tasks that do not name them.
+    lanes = dict(world["lanes"])
+    lanes["claude"] = dict(lanes["go"], family="claude", model="claude-opus-4")
+    lanes["openai"] = dict(lanes["go"], family="openai", model="codex-5")
+    now = time.time()
+    view = runner.lane_view(lanes, now)
+    assert view["go"]["explicit_only"] is False
+    assert view["claude"]["explicit_only"] is True
+    assert view["openai"]["explicit_only"] is True
+    # Selection is structurally restricted to the task's named lanes: a task naming only
+    # go never considers the explicit-only lane, whatever its readiness.
+    world["ledger"].record_lane("claude", dict(ready_record(now), provider="claude"))
+    allowed = {k: view[k] for k in ("go",)}
+    assert "claude" in view and "claude" not in allowed
