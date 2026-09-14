@@ -692,6 +692,71 @@ class Ledger:
             )
         return {"attempt": aid, "category": category, "accepted": accepted}
 
+    def record_external(self, task, project, spec, receipt, category, accepted,
+                        usage=None, repairs=0, note=None):
+        """Record work the operator ran OUTSIDE the grid — a sandboxed lane launched by
+        hand — as a completed attempt with its outcome, so the scorecard sees it.
+
+        The ledger never dispatched this, so it must not pretend it did: the task spec
+        and the receipt both carry `provenance: "operator"`, the attempt is born in the
+        `completed` state (no quota is reserved, no outbox row, no admission event), and
+        the category may not be `canary` — a lane earns its qualification only through
+        work the grid itself launched and judged. `verified_in_lane` in the receipt says
+        whether the lane could run its own gate; work it could not verify (a Playwright
+        spec written blind) is scored on what the operator's run found, and `repairs`
+        is that count."""
+        from pathlib import Path
+
+        if not task or not project or spec.get("authorized") is not True:
+            raise Refused("explicit local authorization required")
+        if not spec.get("model") or not spec.get("family"):
+            raise Refused("model and family required")
+        if (
+            not isinstance(spec.get("argv"), list)
+            or not spec["argv"]
+            or not all(isinstance(x, str) for x in spec["argv"])
+        ):
+            raise Refused("argv required")
+        if not Path(spec.get("workspace", "")).is_absolute():
+            raise Refused("absolute isolated workspace required")
+        if not isinstance(spec.get("account"), str) or not spec["account"]:
+            raise Refused("account required")
+        if not isinstance(receipt, dict) or type(receipt.get("verified_in_lane")) is not bool:
+            raise Refused("receipt must say whether the lane verified its own work")
+        if category == "canary":
+            raise Refused("external work cannot qualify a lane")
+        if type(receipt.get("elapsed_s", 0)) not in (int, float) or receipt.get("elapsed_s", 0) < 0:
+            raise Refused("elapsed_s must be a nonnegative number")
+        spec = dict(spec, workspace=str(Path(spec["workspace"]).resolve()), provenance="operator")
+        receipt = dict(receipt, provenance="operator")
+        with self.tx() as con:
+            self.lock(con, ["task:" + task])
+            acct = con.execute(select(accounts).where(accounts.c.id == spec["account"])).mappings().first()
+            if not acct:
+                raise Refused("unknown account")
+            old = con.execute(select(tasks).where(tasks.c.id == task)).mappings().first()
+            if old:
+                raise Refused("task already recorded; external work is written once")
+            con.execute(tasks.insert().values(id=task, project=project, spec=spec))
+            aid = str(uuid.uuid4())
+            con.execute(
+                attempts.insert().values(
+                    id=aid,
+                    task=task,
+                    account=spec["account"],
+                    generation=acct["generation"],
+                    state="completed",
+                    estimate={},
+                    workspace=spec["workspace"],
+                    receipt=receipt,
+                    reason=None,
+                    updated=time.time(),
+                )
+            )
+            self.event(con, aid, "external_recorded", provenance="operator")
+        self.record_outcome(aid, category, accepted, usage=usage, repairs=repairs, note=note)
+        return {"attempt": aid, "task": task, "category": category, "accepted": accepted}
+
     def scorecard(self, account=None):
         """Per model/family/category evidence from this ledger; missing usage stays absent."""
         with self.engine.connect() as con:
@@ -728,9 +793,11 @@ class Ledger:
                     "repairs": 0,
                     "usage": {},
                     "usage_reported": 0,
+                    "external": 0,
                 },
             )
             entry["attempts"] += 1
+            entry["external"] += spec.get("provenance") == "operator"
             entry["completed"] += row["state"] in ("completed", "accepted")
             entry["accepted"] += bool(outcome.get("accepted")) or row["state"] == "accepted"
             entry["held"] += row["state"] == "held"

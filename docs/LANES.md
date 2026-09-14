@@ -97,3 +97,28 @@ say so (`reasoning_effort: unsupported`).
 | `go-qwen` | `qwen3.8-max` | qwen | Third family candidate; canary before use |
 | `go-minimax` | `minimax-m3` | minimax | Unqualified; canary before use |
 | `go-grok` | `grok-4.6` | grok | Refuses the OpenAI-compatible endpoint (protocol fact); re-probe only after the endpoint changes |
+
+## Work run outside the grid — `external`
+
+A lane the operator launches by hand (a sandboxed `run_lane.py` on a repo packet, hours
+long, well past the ledger's dispatch timeout) never becomes a ledger attempt on its own,
+so the scorecard learns nothing from it: the routing evidence for a model comes only from
+what the grid dispatched and judged. `inference-grid external --json spec.json` closes
+that gap without pretending. It writes one task and one attempt born `completed`, both
+stamped `provenance: "operator"`, with no quota reservation, no outbox row and no
+admission event; the outcome is recorded in the same call. The receipt must say
+`verified_in_lane: true|false` — whether the lane could run its own gate. Work it could
+not (a Playwright spec written blind, judged only by the operator's run) is scored on
+that run, and `repairs` is the count of fixes it needed. The category may not be
+`canary`: qualification is earned only through work the grid itself launched.
+Each task id is written once. The scorecard reports `external` per row so a reader can
+weigh operator-provenance rows against grid-dispatched ones.
+
+```json
+{"task": "lane-glm-20260914-t1", "project": "monarch",
+ "spec": {"authorized": true, "account": "zai", "model": "glm-5.3-flash", "family": "glm",
+          "argv": ["cmd", "--print", "..."], "workspace": "/Users/me/.grid-workspaces/monarch-glm"},
+ "receipt": {"verified_in_lane": false, "elapsed_s": 1909, "returncode": 0},
+ "category": "e2e-spec", "accepted": false, "repairs": 6,
+ "note": "6 of 8 specs failed on the operator's Playwright run; all spec bugs"}
+```
