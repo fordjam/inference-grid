@@ -24,10 +24,13 @@ def landed_project(tmp_path):
     project = tmp_path / "project"
     (project / "src").mkdir(parents=True)
     (project / "tests").mkdir()
+    (project / "tests/__init__.py").write_text("")
     (project / "grid/board").mkdir(parents=True)
     (project / "grid/briefs").mkdir(parents=True)
     (project / "src/mod.py").write_text("VALUE = 1\n")
     (project / "tests/test_mod2.py").write_text(
+        "import sys\nfrom pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))\n"
         "import unittest\nimport mod2\n\nclass T(unittest.TestCase):\n"
         "    def test_value(self):\n        self.assertEqual(mod2.VALUE, 1)\n"
     )
@@ -136,10 +139,43 @@ def test_a_conflicting_head_reports_the_conflict(tmp_path, monkeypatch):
     assert "patch failed" in text or "already exists" in text
 
 
-def test_dry_run_false_is_refused(tmp_path):
+def test_apply_creates_the_integrate_branch_with_tests_green(tmp_path, monkeypatch):
     project = landed_project(tmp_path)
-    with pytest.raises(ValueError, match="not implemented"):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "t")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "t")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+    result = inbox_integrate(project, "copy-ok", dry_run=False)
+    assert result["applies_cleanly"] is True and result["tests_passed"] is True
+    assert result["branch"] == "integrate/copy-ok"
+    # The branch carries the landed artifact; the operator's checkout is untouched.
+    landed = subprocess.run(
+        ["git", "-C", str(project), "show", "integrate/copy-ok:src/mod2.py"],
+        capture_output=True, text=True,
+    )
+    assert landed.stdout == "VALUE = 1\n"
+    assert not (project / "src/mod2.py").exists()
+    assert not list(Path.home().glob("*.integrate*"))
+
+
+def test_apply_refuses_a_conflicting_head_and_creates_nothing(tmp_path, monkeypatch):
+    project = landed_project(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    (project / "src/mod2.py").write_text("VALUE = 999\n")
+    git(project, "add", "-A")
+    commit(project, "operator changed src/mod2.py")
+    with pytest.raises(ValueError, match="conflicts with HEAD"):
         inbox_integrate(project, "copy-ok", dry_run=False)
+    branches = subprocess.run(
+        ["git", "-C", str(project), "branch", "--list", "integrate/copy-ok"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert branches == ""
 
 
 def test_a_task_without_a_landing_record_is_refused(tmp_path):
