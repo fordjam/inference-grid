@@ -131,7 +131,7 @@ def world(tmp_path, monkeypatch):
     }
     lanes_path = tmp_path / "lanes.json"
     lanes_path.write_text(json.dumps({"lanes": lanes}))
-    return dict(
+    world = dict(
         project=project,
         board=board,
         ledger=ledger,
@@ -140,6 +140,17 @@ def world(tmp_path, monkeypatch):
         account=account,
         packets=tmp_path / "packets",
     )
+    # The fixture's lane model has earned its canary row (on its own evidence account,
+    # so per-account scorecard assertions stay clean); L5 gates lanes without one.
+    world["ledger"].configure_account(
+        "canary-evidence",
+        1,
+        {"five_hour": 10, "weekly": 20},
+        time.time() + 600,
+        ["glm-5.3-flash", "kimi-k3"],
+    )
+    seed_accepted_row(world, alias="canary-evidence")
+    return world
 
 
 def ready_record(now):
@@ -543,7 +554,7 @@ def test_duplicate_test_basenames_block_before_dispatch(world):
     assert task["state"] == "blocked"
     assert "strict/test_mod2.py" in task["blocked_reason"]
     assert "lenient/test_mod2.py" in task["blocked_reason"]
-    assert world["ledger"].status() == []  # blocked before any attempt existed
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
 
 
 def test_duplicate_basenames_within_one_declared_list_block():
@@ -795,6 +806,7 @@ def test_approved_review_accepts_source_and_lands_on_inbox(world, monkeypatch, t
         ["kimi-k3"],
         ["kimi-alias"],
     )
+    seed_accepted_row(world, model="kimi-k3", alias="canary-evidence")
     now = time.time()
     world["ledger"].record_lane("go", ready_record(now))
     world["ledger"].record_lane("kimi", dict(ready_record(now), provider="kimi"))
@@ -870,7 +882,44 @@ def test_an_artifact_sharing_an_input_basename_blocks_too(world):
     assert results[0]["result"] == "blocked: name collision"
     task = json.loads((world["board"] / "clash.json").read_text())
     assert task["state"] == "blocked" and "staged input mod.py" in task["blocked_reason"]
-    assert world["ledger"].status() == []
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
+
+
+def seed_accepted_row(world, model="glm-5.3-flash", category="canary", task_id=None, alias=None):
+    """One terminal, accepted attempt for (model, category): the scorecard row a gate reads."""
+    from inference_grid.ledger import digest
+
+    manifest = digest({})
+    spec = {
+        "authorized": True,
+        "model": model,
+        "family": "glm",
+        "argv": ["/usr/bin/true"],
+        "workspace": str(world["packets"] / (category + "-ws")),
+        "timeout": 60,
+        "output_bytes": 1000,
+        "inputs": {},
+        "manifest_sha256": manifest,
+    }
+    world["ledger"].submit(task_id or (category + "-seed-" + model.replace(".", "-")), "project", spec)
+    aid, generation = world["ledger"].claim(
+        task_id or (category + "-seed-" + model.replace(".", "-")),
+        alias or world["account"],
+        {"five_hour": 0.01, "weekly": 0.01},
+    )
+    world["ledger"].start(aid, generation)
+    world["ledger"].finish(
+        aid,
+        generation,
+        {
+            "status": "completed",
+            "finish_reason": "stop",
+            "actual_model": model,
+            "manifest_sha256": manifest,
+            "artifacts": [{"path": "out.py", "sha256": "a" * 64}],
+        },
+    )
+    world["ledger"].record_outcome(aid, category, True)
 
 
 def seed_active_attempt(world, task_id, alias=None):
@@ -918,7 +967,7 @@ def test_busy_lane_reports_lane_busy_and_skips_dispatch(world):
     assert [r["attempt"] for r in results] == [None, None]
     for tid in ("copy-ok", "copy-wrong"):
         assert json.loads((world["board"] / f"{tid}.json").read_text())["state"] == "ready"
-    assert len(world["ledger"].status()) == 1  # only the seeded attempt exists
+    assert len([r for r in world["ledger"].status() if r["account"] == world["account"]]) == 1
 
 
 def test_lane_within_concurrency_still_dispatches(world):
@@ -977,6 +1026,7 @@ def test_dry_run_plans_without_touching_anything(world):
         ["zai-alias"],
     )
     seed_active_attempt(world, "seed-busy")  # the go account is at capacity
+    seed_accepted_row(world, model="kimi-k3", alias="canary-evidence")  # the zai lane's model has its canary row
     now = time.time()
     world["ledger"].record_lane("go", ready_record(now))
     world["ledger"].record_lane("zai", dict(ready_record(now), provider="zai"))
@@ -1000,7 +1050,7 @@ def test_dry_run_plans_without_touching_anything(world):
     ]
     # Nothing was dispatched, written or staged.
     assert {p.name: p.read_bytes() for p in world["board"].glob("*.json")} == before
-    assert len(world["ledger"].status()) == 1  # only the seeded attempt exists
+    assert len([r for r in world["ledger"].status() if r["account"] == world["account"]]) == 1
     assert not world["packets"].exists()
 
 
@@ -1093,7 +1143,7 @@ def test_a_held_attempt_makes_the_lane_busy(world):
         "copy-ok": "lane_busy",
         "copy-wrong": "lane_busy",
     }
-    assert len(world["ledger"].status()) == 1  # nothing new dispatched
+    assert len([r for r in world["ledger"].status() if r["account"] == world["account"]]) == 1
 
 
 def write_link(board, source_id, **fields):
@@ -1130,6 +1180,7 @@ def test_a_retry_review_resolves_its_source_by_link(world, monkeypatch):
         ["kimi-k3"],
         ["kimi-alias"],
     )
+    seed_accepted_row(world, model="kimi-k3", alias="canary-evidence")
     now = time.time()
     world["ledger"].record_lane("go", ready_record(now))
     world["ledger"].record_lane("kimi", dict(ready_record(now), provider="kimi"))
@@ -1351,6 +1402,7 @@ def test_a_region_optin_refusal_excludes_the_model_until_expiry(world, monkeypat
         "(attempt / 'verdict.json').write_text(json.dumps(verdict))\n"
         "sys.exit(1)\n"
     )
+    seed_accepted_row(world, model="deepseek-v4-flash", alias="ds-alias")
     monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(refusing)])
     now = time.time()
     world["ledger"].record_lane("go", ready_record(now))
@@ -1639,7 +1691,7 @@ def test_a_recently_refused_model_blocks_even_the_canary(world, monkeypatch):
         now=now,
     )
     assert results[0]["result"] == "no_ready_lane"
-    assert world["ledger"].status() == []
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
 
 
 def test_lane_view_marks_first_party_families_explicit_only(world):
@@ -1658,3 +1710,43 @@ def test_lane_view_marks_first_party_families_explicit_only(world):
     world["ledger"].record_lane("claude", dict(ready_record(now), provider="claude"))
     allowed = {k: view[k] for k in ("go",)}
     assert "claude" in view and "claude" not in allowed
+
+
+def test_a_lane_without_canary_evidence_is_unqualified_until_its_canary_passes(world):
+    # Registering a model costs nothing until it earns evidence: a lane whose model has
+    # no accepted canary row is unqualified for work, and a canary success qualifies it.
+    lanes = dict(world["lanes"])
+    lanes["go-qwen"] = dict(lanes["go"], family="qwen", model="qwen3.8-max")
+    world["ledger"].configure_account(
+        "qwen-acct",
+        1,
+        {"five_hour": 10, "weekly": 20},
+        time.time() + 600,
+        ["qwen3.8-max"],
+        ["qwen-alias"],
+    )
+    world["ledger"].record_lane("go-qwen", dict(ready_record(time.time()), provider="go-qwen"))
+    accounts = {"go": world["account"], "go-qwen": "qwen-alias"}
+    now = time.time()
+    view = runner.readiness_view(world["ledger"], lanes, now, accounts, world["ledger"].scorecard())
+    assert view["go-qwen"]["state"] == "unqualified"
+    # A passing canary for the model earns the row that qualifies the lane.
+    seed_accepted_row(world, model="qwen3.8-max", alias="qwen-alias")
+    view = runner.readiness_view(world["ledger"], lanes, now, accounts, world["ledger"].scorecard())
+    assert view["go-qwen"]["state"] == "ready"
+    # And the work task that could never have run there now can.
+    (world["board"] / "copy-ok.json").write_text(
+        json.dumps(dict(make_task("copy-ok", "brief.txt"), lanes=["go-qwen"]))
+    )
+    (world["board"] / "copy-wrong.json").unlink()
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        lanes,
+        world["lanes_path"],
+        accounts,
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] in ("passed", "failed_tests")

@@ -188,7 +188,7 @@ def lane_view(lanes, now):
     return view
 
 
-def readiness_view(ledger, lanes, now, accounts_by_lane=None):
+def readiness_view(ledger, lanes, now, accounts_by_lane=None, scorecard=None):
     """Lane records classified now; a lane without a record is stale, never ready.
 
     A lane whose account already carries its max_concurrency of ACTIVE attempts (the
@@ -196,6 +196,9 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None):
     slot) is busy: select_lane treats any non-ready state as unavailable, so the tick can
     skip to another lane or report lane_busy instead of colliding with a refused 'account
     busy' dispatch.
+
+    With the scorecard supplied, a lane whose model has no accepted `canary` row is
+    unqualified: registering a model costs nothing until a canary earns it evidence.
     """
     with ledger.engine.connect() as con:
         records = {r["provider"]: r["record"] for r in con.execute(select(lane_records)).mappings()}
@@ -205,6 +208,15 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None):
             select(attempt_records.c.account).where(attempt_records.c.state.in_(ACTIVE))
         ).mappings():
             active[row["account"]] = active.get(row["account"], 0) + 1
+    canaried = (
+        {
+            row.get("model")
+            for row in scorecard
+            if row.get("category") == "canary" and row.get("accepted")
+        }
+        if scorecard is not None
+        else None
+    )
     view = {}
     for lane_id, lane in lanes.items():
         record = records.get(lane_id)
@@ -219,6 +231,8 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None):
         if state == "ready" and model_unsupported_until(record, lane["model"], now):
             # The endpoint has refused this model (401/403) recently: excluded until the
             # recorded instant expires, without bending the provider-authored classifier.
+            state = "unqualified"
+        if state == "ready" and canaried is not None and lane["model"] not in canaried:
             state = "unqualified"
         if state == "ready" and accounts_by_lane:
             account = alias_map.get(accounts_by_lane.get(lane_id))
@@ -804,8 +818,8 @@ def tick(
     now = time.time() if now is None else now
     results = []
     view = lane_view(lanes, now)
-    readiness = readiness_view(ledger, lanes, now, accounts_by_lane)
     scorecard = ledger.scorecard()
+    readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
     board = load_board(board_dir)
     for task_id, (path, task) in board.items():
         if task["state"] != "ready":
@@ -923,7 +937,7 @@ def tick(
         except Refused as exc:
             # A claim refused late still leaves its queued attempt occupying the account;
             # the next task must see the busy lane, not the pre-dispatch view.
-            readiness = readiness_view(ledger, lanes, now, accounts_by_lane)
+            readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
             reason = "refused: " + str(exc)[:200]
             if aid is None:
                 # Staging or admission refused before any attempt existed; the task stays ready.
@@ -940,7 +954,7 @@ def tick(
         # The attempt now occupies its account slot (a hold stays ACTIVE), so re-evaluate
         # the busy count before the next task in this tick is selected — dispatching on a
         # stale view collided with a refused 'account busy' attempt. One query.
-        readiness = readiness_view(ledger, lanes, now, accounts_by_lane)
+        readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
         if state != "completed":
             # The attempt is held in the ledger; outcomes attach after the operator resolves
             # it, so the board only records the block with the hold reason. A transport

@@ -84,7 +84,8 @@ effort mapping does in `go.py`. Explicit-only for reviews, like `openai`.
 ## Go models worth qualifying
 
 One credential, many models — each is its own lane id, each earns evidence through a
-canary before anything else runs on it. `REASONING_EFFORT` in `lanes/go.py` records what
+canary before anything else runs on it: the runner marks a lane `unqualified` for work until its model has an accepted `canary` row in the scorecard, so registering a model
+costs nothing (`lane-init` + one tick) until the canary passes. `REASONING_EFFORT` in `lanes/go.py` records what
 each model's documented schema honours; models absent from it send no effort field and
 say so (`reasoning_effort: unsupported`).
 

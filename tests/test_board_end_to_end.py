@@ -159,6 +159,37 @@ def test_work_review_accept_land_end_to_end(tmp_path, monkeypatch):
         )
         accounts_by_lane[provider] = alias
 
+    # Each lane's model has earned its canary row (L5 gates lanes without one).
+    from inference_grid.ledger import digest
+
+    for model, alias in (("glm-5.3-flash", accounts_by_lane["go"]), ("kimi-k3", accounts_by_lane["kimi"])):
+        spec = {
+            "authorized": True,
+            "model": model,
+            "family": "canary",
+            "argv": ["/usr/bin/true"],
+            "workspace": str(tmp_path / ("canary-" + alias)),
+            "timeout": 60,
+            "output_bytes": 1000,
+            "inputs": {},
+            "manifest_sha256": digest({}),
+        }
+        ledger.submit("canary-seed-" + alias, "project", spec)
+        aid, generation = ledger.claim("canary-seed-" + alias, alias, {"five_hour": 0.01, "weekly": 0.01})
+        ledger.start(aid, generation)
+        ledger.finish(
+            aid,
+            generation,
+            {
+                "status": "completed",
+                "finish_reason": "stop",
+                "actual_model": model,
+                "manifest_sha256": digest({}),
+                "artifacts": [{"path": "ok.txt", "sha256": "c" * 64}],
+            },
+        )
+        ledger.record_outcome(aid, "canary", True)
+
     # Tick 1: the work task passes and its review task is created.
     first = runner.tick(
         board, project, ledger, lanes, lanes_path, accounts_by_lane, tmp_path / "packets", now=now
