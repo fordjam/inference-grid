@@ -30,6 +30,8 @@ ALLOWED_PREFIXES = (".gitignore", "requirements-test.txt", "requirements.txt", "
 # Co-Authored-By trailer name → the family select_lane uses for cross-family exclusion.
 TRAILER_FAMILIES = {
     "GLM-5.3-Flash": "glm",
+    "GLM Flash 5.3": "glm",
+    "GLM-5.3": "glm",
     "Claude": "claude",
     "Codex": "openai",
     "GPT": "openai",
@@ -134,15 +136,14 @@ def commits_family(commits):
     return next(iter(families), "claude")
 
 
-def _check_paths(paths):
+def _check_paths(paths, prefixes=None):
     """The allow-list and credential-name gate, shared by the range and each commit."""
+    prefixes = tuple(prefixes) if prefixes else ALLOWED_PREFIXES
     for path in paths:
         if not _safe_rel(path):
             raise ValueError(f"{path} is not a safe relative path")
-        if not path.startswith(ALLOWED_PREFIXES):
-            raise ValueError(
-                f"{path} is outside the review allow-list: " + ", ".join(ALLOWED_PREFIXES)
-            )
+        if not path.startswith(prefixes):
+            raise ValueError(f"{path} is outside the review allow-list: " + ", ".join(prefixes))
         denied = check_name(path)
         if denied:
             raise ValueError(f"{path}: {denied}")
@@ -336,6 +337,7 @@ def review_branch(
     split=None,
     include_docs=None,
     exclude_commits=None,
+    allowed_prefixes=None,
 ):
     """Author review task(s) judging a git range; one task, or one per commit when split.
 
@@ -374,7 +376,8 @@ def review_branch(
     paths = [line for line in changed.splitlines() if line.strip()]
     if not paths:
         raise ValueError("the range changes no files; nothing to review")
-    _check_paths(paths)
+    prefixes = tuple(allowed_prefixes) if allowed_prefixes else ALLOWED_PREFIXES
+    _check_paths(paths, prefixes)
 
     code, log, err = run(
         ["git", "-C", repo, "log", "--format=%H%n%an%n%s%n%(trailers)", f"{base}..{tip}"]
