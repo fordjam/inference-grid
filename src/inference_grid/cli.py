@@ -78,9 +78,14 @@ def board_new(
     split=None,
     include_docs=None,
     exclude_commits=None,
+    qualify=None,
 ):
     from .board.new import new_task, retry_task
 
+    if qualify is not None:
+        from .board.new import qualify_task
+
+        return qualify_task(board_dir, project_root, qualify["lane_id"], qualify["category"])
     if review_branch is not None:
         from .board.branch_review import review_branch as author_review_branch
 

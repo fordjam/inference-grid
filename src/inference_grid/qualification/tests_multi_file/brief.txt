@@ -1,0 +1,3 @@
+Write two modules that work together. store.py defines class Store with put(key, value)
+and get(key, default=None). report.py defines summarize(items) returning the string
+"<n> items" where <n> is the number of items. Only these two files. No prints, no network.

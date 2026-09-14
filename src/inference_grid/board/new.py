@@ -19,9 +19,10 @@ is missing or unreadable refuses, since the retry could not be moved onto it.
 
 import json
 import re
+import shutil
 from pathlib import Path
 
-from .runner import find_source_link
+from .runner import REVIEW_BUDGET, find_source_link
 from .task import validate_task
 
 CANARY_BRIEF = "Reply with exactly OK"
@@ -277,4 +278,93 @@ def lane_init(board_dir, project_root, lane_id):
         "tick_command": "inference-grid board-tick --json '"
         + json.dumps({**dry_run, "dry_run": False})
         + "'",
+    }
+
+
+QUALIFICATION_CATEGORIES = {
+    "pure_function": "pure",
+    "tests_multi_file": "tests",
+    "independent_review": "review",
+}
+
+# The fixed qualification set ships with the package (src/inference_grid/qualification/)
+# and is materialized into the project's grid/qualification/ directory, unmodified.
+QUALIFICATION_DIR = Path(__file__).resolve().parent.parent / "qualification"
+
+
+def qualify_task(board_dir, project_root, lane_id, category):
+    """Author the standard qualification task for (lane_id, category); returns the paths.
+
+    The category's fixed set is copied from the package into the project's
+    grid/qualification/<category>/ directory (files that already exist are kept), the
+    board task references them, and independent_review tasks also carry the shared
+    review schema test plus the findings test. Existing board tasks are refused.
+    """
+    if category not in QUALIFICATION_CATEGORIES:
+        raise ValueError(
+            "qualify category must be one of: " + ", ".join(sorted(QUALIFICATION_CATEGORIES))
+        )
+    board_dir = Path(board_dir)
+    project_root = Path(project_root)
+    task_id = f"qualify-{lane_id}-{QUALIFICATION_CATEGORIES[category]}"[:60]
+    task_file = board_dir / (task_id + ".json")
+    if task_file.exists():
+        raise FileExistsError(f"task file already exists: {task_file}")
+
+    source_dir = QUALIFICATION_DIR / category
+    project_dir = project_root / "grid" / "qualification" / category
+    project_dir.mkdir(parents=True, exist_ok=True)
+    inputs, tests = [], []
+    for path in sorted(source_dir.iterdir()):
+        if not path.is_file():
+            continue
+        target = project_dir / path.name
+        if not target.exists():
+            shutil.copy2(path, target)
+        relative = f"grid/qualification/{category}/{path.name}"
+        if path.name.startswith("test_"):
+            tests.append(relative)
+        elif path.name.endswith(".txt"):
+            brief_rel = relative
+            inputs.append(relative)
+        else:
+            inputs.append(relative)
+
+    is_review = category == "independent_review"
+    if is_review:
+        schema_test = board_dir.parent / "tests" / "test_review_schema.py"
+        if not schema_test.exists():
+            schema_test.parent.mkdir(parents=True, exist_ok=True)
+            schema_test.write_text(SCHEMA_TEST)
+        tests.insert(0, "grid/tests/test_review_schema.py")
+
+    task = {
+        "id": task_id,
+        "category": category,
+        "brief": brief_rel,
+        "inputs": inputs,
+        "tests": tests,
+        "artifacts": [],
+        "state": "ready",
+        "blocked_reason": None,
+    }
+    if is_review:
+        task["artifacts"] = ["reply.txt"]
+        task["author_family"] = "operator"
+    else:
+        task["artifacts"] = ["normalize.py"] if category == "pure_function" else ["store.py", "report.py"]
+        task["author_family"] = None
+    task["lanes"] = [lane_id]
+    task["budget"] = (
+        dict(REVIEW_BUDGET) if is_review else {"wall_seconds": 600, "output_bytes": 100000, "thinking_tokens": None}
+    )
+    task = validate_task(task)
+    board_dir.mkdir(parents=True, exist_ok=True)
+    task_file.write_text(json.dumps(task, indent=1) + "\n")
+    return {
+        "id": task_id,
+        "task": str(task_file),
+        "category": category,
+        "lanes": [lane_id],
+        "materialized": [str(project_dir)],
     }
