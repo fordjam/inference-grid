@@ -63,10 +63,29 @@ def test_passing_checks_do_not_claim_provider_health(tmp_path):
     ledger = Ledger(url)
     ledger.initialize()
     ledger.configure_account("a", 1, {"weekly": 10}, time.time() + 60, ["m"])
+    # Every packaged lane module is registered: nothing is missing for a passing report.
+    now = time.time()
+    for provider in ("go", "goat", "cline", "zai", "zcode"):
+        ledger.record_lane(
+            provider,
+            {
+                "provider": provider,
+                "auth": "ok",
+                "quota_observed_at": now - 5,
+                "quota_freshness_seconds": 900,
+                "used_percent_max": 1.0,
+                "admission_limit_percent": 80,
+                "cooldown_until": None,
+                "qualification": "qualified",
+                "blocked_until": None,
+                "blocker": None,
+            },
+        )
     with ledger.tx() as con:
         con.execute(insert(tasks).values(id="t", project="p", spec={"argv": [sys.executable]}))
     report = diagnose(url)
     assert report["status"] == "checks_passed"
+    assert report["modules_without_lane"] == []
     assert report["provider_auth"] == "not_checked"
 
 

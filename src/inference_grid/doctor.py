@@ -12,7 +12,16 @@ from sqlalchemy.engine import make_url
 
 from .collector import collection_claims
 from .lane_readiness import lane_readiness
-from .ledger import accounts, attempts, classifier_view, cooldowns, lanes, outbox, tasks
+from .ledger import (
+    DEFAULT_ACCOUNTS,
+    accounts,
+    attempts,
+    classifier_view,
+    cooldowns,
+    lanes,
+    outbox,
+    tasks,
+)
 
 MAX_BOARD_DIRS = 8
 
@@ -99,13 +108,15 @@ def diagnose(url, now=None, boards=None):
                     )
                 ).scalars()
             )
-            account_rows = list(con.execute(select(accounts.c.expires)).scalars())
+            account_rows = list(
+                con.execute(select(accounts.c.id, accounts.c.models, accounts.c.expires)).mappings()
+            )
             states = list(con.execute(select(attempts.c.state)).scalars())
             specs = list(con.execute(select(tasks.c.spec)).scalars())
             pending = len(
                 list(con.execute(select(outbox.c.attempt).where(outbox.c.sent.is_(None))))
             )
-            lane_rows = list(con.execute(select(lanes.c.record)).scalars())
+            lane_rows = list(con.execute(select(lanes.c.provider, lanes.c.record)).mappings())
         result["database"] = "readable"
         result["counts"] = {
             "accounts": len(account_rows),
@@ -113,7 +124,13 @@ def diagnose(url, now=None, boards=None):
             "stuck_collections": sum(t <= now for t in collecting),
             "inference_cooldowns": active_cooldowns.count("inference"),
             "usage_cooldowns": active_cooldowns.count("usage"),
-            "stale_accounts": sum(not math.isfinite(x) or x <= now for x in account_rows),
+            # An unconfigured alias placeholder (no models) is intentional, not a lost
+            # observation; a real account the operator configured going stale is.
+            "stale_accounts": sum(
+                (not math.isfinite(row["expires"]) or row["expires"] <= now)
+                for row in account_rows
+                if row["id"] not in DEFAULT_ACCOUNTS or row["models"]
+            ),
             "queued": states.count("queued"),
             "dispatching": states.count("dispatching"),
             "held": states.count("held"),
@@ -124,7 +141,8 @@ def diagnose(url, now=None, boards=None):
             "invalid_adapter_specs": sum(executable_state(s) == "invalid" for s in specs),
         }
         result["lanes"] = []
-        for record in lane_rows:
+        for row in lane_rows:
+            record = row["record"]
             try:
                 classified = lane_readiness(classifier_view(record), now)
             except ValueError:
@@ -137,10 +155,20 @@ def diagnose(url, now=None, boards=None):
                     "next_check_at": None,
                 }
             result["lanes"].append(classified)
+        # A packaged lane module with no record in the ledger is a missing registration,
+        # not silence: the operator registers it (docs/LANES.md) and canaries it (L1).
+        from .lanes.runner import KINDS
+
+        recorded = {row["provider"] for row in lane_rows}
+        result["modules_without_lane"] = sorted(set(KINDS.values()) - recorded)
         for count, finding in (
             (
                 sum(lane["state"] not in ("ready",) for lane in result["lanes"]),
                 "provider_lanes_not_ready",
+            ),
+            (
+                len(result["modules_without_lane"]),
+                "lane_modules_without_records",
             ),
             (not account_rows, "no_accounts_configured"),
             (result["counts"]["stuck_collections"], "collection_reconciliation_required"),

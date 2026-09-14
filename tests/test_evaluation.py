@@ -104,13 +104,21 @@ def test_account_readiness_renders_one_row_per_alias(tmp_path):
     assert "| go-alias | acct2 | 0/3 | stale (" in stale
 
 
-def test_empty_ledger_renders_headers_only(tmp_path):
+def test_empty_ledger_renders_headers_plus_seeded_placeholders(tmp_path):
+    # A fresh ledger has no scorecard rows, but the seeded cline alias placeholder is
+    # named in the readiness view: an unconfigured account is a fact, not silence.
     ledger = Ledger("sqlite:///" + str(tmp_path / "empty.sqlite"))
     ledger.initialize()
     document = evaluation_document(ledger)
     assert "| family | model | category" in document
     assert "| alias | account |" in document
-    assert document.count("\n|") == 4  # two header rows and their separators, nothing else
+    rows = [
+        line
+        for line in document.splitlines()
+        if line.startswith("| ") and "---" not in line and not line.startswith("| family")
+        and not line.startswith("| alias")
+    ]
+    assert rows == ["| cline | cline | 0/1 | stale (—) | never | 0 |  |"]
 
 
 def test_write_document_refuses_docs_and_writes_elsewhere(tmp_path):

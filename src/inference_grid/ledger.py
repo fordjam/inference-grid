@@ -103,6 +103,11 @@ lanes = Table(
 # Locks cover task/account/workspace namespaces; rows persist to avoid ABA races.
 locks = Table("locks", metadata, Column("id", String, primary_key=True))
 ACTIVE = ("queued", "dispatching", "held")
+# Alias placeholders seeded by initialize() for packaged lanes the operator has not
+# configured yet: no quota, no models - nothing can claim against them until
+# configure_account fills them in. cline ships here because its lane module is packaged
+# and its absence used to surface only as a refused collect.
+DEFAULT_ACCOUNTS = ("cline",)
 # Per-model routing metadata a lane record may carry beyond the readiness classifier's
 # fixed key set; stripped before classification, stored with the record.
 LANE_RECORD_METADATA = ("unsupported_until",)
@@ -135,6 +140,25 @@ class Ledger:
         from .collector import initialize_collections
 
         initialize_collections(self)
+        self._seed_default_accounts()
+
+    def _seed_default_accounts(self):
+        """Idempotently seed alias placeholders for packaged lanes (DEFAULT_ACCOUNTS).
+
+        A seeded account has no quota and no models: the alias resolves, and nothing
+        runs against it until the operator configures the account for real.
+        """
+        with self.tx() as con:
+            for name in DEFAULT_ACCOUNTS:
+                exists = con.execute(select(accounts.c.id).where(accounts.c.id == name)).first()
+                if exists:
+                    continue
+                con.execute(
+                    accounts.insert().values(
+                        id=name, capacity=1, generation=0, windows={}, expires=0.0, models=[]
+                    )
+                )
+                con.execute(aliases.insert().values(id=name, account=name))
 
     @contextmanager
     def tx(self):
