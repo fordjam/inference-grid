@@ -13,6 +13,7 @@ from pathlib import Path
 from .ledger import ACTIVE
 from .ledger import accounts, aliases as alias_records, attempts as attempt_records
 from .ledger import cooldowns, events, observations, select, tasks
+from .board.runner import CATEGORY_QUALIFICATION
 
 
 def _last_attempt_times(ledger):
@@ -107,6 +108,24 @@ def evaluation_document(ledger, now=None):
             f"| {row['family']} | {row['model']} | {row['category']} | {row['attempts']}"
             f" | {row['completed']} | {row['accepted']} | {rate} | {row['held']}"
             f" | {row['resolved']} | {tin} | {tout} | {_stamp(last)} |"
+        )
+    lines += [
+        "",
+        "## Qualification matrix",
+        "",
+        "A category is qualified for a family/model once its accepted attempts reach the",
+        "threshold: " + ", ".join(f"{category} {needed}" for category, needed in sorted(CATEGORY_QUALIFICATION.items())) + ".",
+        "",
+        "| family | model | category | attempts | accepted | qualified |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in ledger.scorecard():
+        accepted = row["accepted"]
+        threshold = CATEGORY_QUALIFICATION.get(row["category"])
+        verdict = "—" if threshold is None else ("yes" if accepted >= threshold else "no")
+        lines.append(
+            f"| {row['family']} | {row['model']} | {row['category']} | {row['attempts']}"
+            f" | {accepted} | {verdict} |"
         )
     lines += [
         "",

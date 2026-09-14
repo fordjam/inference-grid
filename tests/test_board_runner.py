@@ -140,16 +140,31 @@ def world(tmp_path, monkeypatch):
         account=account,
         packets=tmp_path / "packets",
     )
-    # The fixture's lane model has earned its canary row (on its own evidence account,
-    # so per-account scorecard assertions stay clean); L5 gates lanes without one.
+    # The fixture's lane models have earned full category qualification (on their own
+    # evidence account, so per-account scorecard assertions stay clean); the gates in
+    # readiness_view would otherwise hold every lane back.
     world["ledger"].configure_account(
         "canary-evidence",
-        1,
-        {"five_hour": 10, "weekly": 20},
+        8,
+        {"five_hour": 100, "weekly": 200},
         time.time() + 600,
         ["glm-5.3-flash", "kimi-k3"],
     )
-    seed_accepted_row(world, alias="canary-evidence")
+    for model in ("glm-5.3-flash", "kimi-k3"):
+        for category, count in (
+            ("canary", 1),
+            ("pure_function", 2),
+            ("independent_review", 3),
+            ("tests_multi_file", 2),
+        ):
+            for i in range(count):
+                seed_accepted_row(
+                    world,
+                    model=model,
+                    category=category,
+                    task_id=f"seed-{model}-{category}-{i}",
+                    alias="canary-evidence",
+                )
     return world
 
 
@@ -1042,7 +1057,13 @@ def test_dry_run_plans_without_touching_anything(world):
         now=now,
         dry_run=True,
     )
-    assert plan["readiness"] == {"go": {"state": "busy"}, "zai": {"state": "ready"}}
+    qualified = sorted(
+        ("canary", "independent_review", "pure_function", "tests_multi_file")
+    )
+    assert plan["readiness"] == {
+        "go": {"state": "busy", "qualified_for": qualified},
+        "zai": {"state": "ready", "qualified_for": qualified},
+    }
     assert plan["plan"] == [
         {"task": "copy-ok", "lane": "zai", "reason": "selected"},
         {"task": "copy-wrong", "lane": None, "reason": "lane_busy"},
@@ -1403,6 +1424,10 @@ def test_a_region_optin_refusal_excludes_the_model_until_expiry(world, monkeypat
         "sys.exit(1)\n"
     )
     seed_accepted_row(world, model="deepseek-v4-flash", alias="ds-alias")
+    for i in range(2):
+        seed_accepted_row(
+            world, model="deepseek-v4-flash", category="pure_function", task_id=f"ds-pf-{i}", alias="ds-alias"
+        )
     monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(refusing)])
     now = time.time()
     world["ledger"].record_lane("go", ready_record(now))
@@ -1730,8 +1755,12 @@ def test_a_lane_without_canary_evidence_is_unqualified_until_its_canary_passes(w
     now = time.time()
     view = runner.readiness_view(world["ledger"], lanes, now, accounts, world["ledger"].scorecard())
     assert view["go-qwen"]["state"] == "unqualified"
-    # A passing canary for the model earns the row that qualifies the lane.
+    # A passing canary plus two accepted pure_function rows qualify the category.
     seed_accepted_row(world, model="qwen3.8-max", alias="qwen-alias")
+    for i in range(2):
+        seed_accepted_row(
+            world, model="qwen3.8-max", category="pure_function", task_id=f"qwen-pf-{i}", alias="qwen-alias"
+        )
     view = runner.readiness_view(world["ledger"], lanes, now, accounts, world["ledger"].scorecard())
     assert view["go-qwen"]["state"] == "ready"
     # And the work task that could never have run there now can.

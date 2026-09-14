@@ -188,6 +188,17 @@ def lane_view(lanes, now):
     return view
 
 
+# Accepted canary/qualification rows per category a lane's model needs before the
+# category is qualified for it (Q1).
+CATEGORY_QUALIFICATION = {
+    "independent_review": 3,
+    "pure_function": 2,
+    "tests_multi_file": 2,
+    "fixtures_multi_file": 2,
+    "canary": 1,
+}
+
+
 def readiness_view(ledger, lanes, now, accounts_by_lane=None, scorecard=None):
     """Lane records classified now; a lane without a record is stale, never ready.
 
@@ -208,6 +219,21 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None, scorecard=None):
             select(attempt_records.c.account).where(attempt_records.c.state.in_(ACTIVE))
         ).mappings():
             active[row["account"]] = active.get(row["account"], 0) + 1
+    accepted_by_model = {}
+    if scorecard is not None:
+        for row in scorecard:
+            # The scorecard already aggregates accepted attempts per (model, category).
+            if row.get("accepted"):
+                key = (row.get("model"), row.get("category"))
+                accepted_by_model[key] = accepted_by_model.get(key, 0) + row["accepted"]
+
+    def qualified_for(model):
+        return sorted(
+            category
+            for category, needed in CATEGORY_QUALIFICATION.items()
+            if accepted_by_model.get((model, category), 0) >= needed
+        )
+
     canaried = (
         {
             row.get("model")
@@ -238,12 +264,12 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None, scorecard=None):
             account = alias_map.get(accounts_by_lane.get(lane_id))
             if account is not None and active.get(account, 0) >= lane.get("max_concurrency", 1):
                 state = "busy"
+        entry = {"state": state, "qualified_for": qualified_for(lane["model"])}
         if state == "unqualified" and model_unsupported_until(record, lane["model"], now):
             # Distinguish a per-model exclusion from a qualification gap: canaries may
             # bootstrap the latter, never the former.
-            view[lane_id] = {"state": state, "reason": "model_refused_recently"}
-        else:
-            view[lane_id] = {"state": state}
+            entry["reason"] = "model_refused_recently"
+        view[lane_id] = entry
     return view
 
 
@@ -857,6 +883,13 @@ def tick(
                 and entry.get("reason") != "model_refused_recently"
             ):
                 entry["state"] = "ready"
+            if (
+                task["category"] != "canary"
+                and entry.get("state") == "ready"
+                and task["category"] not in entry.get("qualified_for", [])
+            ):
+                entry["state"] = "unqualified"
+                entry["reason"] = "not_qualified_for_category"
             task_readiness[lane_id] = entry
         if task["category"] == "canary":
             allowed = {

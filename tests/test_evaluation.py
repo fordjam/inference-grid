@@ -170,3 +170,27 @@ def test_an_absent_section_is_appended_and_an_unknown_section_is_refused(tmp_pat
     assert "## Scorecard" in text and "| family | model | category" in text
     with pytest.raises(ValueError, match="no '## Missing' section"):
         write_section(evaluation_document(make_ledger(tmp_path)), target, "## Missing")
+
+
+def test_qualification_matrix_prints_threshold_verdicts(tmp_path):
+    ledger = make_ledger(tmp_path)
+    aid = completed_attempt(ledger, "acct", "g1", "glm", "glm-5.3-flash")
+    ledger.record_outcome(aid, "pure_function", True, usage={"input": 300, "output": 1200})
+    document = evaluation_document(ledger)
+    scorecard_rows = [
+        line
+        for line in document.splitlines()
+        if line.startswith("| glm | glm-5.3-flash | pure_function |")
+        and " | no |" not in line
+    ]
+    assert len(scorecard_rows) == 1
+    assert scorecard_rows[0].startswith(
+        "| glm | glm-5.3-flash | pure_function | 1 | 1 | 1 | 100% | 0 | 0 | 300 | 1200 | "
+    )
+    matrix_rows = [
+        line
+        for line in document.splitlines()
+        if line.startswith("| glm | glm-5.3-flash | pure_function |")
+        and line.endswith("| no |")
+    ]
+    assert len(matrix_rows) == 1  # 1 accepted pure_function row: below the threshold of 2
