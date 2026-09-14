@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import time
 
 from sqlalchemy import create_engine, inspect, select
@@ -66,7 +67,72 @@ def executable_state(spec):
     return "present" if shutil.which(command) is not None else "missing"
 
 
-def diagnose(url, now=None, boards=None):
+def _launchctl_list():
+    """`launchctl list` output through a seam callers may fake; None when unavailable."""
+    try:
+        done = subprocess.run(
+            ["/bin/launchctl", "list"], capture_output=True, text=True, timeout=30
+        )
+    except OSError:
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def board_config_findings(boards_dir):
+    """Named gaps in the operator's board configs: absent dirs and unfilled keys."""
+    findings = []
+    if boards_dir is None:
+        return findings, {}
+    configs = {}
+    path = Path(boards_dir)
+    if not path.is_dir():
+        findings.append("boards_dir_missing")
+        return findings, configs
+    for config_path in sorted(path.glob("*.json")):
+        try:
+            config = json.loads(config_path.read_text())
+        except (OSError, ValueError):
+            findings.append(f"board config unreadable: {config_path.name}")
+            continue
+        configs[config_path.name] = config
+        if not Path(str(config.get("board_dir", ""))).is_dir():
+            findings.append(f"board dir missing: {config_path.name}")
+        if not Path(str(config.get("lanes_path", ""))).is_file():
+            findings.append(f"lanes.json missing: {config_path.name}")
+        if any(
+            isinstance(value, str) and value.startswith("<operator")
+            for value in config.values()
+        ):
+            findings.append(f"board config unfinished: {config_path.name}")
+    return findings, configs
+
+
+def packet_store(packets_root, held_workspaces):
+    """Total bytes and the oldest held attempt under the configured packets root."""
+    total = 0
+    oldest = None
+    root = Path(packets_root) if packets_root else None
+    for workspace in held_workspaces:
+        path = Path(workspace)
+        if path.is_dir():
+            size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+            total += size
+            if oldest is None or size > oldest[0]:
+                oldest = (size, path.name)
+    if root is not None and not root.is_dir():
+        return total, oldest, "packets_root_missing"
+    return total, oldest, None
+
+
+def diagnose(
+    url,
+    now=None,
+    boards=None,
+    boards_dir=None,
+    packets_root=None,
+    launchd_label=None,
+    launchctl_list=None,
+):
     now = time.time() if now is None else now
     result = {
         "scope": "ledger_and_adapter_executables",
@@ -117,7 +183,14 @@ def diagnose(url, now=None, boards=None):
                 list(con.execute(select(outbox.c.attempt).where(outbox.c.sent.is_(None))))
             )
             lane_rows = list(con.execute(select(lanes.c.provider, lanes.c.record)).mappings())
+            held_rows = [
+                {"attempt": r["id"], "workspace": r["workspace"]}
+                for r in con.execute(
+                    select(attempts.c.id, attempts.c.workspace).where(attempts.c.state == "held")
+                ).mappings()
+            ]
         result["database"] = "readable"
+        result["held_attempts"] = len(held_rows)
         result["counts"] = {
             "accounts": len(account_rows),
             "collecting": sum(t > now for t in collecting),
@@ -185,6 +258,33 @@ def diagnose(url, now=None, boards=None):
         ):
             if count:
                 result["findings"].append(finding)
+        # End to end: board configs, the scheduler's launchd presence, and the packet
+        # store under the roots the operator passes. Nothing here is ever guessed from
+        # the home directory.
+        config_findings, configs = board_config_findings(boards_dir)
+        result["boards_dir"] = {
+            "path": str(boards_dir) if boards_dir else None,
+            "configs": sorted(configs),
+            "findings": config_findings,
+        }
+        result["findings"].extend(config_findings)
+        if launchd_label:
+            loaded = launchctl_list if launchctl_list is not None else _launchctl_list()
+            loaded_labels = [line.split()[-1] for line in (loaded or "").splitlines() if line.strip()]
+            result["launchd"] = {"label": launchd_label, "loaded": launchd_label in loaded_labels}
+            if launchd_label not in loaded_labels:
+                result["findings"].append("scheduler_not_loaded")
+        total, biggest, packets_finding = packet_store(
+            packets_root, [h["workspace"] for h in held_rows]
+        )
+        result["packet_store"] = {
+            "root": str(packets_root) if packets_root else None,
+            "bytes_under_held_workspaces": total,
+            "largest_held": biggest[1] if biggest else None,
+            "finding": packets_finding,
+        }
+        if packets_finding:
+            result["findings"].append(packets_finding)
         result["status"] = "attention" if result["findings"] else "checks_passed"
     except Exception:
         result["findings"].append("database_or_schema_unreadable")

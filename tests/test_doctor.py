@@ -238,3 +238,69 @@ def test_superseded_predecessors_are_counted_closed_not_blocked(tmp_path):
     )
     (board / "new.json").write_text(task("ready", "new"))
     assert board_counts(board) == {"superseded": 1, "blocked": 1, "ready": 1}
+
+
+def test_doctor_reports_boards_launchd_and_packets_end_to_end(tmp_path):
+    # O1: one call names every gap — an unfinished board config, a scheduler that is not
+    # loaded, and the packet store under a root the operator passes (never the home).
+    url = "sqlite:///" + str(tmp_path / "ledger.sqlite")
+    ledger = Ledger(url)
+    ledger.initialize()
+    board = tmp_path / "grid/board"
+    board.mkdir(parents=True)
+    boards_dir = tmp_path / "boards"
+    boards_dir.mkdir()
+    (boards_dir / "insta-saved.json").write_text(
+        json.dumps(
+            {
+                "board_dir": str(board),
+                "project_root": str(tmp_path),
+                "lanes_path": "<operator: lanes.json>",
+            }
+        )
+    )
+    held_workspace = tmp_path / "packets" / "held-ws"
+    held_workspace.mkdir(parents=True)
+    (held_workspace / "evidence.bin").write_bytes(b"x" * 2048)
+    account = "go-test"
+    ledger.configure_account(
+        account, 1, {"five_hour": 10, "weekly": 20}, time.time() + 600, ["glm-5.3-flash"]
+    )
+    from inference_grid.ledger import digest
+
+    spec = {
+        "authorized": True,
+        "model": "glm-5.3-flash",
+        "family": "glm",
+        "argv": ["/usr/bin/true"],
+        "workspace": str(held_workspace),
+        "timeout": 60,
+        "output_bytes": 1000,
+        "inputs": {},
+        "manifest_sha256": digest({}),
+    }
+    ledger.submit("held-1", "p", spec)
+    aid, generation = ledger.claim("held-1", account, {"five_hour": 0.01, "weekly": 0.01})
+    ledger.start(aid, generation)
+    ledger.hold(aid, "Refused: operator reconciliation")
+
+    report = diagnose(
+        url,
+        boards_dir=boards_dir,
+        packets_root=tmp_path / "packets",
+        launchd_label="com.inference-grid.tick-all",
+        launchctl_list="PID\tStatus\tLabel\n1234\t0\tcom.other.thing\n",
+    )
+    assert report["boards_dir"]["findings"] == [
+        "lanes.json missing: insta-saved.json",
+        "board config unfinished: insta-saved.json",
+    ]
+    assert report["launchd"] == {
+        "label": "com.inference-grid.tick-all",
+        "loaded": False,
+    }
+    assert "scheduler_not_loaded" in report["findings"]
+    assert report["held_attempts"] == 1
+    assert report["packet_store"]["bytes_under_held_workspaces"] == 2048
+    assert report["packet_store"]["largest_held"] == held_workspace.name
+    assert report["status"] == "attention"
