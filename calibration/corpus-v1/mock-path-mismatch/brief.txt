@@ -1,0 +1,5 @@
+Add Playwright coverage for the views rename flow. The spec renames the
+"gallery" view from the console UI and asserts the row updates without a
+reload. The client the UI calls is staged beside the spec; the spec's own
+network mock must intercept exactly what the client actually sends, or the
+test passes against a backend that was never exercised.

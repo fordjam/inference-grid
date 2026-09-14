@@ -1,0 +1,3 @@
+Add the heading normaliser for imported survey notes, with unit tests. The
+change is believed correct: verify the implementation against the docstring
+and the tests, and report any demonstrated defect.

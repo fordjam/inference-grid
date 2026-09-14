@@ -1,0 +1,12 @@
+{
+ "defects": [
+  {
+   "id": "count-does-not-sum",
+   "file": "docs/coverage-report.md",
+   "must_mention": ["fourteen", "thirteen"],
+   "severity": "medium",
+   "note": "the summary claims fourteen sites were audited but the itemised list names thirteen; the count does not sum"
+  }
+ ],
+ "clean": false
+}

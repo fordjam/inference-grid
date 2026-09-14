@@ -1,0 +1,4 @@
+Add the abatement calculation used by the settlement report. The function's
+docstring states the agreed policy for what the abatement percentage applies
+to; the implementation must match that stated base exactly. The grant-funded
+portion of the gross amount is money the operator never carried.

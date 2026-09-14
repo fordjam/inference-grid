@@ -57,6 +57,27 @@ The `go_http` request shapes reasoning explicitly, since kimi-k3 thought its who
 | `exclude_commits` | Sha prefixes to skip in a split, listed `excluded by operator` |
 | `lanes`, `budget` | The review task's lanes and budget (defaults `["go"]` and the review budget) |
 
+## Reviewer calibration
+
+The board routes reviews by an acceptance rate that measures whether a reviewer produced
+a well-formed verdict, not whether the verdict was right. Calibration measures the
+difference with a corpus whose defects are known: `calibration/corpus-v1/` in this
+repository is the seed — five review packets (four with one planted defect each, one
+clean case to catch false positives), each holding a `diff.patch`, the changed files and
+a brief, plus an `answer.json` that is never staged. `inference-grid calibrate --json
+{board_dir, project_root, corpus_dir, lanes, run_id}` authors one independent_review task
+per case (`calib-<run_id>-<case>`, `author_family: "calibration"` — a sentinel no lane
+declares, so every listed lane stays eligible) and writes the answer keys plus a manifest
+under `<board_dir>/calibration/<run_id>/`. After the board settles the replies,
+`inference-grid calibration-score --json {board_dir, run_id, packets_root, record}` reads
+each packet's reply.txt through the runner's own verdict reader and reports per lane:
+cases, defects, recall, false positives, precision and severity-weighted recall
+(high=3, medium=2, low=1), written to `report.json` with the markdown tables printed. A
+defect is recalled only when a finding names its file (relative path or basename) and
+carries every `must_mention` keyword case-insensitively; a finding matching no defect is
+a false positive. Nothing reaches the ledger unless `record: true`, and then only one
+`record_outcome` per calibration attempt with category `calibration`.
+
 ## Packaged lanes
 
 `inference-grid-lane <lane-id> --config lanes.json` is the single trusted adapter argv for every packaged lane. The worker passes the attempt request on stdin; the runner validates the private `lanes.json`, dispatches to `inference_grid.lanes.<kind>`, writes `verdict.json` beside the attempt and prints one receipt. Refusals (no native terminal, unexpected provider or model, missing artifacts) exit non-zero so the ledger holds the attempt with the reason. Expected artifact names come from `inputs/expected.json`; without it, every new file at the workspace root is the artifact set, and a reply-only task publishes `reply.txt`. Packaged: `zcode_cli`, `claude_headless`, `go_http`, `goat_cli` and `cline_cli` (canaries `zcode-runner-canary-2`, `zai-runner-canary` and `go-runner-canary-1` completed through the ledger on 2026-09-12). Each lane uses a scratch HOME under the attempt directory; the real home is never a writable sandbox root.

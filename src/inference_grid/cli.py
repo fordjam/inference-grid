@@ -148,6 +148,8 @@ def main():
             "inbox-integrate",
             "lane-init",
             "board-init",
+            "calibrate",
+            "calibration-score",
             "tick-all",
             "digest",
             "evaluation",
@@ -184,6 +186,8 @@ def main():
             "inbox-integrate",
             "lane-init",
             "board-init",
+            "calibrate",
+            "calibration-score",
             "defer",
             "cooldown",
         }
@@ -231,6 +235,8 @@ def main():
         "scorecard": ledger.scorecard,
         "board-tick": lambda **kw: board_tick(ledger, **kw),
         "board-new": lambda **kw: board_new(**kw),
+        "calibrate": lambda **kw: calibrate(**kw),
+        "calibration-score": lambda **kw: calibration_score(ledger, **kw),
         "board-status": lambda **kw: board_status(ledger, **kw),
         "lane-init": lambda **kw: lane_init(**kw),
         "board-init": lambda **kw: board_init(**kw),
@@ -253,6 +259,18 @@ def board_status(ledger, board_dir=None, suggest=False, boards=None):
     from .board.status import board_status as status
 
     return status(ledger, board_dir, suggest=suggest, boards=boards)
+
+
+def calibrate(board_dir, project_root, corpus_dir, lanes, run_id):
+    from .board.calibration import author_calibration
+
+    return author_calibration(board_dir, project_root, corpus_dir, lanes, run_id)
+
+
+def calibration_score(ledger, board_dir, run_id, packets_root, record=False):
+    from .board.calibration import score_calibration
+
+    return score_calibration(board_dir, run_id, packets_root, record=record, ledger=ledger)
 
 
 def lane_init(lane_id, board_dir, project_root=None):

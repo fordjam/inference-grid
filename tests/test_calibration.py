@@ -1,6 +1,8 @@
 """Reviewer calibration: corpus format, authoring, scoring, seed corpus and CLI."""
 
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -455,3 +457,105 @@ def test_record_true_without_a_ledger_refuses(tmp_path):
     board, packets = scoring_board(tmp_path)
     with pytest.raises(ValueError, match="ledger"):
         calibration.score_calibration(board, "run1", packets, record=True)
+
+
+# --- seed corpus and CLI (K4) ---
+
+
+CORPUS_V1 = Path(__file__).resolve().parents[1] / "calibration" / "corpus-v1"
+
+
+def test_the_seed_corpus_loads_and_authors_five_tasks(tmp_path):
+    from inference_grid.board.task import validate_task
+
+    cases = load_corpus(CORPUS_V1)
+    assert [c["case"] for c in cases] == [
+        "abatement-base-includes-grant",
+        "clean-normalize",
+        "delete-nested-under-list",
+        "mock-path-mismatch",
+        "report-count-sum",
+    ]
+    clean = {c["case"]: c["answer"]["clean"] for c in cases}
+    assert clean == {
+        "abatement-base-includes-grant": False,
+        "clean-normalize": True,
+        "delete-nested-under-list": False,
+        "mock-path-mismatch": False,
+        "report-count-sum": False,
+    }
+    board, project = board_and_project(tmp_path)
+    created = calibration.author_calibration(board, project, CORPUS_V1, ["go"], "seed-v1")
+    assert [t["id"] for t in created["tasks"]] == [f"calib-seed-v1-{c['case']}" for c in cases]
+    for entry in created["tasks"]:
+        task = validate_task(json.loads((board / (entry["id"] + ".json")).read_text()))
+        assert task["author_family"] == "calibration"
+        assert all("answer" not in p for p in task["inputs"])
+
+
+def run_cli(monkeypatch, tmp_path, name, payload, database):
+    """Round-trip through cli.main(): the --json argument is a file path."""
+    import io
+
+    from inference_grid import cli
+
+    argfile = tmp_path / (name + ".json")
+    argfile.write_text(json.dumps(payload))
+    monkeypatch.setattr(sys, "argv", ["inference-grid", "--database", database, name, "--json", str(argfile)])
+    buffer = io.StringIO()
+    real = sys.stdout
+    sys.stdout = buffer
+    try:
+        cli.main()
+    finally:
+        sys.stdout = real
+    return buffer.getvalue()
+
+
+def test_calibrate_round_trips_through_main(tmp_path, monkeypatch):
+    board, project = board_and_project(tmp_path)
+    out = run_cli(
+        monkeypatch,
+        tmp_path,
+        "calibrate",
+        {
+            "board_dir": str(board),
+            "project_root": str(project),
+            "corpus_dir": str(CORPUS_V1),
+            "lanes": ["go"],
+            "run_id": "cli-v1",
+        },
+        "sqlite:///" + str(tmp_path / "board.sqlite"),
+    )
+    payload = json.loads(out)
+    assert [t["id"] for t in payload["tasks"]] == [
+        f"calib-cli-v1-{c}" for c in (
+            "abatement-base-includes-grant",
+            "clean-normalize",
+            "delete-nested-under-list",
+            "mock-path-mismatch",
+            "report-count-sum",
+        )
+    ]
+    assert (board / "calibration" / "cli-v1" / "manifest.json").is_file()
+
+
+def test_calibration_score_round_trips_through_main(tmp_path, monkeypatch):
+    board, packets = scoring_board(tmp_path)
+    out = run_cli(
+        monkeypatch,
+        tmp_path,
+        "calibration-score",
+        {
+            "board_dir": str(board),
+            "run_id": "run1",
+            "packets_root": str(packets),
+            "record": False,
+        },
+        "sqlite:///" + str(tmp_path / "score.sqlite"),
+    )
+    assert "| lane |" in out and "| go |" in out
+    payload = json.loads(out[out.index('{\n  "run_id"'):])
+    lane = payload["lanes"]["go"]
+    assert lane["cases"] == 4 and lane["defects"] == 2 and lane["recalled"] == 1
+    assert (board / "calibration" / "run1" / "report.json").is_file()

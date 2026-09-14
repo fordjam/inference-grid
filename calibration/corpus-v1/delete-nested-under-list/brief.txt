@@ -1,0 +1,4 @@
+Add the views API router. The console deletes a single view from its row
+menu; the store's delete_view is imported and the API is expected to honour
+DELETE for a single view path. Check that every method the console can send
+is actually handled at the path it is sent to.

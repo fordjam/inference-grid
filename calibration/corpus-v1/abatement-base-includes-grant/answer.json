@@ -1,0 +1,12 @@
+{
+ "defects": [
+  {
+   "id": "base-includes-grant",
+   "file": "src/cost/abatement.py",
+   "must_mention": ["grant"],
+   "severity": "high",
+   "note": "the abatement base is the gross price, which includes the grant-funded cost, while the docstring states the base excludes it; base should be gross minus grant_funded"
+  }
+ ],
+ "clean": false
+}
