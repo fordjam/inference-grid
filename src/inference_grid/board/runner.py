@@ -218,7 +218,12 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None):
             account = alias_map.get(accounts_by_lane.get(lane_id))
             if account is not None and active.get(account, 0) >= lane.get("max_concurrency", 1):
                 state = "busy"
-        view[lane_id] = {"state": state}
+        if state == "unqualified" and model_unsupported_until(record, lane["model"], now):
+            # Distinguish a per-model exclusion from a qualification gap: canaries may
+            # bootstrap the latter, never the former.
+            view[lane_id] = {"state": state, "reason": "model_refused_recently"}
+        else:
+            view[lane_id] = {"state": state}
     return view
 
 
@@ -818,10 +823,30 @@ def tick(
             )
             continue
         allowed = {k: v for k, v in view.items() if k in task["lanes"]}
+        # The canary is the only task allowed on a lane still earning its evidence:
+        # unverified (auth unknown) and unqualified (qualification pending) lanes are
+        # presented as ready for it — but never a lane whose model the endpoint refused
+        # recently, which no packet can fix by re-probing. A canary is also implicitly in
+        # every lane's categories: registering a lane costs nothing until it earns rows.
+        task_readiness = {}
+        for lane_id in allowed:
+            entry = dict(readiness[lane_id])
+            if (
+                task["category"] == "canary"
+                and entry.get("state") in ("unverified", "unqualified")
+                and entry.get("reason") != "model_refused_recently"
+            ):
+                entry["state"] = "ready"
+            task_readiness[lane_id] = entry
+        if task["category"] == "canary":
+            allowed = {
+                lane_id: dict(lane, categories=list(lane.get("categories") or []) + ["canary"])
+                for lane_id, lane in allowed.items()
+            }
         choice = select_lane(
             {"category": task["category"], "author_family": task["author_family"]},
             allowed,
-            {k: readiness[k] for k in allowed},
+            task_readiness,
             scorecard,
             now,
         )
@@ -973,7 +998,9 @@ def tick(
                     propagate_rejection(board, board_dir, task_id, findings)
         ledger.record_outcome(aid, task["category"], passed, note=(summary or "")[:300])
         if passed:
-            if task["author_family"] is None:
+            if task["author_family"] is None and task["category"] != "canary":
+                # A canary is lane evidence, not deliverable work: it passes and stops,
+                # no review task is spawned for it.
                 next_state = "review_pending"
                 created, note = create_review_task(
                     board_dir, project_root, task, lane_id, lanes, output_dir

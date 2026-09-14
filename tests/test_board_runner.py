@@ -1557,3 +1557,86 @@ def test_a_tool_markup_hold_names_the_transcript(world, monkeypatch):
         "attempt " + results[0]["attempt"] + " held: tool_markup: the reply is a "
         "tool-calling transcript, not a verdict: " + transcript + "; resolve with evidence"
     )
+
+
+def test_a_canary_dispatches_on_an_unverified_lane_and_nothing_else_does(world, monkeypatch):
+    # A fresh lane has no qualification evidence yet: only its canary may run on it.
+    from inference_grid.board.new import lane_init
+
+    lane_init(world["board"], world["project"], "go")
+    # The lane record qualifies nothing and auth is unknown: the classifier says unverified.
+    world["ledger"].record_lane(
+        "go",
+        dict(
+            ready_record(time.time()),
+            qualification="unqualified",
+            auth="unknown",
+        ),
+    )
+    adapter = world["lanes_path"].parent / "ok_adapter.py"
+    adapter.write_text(
+        "import hashlib, json, sys\n"
+        "from pathlib import Path\n"
+        "request = json.load(sys.stdin)\n"
+        "out = Path(request['output_directory'])\n"
+        "(out / 'reply.txt').write_text('OK\\n')\n"
+        "artifacts = [{'path': 'reply.txt', 'sha256': hashlib.sha256(b'OK\\n').hexdigest()}]\n"
+        "print(json.dumps({'status': 'completed', 'finish_reason': 'stop',"
+        " 'actual_model': request['model'], 'manifest_sha256': request['manifest_sha256'],"
+        " 'artifacts': artifacts}))\n"
+    )
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(adapter)])
+    now = time.time()
+    world["ledger"].record_lane("go", dict(ready_record(now), auth="unknown", qualification="unqualified"))
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    by_task = {r["task"]: r for r in results}
+    assert by_task["canary-go"]["result"] == "passed"
+    # A canary is lane evidence, not deliverable work: no review task spawns for it.
+    assert not (world["board"] / "review-canary-go.json").exists()
+    assert json.loads((world["board"] / "canary-go.json").read_text())["state"] == "passed"
+    # The regular work tasks on the same lane are refused: the lane is not for them yet.
+    assert by_task["copy-ok"]["result"] == "no_ready_lane"
+    assert by_task["copy-wrong"]["result"] == "no_ready_lane"
+    # The canary's outcome is recorded under the canary category — accepted, which is
+    # the row the qualification gates consume.
+    card = world["ledger"].scorecard(account=world["account"])
+    assert [(e["category"], e["accepted"], e["attempts"]) for e in card] == [("canary", 1, 1)]
+
+
+def test_a_recently_refused_model_blocks_even_the_canary(world, monkeypatch):
+    from inference_grid.board.new import lane_init
+
+    lane_init(world["board"], world["project"], "go")
+    (world["board"] / "copy-ok.json").unlink()
+    (world["board"] / "copy-wrong.json").unlink()
+    now = time.time()
+    world["ledger"].record_lane(
+        "go",
+        dict(
+            ready_record(now),
+            auth="unknown",
+            qualification="unqualified",
+            unsupported_until={"glm-5.3-flash": now + 3600},
+        ),
+    )
+    results = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+    assert results[0]["result"] == "no_ready_lane"
+    assert world["ledger"].status() == []

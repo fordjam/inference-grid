@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+from pathlib import Path
 
 from .collector import refresh_collect
 from .ledger import Ledger
@@ -139,6 +140,7 @@ def main():
             "board-new",
             "board-status",
             "inbox-integrate",
+            "lane-init",
             "evaluation",
             "tick",
         ],
@@ -170,6 +172,7 @@ def main():
             "board-new",
             "board-status",
             "inbox-integrate",
+            "lane-init",
             "defer",
             "cooldown",
         }
@@ -217,11 +220,18 @@ def main():
         "board-tick": lambda **kw: board_tick(ledger, **kw),
         "board-new": lambda **kw: board_new(**kw),
         "board-status": lambda **kw: board_status(ledger, **kw),
+        "lane-init": lambda **kw: lane_init(**kw),
         "inbox-integrate": lambda **kw: inbox_integrate(
             kw["project_root"], kw["task_id"], dry_run=kw.get("dry_run", True)
         ),
     }
     print(json.dumps(commands[args.command](**data), indent=2))
+
+
+def inbox_integrate(project_root, task_id, dry_run=True):
+    from .board.integrate import inbox_integrate as integrate
+
+    return integrate(project_root, task_id, dry_run=dry_run)
 
 
 def board_status(ledger, board_dir=None, suggest=False, boards=None):
@@ -230,10 +240,11 @@ def board_status(ledger, board_dir=None, suggest=False, boards=None):
     return status(ledger, board_dir, suggest=suggest, boards=boards)
 
 
-def inbox_integrate(project_root, task_id, dry_run=True):
-    from .board.integrate import inbox_integrate as integrate
+def lane_init(lane_id, board_dir, project_root=None):
+    from .board.new import lane_init as init
 
-    return integrate(project_root, task_id, dry_run=dry_run)
+    root = project_root or str(Path(board_dir).parent.parent)
+    return init(board_dir, root, lane_id)
 
 
 if __name__ == "__main__":

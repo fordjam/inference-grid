@@ -24,6 +24,23 @@ from pathlib import Path
 from .runner import find_source_link
 from .task import validate_task
 
+CANARY_BRIEF = "Reply with exactly OK"
+
+CANARY_TEST = '''"""A lane canary: the artifact must be the literal OK the brief demanded."""
+
+import unittest
+from pathlib import Path
+
+
+class CanaryReplyTests(unittest.TestCase):
+    def test_reply_is_exactly_ok(self):
+        self.assertEqual(Path("reply.txt").read_text().strip(), "OK")
+
+
+if __name__ == "__main__":
+    unittest.main()
+'''
+
 SCHEMA_TEST = '''"""Acceptance test for a review artifact: strict JSON verdict with demonstrable findings."""
 
 import json
@@ -201,3 +218,63 @@ def retry_task(board_dir, project_root, retry, change, budget=None, lanes=None, 
     if standalone:
         created["standalone"] = True
     return created
+
+
+def lane_init(board_dir, project_root, lane_id):
+    """Write the one-task canary board for a lane id; returns the created paths.
+
+    The canary is how a lane earns its first evidence: brief "Reply with exactly OK",
+    artifact reply.txt, one test asserting the content, category `canary` so the runner
+    may dispatch it on a lane whose qualification is still unverified or unqualified.
+    Existing files are refused, like every authoring path.
+    """
+    board_dir = Path(board_dir)
+    project_root = Path(project_root)
+    task_id = "canary-" + lane_id
+    task_file = board_dir / (task_id + ".json")
+    if task_file.exists():
+        raise FileExistsError(f"task file already exists: {task_file}")
+    brief_rel = f"grid/briefs/{task_id}.txt"
+    test_rel = "grid/tests/test_canary_reply.py"
+    task = {
+        "id": task_id,
+        "category": "canary",
+        "brief": brief_rel,
+        "inputs": [brief_rel],
+        "tests": [test_rel],
+        "artifacts": ["reply.txt"],
+        "lanes": [lane_id],
+        "author_family": None,
+        "budget": {"wall_seconds": 120, "output_bytes": 10000, "thinking_tokens": None},
+        "state": "ready",
+        "blocked_reason": None,
+    }
+    task = validate_task(task)
+    files = [
+        (board_dir / (task_id + ".json"), (json.dumps(task, indent=1) + "\n").encode()),
+        (project_root / brief_rel, (CANARY_BRIEF + "\n").encode()),
+    ]
+    canary_test = project_root / test_rel
+    if not canary_test.exists():
+        files.append((canary_test, CANARY_TEST.encode()))
+    for path, data in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    dry_run = {
+        "board_dir": str(board_dir),
+        "project_root": str(project_root),
+        "lanes_path": "<your lanes.json>",
+        "accounts_by_lane": {lane_id: "<your alias>"},
+        "packets_root": "<your packets root>",
+        "dry_run": True,
+    }
+    return {
+        "id": task_id,
+        "task": str(board_dir / (task_id + ".json")),
+        "brief": str(project_root / brief_rel),
+        "test": str(canary_test),
+        "dry_run_command": "inference-grid board-tick --json '" + json.dumps(dry_run) + "'",
+        "tick_command": "inference-grid board-tick --json '"
+        + json.dumps({**dry_run, "dry_run": False})
+        + "'",
+    }
