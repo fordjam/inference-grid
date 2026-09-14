@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from inference_grid.board import calibration
 from inference_grid.board.calibration import load_corpus
 
 
@@ -147,3 +148,109 @@ def test_an_empty_or_missing_corpus_refuses(tmp_path):
     tmp_path.mkdir(exist_ok=True)
     with pytest.raises(ValueError, match="no cases"):
         load_corpus(tmp_path)
+
+
+# --- authoring (K2) ---
+
+
+def board_and_project(tmp_path):
+    project = tmp_path / "project"
+    board = project / "grid/board"
+    project.mkdir(parents=True)
+    return board, project
+
+
+def corpus_of(tmp_path, cases=("mock-path",)):
+    root = tmp_path / "corpus"
+    root.mkdir(exist_ok=True)
+    for name in cases:
+        seed_case(root, name)
+    return root
+
+
+def test_authoring_writes_validated_tasks_briefs_and_answer_keys(tmp_path):
+    from inference_grid.board.task import validate_task
+
+    board, project = board_and_project(tmp_path)
+    corpus = corpus_of(tmp_path, ["mock-path", "tidy"])
+    (tmp_path / "corpus" / "tidy").joinpath("diff.patch").write_text(
+        diff_block("docs/note.md", "a corrected note\n")
+    )
+    (tmp_path / "corpus" / "tidy" / "answer.json").write_text(
+        json.dumps({"defects": [], "clean": True})
+    )
+    (tmp_path / "corpus" / "tidy" / "docs").mkdir()
+    (tmp_path / "corpus" / "tidy" / "docs" / "note.md").write_text("a corrected note\n")
+    created = calibration.author_calibration(board, project, corpus, ["go"], "seed-v1")
+    assert [t["id"] for t in created["tasks"]] == [
+        "calib-seed-v1-mock-path",
+        "calib-seed-v1-tidy",
+    ]
+    for entry in created["tasks"]:
+        task = validate_task(json.loads((board / (entry["id"] + ".json")).read_text()))
+        assert task["category"] == "independent_review"
+        assert task["author_family"] == "calibration"
+        assert task["lanes"] == ["go"]
+        assert task["artifacts"] == ["reply.txt"]
+        brief = (project / task["brief"]).read_text()
+        assert "Review the views rename flow" in brief
+        assert 'OUTPUT FORMAT, mandatory' in brief
+        for relative in ("web/e2e/views.spec.ts",):
+            assert any(relative in p for p in task["inputs"])
+    answer_key = board / "calibration" / "seed-v1" / "mock-path.answer.json"
+    assert json.loads(answer_key.read_text())["defects"][0]["id"] == "mock-path"
+    assert (board / "calibration" / "seed-v1" / "manifest.json").is_file()
+
+
+def test_the_answer_key_is_not_among_the_inputs(tmp_path):
+    board, project = board_and_project(tmp_path)
+    corpus = corpus_of(tmp_path)
+    calibration.author_calibration(board, project, corpus, ["go"], "seed-v1")
+    task = json.loads((board / "calib-seed-v1-mock-path.json").read_text())
+    assert not any("answer.json" in p or "calibration" in p for p in task["inputs"])
+    assert (project / "grid/board/review/calib-seed-v1-mock-path/diff.patch").is_file()
+
+
+def test_two_runs_with_different_run_ids_coexist(tmp_path):
+    board, project = board_and_project(tmp_path)
+    corpus = corpus_of(tmp_path)
+    calibration.author_calibration(board, project, corpus, ["go"], "run-a")
+    calibration.author_calibration(board, project, corpus, ["go"], "run-b")
+    ids = sorted(p.stem for p in board.glob("calib-*.json"))
+    assert ids == [
+        "calib-run-a-mock-path",
+        "calib-run-b-mock-path",
+    ]
+    assert (board / "calibration" / "run-a" / "mock-path.answer.json").is_file()
+    assert (board / "calibration" / "run-b" / "mock-path.answer.json").is_file()
+
+
+def test_the_calibration_family_keeps_every_lane_eligible(tmp_path):
+    from inference_grid.lanes.select import select_lane
+
+    board, project = board_and_project(tmp_path)
+    corpus = corpus_of(tmp_path)
+    calibration.author_calibration(board, project, corpus, ["go", "go-kimi"], "seed-v1")
+    task = json.loads((board / "calib-seed-v1-mock-path.json").read_text())
+    lanes = {
+        "go": {"family": "glm", "model": "glm-5.3-flash", "categories": ["independent_review"]},
+        "go-kimi": {"family": "kimi", "model": "kimi-k3", "categories": ["independent_review"]},
+    }
+    ready = {"go": {"state": "ready"}, "go-kimi": {"state": "ready"}}
+    choice = select_lane(
+        {"category": "independent_review", "author_family": task["author_family"]},
+        lanes,
+        ready,
+        [],
+        0,
+    )
+    assert choice["lane"] in ("go", "go-kimi") and choice["reason"] == "selected"
+
+
+def test_authoring_refuses_a_bad_run_id_or_lane_list(tmp_path):
+    board, project = board_and_project(tmp_path)
+    corpus = corpus_of(tmp_path)
+    with pytest.raises(ValueError, match="run_id"):
+        calibration.author_calibration(board, project, corpus, ["go"], "Run A")
+    with pytest.raises(ValueError, match="lanes"):
+        calibration.author_calibration(board, project, corpus, [], "run-a")

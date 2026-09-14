@@ -16,7 +16,7 @@ import re
 from pathlib import Path, PurePosixPath
 
 from .guard import check_input, check_name
-from .branch_review import _safe_rel
+from .branch_review import _plan_task, _safe_rel, _write_files
 
 # Task-id charset: ids are `calib-<run_id>-<case>`, so both parts are constrained.
 NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
@@ -136,3 +136,61 @@ def load_corpus(corpus_dir):
     if not cases:
         raise ValueError(f"calibration corpus holds no cases: {corpus_dir}")
     return cases
+
+
+def author_calibration(board_dir, project_root, corpus_dir, lanes, run_id):
+    """Author one independent_review task per case; answer keys live beside the board.
+
+    Task ids are `calib-<run_id>-<case>`; author_family is the `calibration` sentinel,
+    which no lane declares, so select_lane's family exclusion keeps every listed lane
+    eligible — the run measures the listed lanes, it does not route around them. The
+    case brief travels inside the shared review brief (which carries the mandatory
+    verdict format), the staged files and the diff are written through the same
+    planning path review_branch uses, and the answer keys plus a manifest land under
+    `<board_dir>/calibration/<run_id>/`, outside every task's inputs.
+    """
+    if not isinstance(run_id, str) or not NAME.fullmatch(run_id):
+        raise ValueError("run_id must match [a-z0-9-]")
+    if not isinstance(lanes, list) or not lanes:
+        raise ValueError("calibration needs a non-empty list of lanes")
+    cases = load_corpus(corpus_dir)
+    plans, summaries, keys = [], [], []
+    for case in cases:
+        task_id = f"calib-{run_id}-{case['case']}"
+        if len(task_id) > 60:
+            raise ValueError(f"task id would exceed 60 chars: {task_id}")
+        files, summary = _plan_task(
+            board_dir,
+            project_root,
+            task_id,
+            AUTHOR_FAMILY,
+            lanes,
+            None,
+            case["brief"].strip(),
+            case["files"],
+            case["diff"],
+        )
+        plans.append(files)
+        summaries.append(dict(summary, case=case["case"]))
+        keys.append(
+            (
+                Path(board_dir) / "calibration" / run_id / (case["case"] + ".answer.json"),
+                (json.dumps(case["answer"], indent=1) + "\n").encode(),
+            )
+        )
+    manifest = Path(board_dir) / "calibration" / run_id / "manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "lanes": lanes,
+                "cases": [case["case"] for case in cases],
+                "tasks": [f"calib-{run_id}-{case['case']}" for case in cases],
+            },
+            indent=1,
+        )
+        + "\n"
+    )
+    _write_files([file for plan in plans for file in plan] + keys)
+    return {"tasks": summaries, "manifest": str(manifest)}
