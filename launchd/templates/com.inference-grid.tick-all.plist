@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Render with the interval and paths filled in; never installed by the package.
+     Load with: launchctl bootstrap gui/$(id -u) <rendered path> -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.inference-grid.tick-all</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__VENV_BIN__/inference-grid</string>
+        <string>tick-all</string>
+        <string>--database</string><string>__DATABASE__</string>
+        <string>--json</string><string>__TICK_ALL_JSON__</string>
+    </array>
+    <key>StartInterval</key><integer>__INTERVAL_SECONDS__</integer>
+    <key>StandardOutPath</key><string>__LOG_PATH__</string>
+    <key>StandardErrorPath</key><string>__LOG_PATH__</string>
+</dict>
+</plist>

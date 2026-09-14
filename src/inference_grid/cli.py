@@ -147,6 +147,7 @@ def main():
             "inbox-integrate",
             "lane-init",
             "board-init",
+            "tick-all",
             "evaluation",
             "tick",
         ],
@@ -229,6 +230,7 @@ def main():
         "board-status": lambda **kw: board_status(ledger, **kw),
         "lane-init": lambda **kw: lane_init(**kw),
         "board-init": lambda **kw: board_init(**kw),
+        "tick-all": lambda **kw: tick_all(ledger, **kw),
         "inbox-integrate": lambda **kw: inbox_integrate(
             kw["project_root"], kw["task_id"], dry_run=kw.get("dry_run", True)
         ),
@@ -259,6 +261,12 @@ def board_init(project_root, board_name=None, allowed_prefixes=None, tier="T0"):
     from .board.new import board_init as init
 
     return init(project_root, board_name=board_name, allowed_prefixes=allowed_prefixes, tier=tier)
+
+
+def tick_all(ledger, boards_dir, log_path=None, prepare=None, dry_run=False):
+    from .tick_all import tick_all as run_all
+
+    return run_all(ledger, boards_dir, log_path=log_path, prepare=prepare, dry_run=dry_run)
 
 
 if __name__ == "__main__":
