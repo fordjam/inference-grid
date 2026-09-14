@@ -148,6 +148,7 @@ def main():
             "lane-init",
             "board-init",
             "tick-all",
+            "digest",
             "evaluation",
             "tick",
         ],
@@ -231,6 +232,7 @@ def main():
         "lane-init": lambda **kw: lane_init(**kw),
         "board-init": lambda **kw: board_init(**kw),
         "tick-all": lambda **kw: tick_all(ledger, **kw),
+        "digest": lambda **kw: digest(ledger, **kw),
         "inbox-integrate": lambda **kw: inbox_integrate(
             kw["project_root"], kw["task_id"], dry_run=kw.get("dry_run", True)
         ),
@@ -267,6 +269,12 @@ def tick_all(ledger, boards_dir, log_path=None, prepare=None, dry_run=False):
     from .tick_all import tick_all as run_all
 
     return run_all(ledger, boards_dir, log_path=log_path, prepare=prepare, dry_run=dry_run)
+
+
+def digest(ledger, boards_dir, since=None):
+    from .digest import digest as render
+
+    return render(ledger, boards_dir, now=since)
 
 
 if __name__ == "__main__":
