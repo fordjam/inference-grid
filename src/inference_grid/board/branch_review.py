@@ -210,7 +210,27 @@ def _classify(repo, ref, cache, attrs, paths, deleted_ok=False):
             continue
         staged.append((path, data))
         total += len(data)
-    return staged, oversized, omitted, total
+    return _disambiguate(staged), oversized, omitted, total
+
+
+def _disambiguate(staged):
+    """Review packets are flat tasks: the runner copies every staged input into one
+    scratch directory by basename, so two files named alike (spine/attachments.py and
+    api/routers/attachments.py) would collide and the packet be refused. The staged
+    copies are read-only context — the patch carries the true paths — so a colliding
+    file is staged under its path-qualified name instead (src__spine__attachments.py)."""
+    counts = {}
+    for path, _ in staged:
+        base = PurePosixPath(path).name
+        counts[base] = counts.get(base, 0) + 1
+    out = []
+    for path, data in staged:
+        base = PurePosixPath(path).name
+        if counts[base] > 1:
+            parent = PurePosixPath(path).parent
+            path = str(parent / ("__".join(PurePosixPath(path).parts)))
+        out.append((path, data))
+    return out
 
 
 def _filter_patch(patch, attrs):

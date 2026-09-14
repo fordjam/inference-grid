@@ -2,7 +2,7 @@
 
 import json
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -121,6 +121,27 @@ def test_review_branch_refuses_paths_outside_the_allow_list(tmp_path):
             board, project, {"repo": str(repo), "base": base, "tip": tip}
         )
     assert not any(board.rglob("*.json"))  # nothing written
+
+
+def test_two_staged_files_sharing_a_basename_are_disambiguated(tmp_path):
+    """Review packets are flat, so spine/x.py and api/x.py would collide in the scratch
+    directory and the runner would refuse the packet. The colliding copies are staged
+    under path-qualified names; unique basenames keep their plain path."""
+    repo, base, _ = reviewed_repo(tmp_path)
+    (repo / "src/api").mkdir()
+    (repo / "src/api/app.py").write_text("ROUTE = 1\n")
+    git(repo, "add", "-A")
+    commit(repo, "a second app.py", "Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>")
+    tip = rev(repo, "HEAD")
+    board, project = board_and_project(tmp_path)
+    out = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}
+    )
+    staged = out["tasks"][0]["staged"] if "tasks" in out else out["staged"]
+    names = sorted(PurePosixPath(s).name for s in staged if s.endswith(".py"))
+    assert names == ["new.py", "src__api__app.py", "src__app.py"]
+    task = json.loads(next(board.glob("*.json")).read_text())
+    assert len(task["inputs"]) == len(set(PurePosixPath(i).name for i in task["inputs"]))
 
 
 def test_a_commit_split_honours_the_per_project_allow_list(tmp_path):
