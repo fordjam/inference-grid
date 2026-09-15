@@ -34,8 +34,18 @@ def family_of(model: str) -> str:
     return "unknown"
 
 
+VENDOR_DOMAINS = {"glm": "z.ai", "deepseek": "deepseek.com", "kimi": "moonshot.ai", "qwen": "alibabacloud.com"}
+
+
 def trailer_for(model: str) -> str:
-    return TRAILERS.get(family_of(model), TRAILER)
+    """`Co-Authored-By: <Model-Id> <noreply@vendor>` — the model's own id, so a trailer never
+    names a model that did not do the work (the family map stays for the vendor domain)."""
+    fam = family_of(model)
+    if fam not in VENDOR_DOMAINS:
+        return TRAILER
+    name = model.rsplit("/", 1)[-1]
+    name = "-".join(part[:1].upper() + part[1:] for part in name.split("-"))
+    return f"Co-Authored-By: {name} <noreply@{VENDOR_DOMAINS[fam]}>"
 
 
 def packet_text(brief: str, packet_id: str) -> str:
