@@ -18,13 +18,11 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
+ "state": "landed",
  "blocked_reason": null,
  "spec": {
   "brief": "grid/briefs/packet-j5.txt",
   "packet_id": "J5",
-  "base": "glm/work",
-  "max_rounds": 3,
   "gates": [
    {
     "name": "pytest",
@@ -82,6 +80,13 @@
      "PYTHONPATH": "src"
     }
    }
-  ]
+  ],
+  "base": "glm/work",
+  "max_rounds": 3
+ },
+ "landed": {
+  "base_head": "078048a862dfc8b164beef9e5ad81c3b4909f6e0",
+  "merge_commit": "e5b5d206782cf5300bbcb70652ca5b6c5a9fbae9",
+  "how": "merge"
  }
 }
