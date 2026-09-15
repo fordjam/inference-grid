@@ -22,6 +22,7 @@ import re
 import shutil
 from pathlib import Path
 
+from .packet_task import validate_board_task
 from .runner import REVIEW_BUDGET, find_source_link
 from .task import validate_task
 
@@ -150,7 +151,9 @@ def retry_task(board_dir, project_root, retry, change, budget=None, lanes=None, 
     board_dir = Path(board_dir)
     project_root = Path(project_root)
     source_path = board_dir / (retry + ".json")
-    predecessor = validate_task(json.loads(source_path.read_text()))
+    # Packet tasks carry packet-only keys (`failover`, `failover_from`, `landed`) the
+    # shared schema refuses, so retries validate through the category-aware wrapper.
+    predecessor = validate_board_task(json.loads(source_path.read_text()))
     if predecessor["state"] in ("accepted", "passed", "review_pending"):
         raise ValueError(
             f"predecessor {retry} is {predecessor['state']}; only a ready, dispatched or "
@@ -189,13 +192,13 @@ def retry_task(board_dir, project_root, retry, change, budget=None, lanes=None, 
         task["author_family"] = author_family
     task["state"] = "ready"
     task["blocked_reason"] = None
-    task = validate_task(task)
+    task = validate_board_task(task)
     new_file = board_dir / (new_id + ".json")
     new_brief = project_root / new_brief_rel
     for label, path in [("task file", new_file), ("brief", new_brief)]:
         if path.exists():
             raise FileExistsError(f"{label} already exists: {path}")
-    superseded = validate_task(
+    superseded = validate_board_task(
         dict(predecessor, state="blocked", blocked_reason=f"superseded: {new_id} — {change}"[:300])
     )
     board_dir.mkdir(parents=True, exist_ok=True)
@@ -352,11 +355,15 @@ def qualify_task(board_dir, project_root, lane_id, category):
         task["artifacts"] = ["reply.txt"]
         task["author_family"] = "operator"
     else:
-        task["artifacts"] = ["normalize.py"] if category == "pure_function" else ["store.py", "report.py"]
+        task["artifacts"] = (
+            ["normalize.py"] if category == "pure_function" else ["store.py", "report.py"]
+        )
         task["author_family"] = None
     task["lanes"] = [lane_id]
     task["budget"] = (
-        dict(REVIEW_BUDGET) if is_review else {"wall_seconds": 600, "output_bytes": 100000, "thinking_tokens": None}
+        dict(REVIEW_BUDGET)
+        if is_review
+        else {"wall_seconds": 600, "output_bytes": 100000, "thinking_tokens": None}
     )
     task = validate_task(task)
     board_dir.mkdir(parents=True, exist_ok=True)

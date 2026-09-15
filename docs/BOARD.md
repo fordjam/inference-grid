@@ -29,6 +29,8 @@ Planned operating model for continuous Grid operation (agreed 2026-09-12). The G
 
 Retries are new tasks with a recorded change; the predecessor's `blocked_reason` then begins with `superseded:` naming its successor. Doctor counts such a task under `superseded`, not `blocked`, and the runner never accepts or re-blocks a superseded source.
 
+Failover (J4) is the runner's own retry, on failure rather than on a race: when a packet task settles blocked with `rounds_exhausted`, `agent_stopped_early` or a transport refusal in its reason, and the task carries `"failover": true` (the packet default; the operator turns it off per task with `false`), the runner authors exactly one successor task whose `lanes` name only lanes of a *different* family that declare the packet category. The link is recorded on both sides — `failover_from` on the successor, the `superseded:` reason on the predecessor — and a `failover` ledger event names the family swap. No second attempt is ever authored on the failed family by this path, and a failover task never fails over again. A dry run reports a pending failover (`failover pending: <family> -> <families>`) instead of authoring it; a real tick authors it.
+
 Nothing merges automatically. Held attempts wait for `resolve` with evidence, with one exception the runner applies itself: an attempt held at its wall deadline whose expected files all exist in its workspace is resolved `consumed` and followed by a single verify-only attempt (a new ledger task id, a changed brief that only runs the tests, both recorded); anything else stays held.
 
 ## Coordinator schedule
