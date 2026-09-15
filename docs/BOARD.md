@@ -8,7 +8,7 @@ Planned operating model for continuous Grid operation (agreed 2026-09-12). The G
 
 | Field | Meaning |
 | --- | --- |
-| `id`, `category` | Stable id; category from the scorecard vocabulary (`pure_function`, `tests_multi_file`, `fixtures_multi_file`, `independent_review`, `canary`) |
+| `id`, `category` | Stable id; category from the scorecard vocabulary (`pure_function`, `tests_multi_file`, `fixtures_multi_file`, `independent_review`, `canary`, `packet`) |
 | `brief` | Path to the exact text sent to the provider, format rule restated last |
 | `inputs` | Files staged read-only for the attempt (manifest hashed by the ledger) |
 | `tests` | Coordinator-written tests run against the artifact before any acceptance |
@@ -17,6 +17,7 @@ Planned operating model for continuous Grid operation (agreed 2026-09-12). The G
 | `author_family` | Set for review tasks so the reviewer family differs |
 | `budget` | Wall seconds, output cap, thinking budget where the lane supports one |
 | `state` | `ready`, `dispatched`, `passed`, `review_pending`, `accepted`, `blocked` with a reason |
+| `spec` | Packet tasks only (see Packet tasks below); absent on every other category |
 
 ## Runner tick
 
@@ -42,6 +43,46 @@ First-party families (`claude`, `openai`) are `explicit_only` in the runner's la
 `go_http` (dedicated subscription endpoint, JSON schema gate), `goat_cli` (`--mod` session effort, `classify_goat`), `cline_cli` (write sandbox, snapshot supervision, `classify_cline`), `claude_headless` (Anthropic-compatible base URL, thinking budget), `zcode_cli` (bundled CLI, session-DB evidence, `~/.zcode` write allowance). Configuration lives in a private `lanes.json` validated by `inference_grid.lanes.config`.
 
 The `go_http` request shapes reasoning explicitly, since kimi-k3 thought its whole output away at the endpoint's default effort: `lanes/go.py::REASONING_EFFORT` maps each model id to the `reasoning_effort` values its documented endpoint schema accepts (`kimi-k3` → `low`, `high`, `max`; the endpoint default is `max`), and `lanes/go.py::EFFORT_TIERS` is the coordinator's policy mapping the task's `thinking_tokens` to a tier — absent or at most 4 000 → `low`, at most 12 000 → `high`, beyond → `max` — so board review tasks (6 000) ask for `high`. The token count also sizes `max_tokens` at `3 × thinking_tokens + 4 000` (`lanes/go.py::REASONING_HEADROOM`): the endpoint bounds reasoning only by effort, never by count — on 2026-09-14 `high` reasoned 1.4–1.7× a 6 000 budget on 16–18 K-token review prompts, and a `thinking_tokens + 4 000` cap cut one review off mid-finding — so the cap guards spend rather than thinking. A model outside the map sends no effort field and the verdict records `reasoning_effort: unsupported` (plus `reasoning_budget: unsupported` when a thinking budget was requested); a `length` stop with no content is held as `reasoning_overrun` with both counts.
+
+## Packet tasks
+
+A task with `category: "packet"` runs the build→gate→re-enter loop that used to live only
+in the operator's `scripts/run_lane.py` — the board now dispatches it itself. The spec
+shape (validated by `board/packet_task.py`; `board/task.py` is provider-authored, so the
+caller adapts):
+
+```json
+{"brief": "grid/briefs/packet-d1.txt", "packet_id": "D1",
+ "gates": [{"name": "pytest", "argv": ["python", "-m", "pytest", "-q"], "cwd": ".",
+            "timeout": 1800, "env": {}}],
+ "max_rounds": 3, "base": "main"}
+```
+
+`spec.brief` is the task's own brief file; `packet_id` names a `#### <id>.` heading inside
+it, and the same document must carry the umbrella brief's `## 1. Hard rules` section — the
+prompt is composed from both, plus scout orientation, by `lanes/brief.py` (the module the
+operator's driver imports). The declared `gates` run as code after each agent round, then
+the commit gate: exactly one commit ahead of `base`, trailer present, clean tree.
+`max_rounds` bounds the re-entry loop (default 3).
+
+Dispatch admits the attempt first — submit, claim, workspace lease — and only then builds
+the worktree: a scratch shared clone of the project inside the attempt directory, branched
+from `base`, never the operator checkout. The loop runs on the lane's adapter
+(`goat_cli` → `CommandCodeAdapter` with a high-effort module beside the attempt, not in
+the worktree; `zcode_cli` → `ZcodeAdapter`; `cline_cli` is refused before any attempt: its
+CLI has no session-resume flag, so the loop could not re-enter). Packet tasks may select
+unverified or unqualified lanes the way canaries do — the task names its lanes explicitly
+and no packet could run to earn the qualification rows first — but a recently
+model-refused lane stays closed.
+
+On green gates the branch (`packet/<task-id>`) is fetched into the project repository, the
+attempt completes with the verdict as its receipt (`verified_in_lane`, `repairs` =
+rounds − 1, and an artifact digest pinning the exact head commit), and the task settles
+`passed` with no review task — the gates already ran as code inside the attempt. On any
+other outcome the attempt is held with the loop's reason and the branch is left inside the
+attempt directory for the operator. The base branch is never advanced by the runner;
+advancing it stays an operator/`inbox-integrate` step. `board-tick --dry-run` plans packet
+tasks like any other.
 
 ## Authoring tools
 

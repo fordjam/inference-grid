@@ -110,7 +110,9 @@ admission event; the outcome is recorded in the same call. The receipt must say
 `verified_in_lane: true|false` — whether the lane could run its own gate. Work it could
 not (a Playwright spec written blind, judged only by the operator's run) is scored on
 that run, and `repairs` is the count of fixes it needed. The category may not be
-`canary`: qualification is earned only through work the grid itself launched.
+`canary`: qualification is earned only through work the grid itself launched. Since
+packet tasks (docs/BOARD.md, "Packet tasks"), the board runs the build→gate→re-enter
+loop itself; `external` is now the fallback for work the board could not run.
 Each task id is written once. The scorecard reports `external` per row so a reader can
 weigh operator-provenance rows against grid-dispatched ones.
 
