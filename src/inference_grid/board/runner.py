@@ -30,6 +30,7 @@ from ..ledger import events as ledger_events, tasks as task_records
 from ..worker import execute
 from .guard import check_input
 from .packet_task import dispatch_packet, validate_board_task
+from .policy import record_waiver, review_needed
 from .task import validate_task
 from .verify_merge import verify_merge
 from ..lanes.route import route
@@ -809,6 +810,14 @@ def receipt_digest_of(ledger, aid):
     return None
 
 
+def receipt_of(ledger, aid):
+    """The settled attempt's receipt, or None. The review policy reads it, never a digest."""
+    for row in ledger.status():
+        if row["id"] == aid and row.get("receipt"):
+            return row["receipt"]
+    return None
+
+
 def land_in_inbox(project_root, task, artifact_dir, record):
     """Commit accepted artifacts and their record to the project's grid/inbox branch.
 
@@ -1188,7 +1197,13 @@ def tick(
         if task["category"] == "packet":
             # The loop's gates ran as code inside the attempt (its outcome is already
             # recorded with the verdict's repairs); the branch is the deliverable and no
-            # review task is spawned for it.
+            # review task is spawned for it. When the policy finds the receipt proves the
+            # gates, that is the waiver it records — never silently. A packet the lane
+            # could not verify still passes here; the branch-scope review, once a
+            # verify_merge task proves the merge, is what reads such a branch as a whole.
+            needed, reason = review_needed(task, receipt_of(ledger, aid), lanes[lane_id]["family"])
+            if not needed:
+                record_waiver(board_dir, task, reason, ledger=ledger, attempt=aid)
             save_task(path, task, state="passed", blocked_reason=None)
             results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": "passed"})
             continue
@@ -1243,16 +1258,25 @@ def tick(
         if passed:
             if task["author_family"] is None and task["category"] != "canary":
                 # A canary is lane evidence, not deliverable work: it passes and stops,
-                # no review task is spawned for it.
-                next_state = "review_pending"
-                created, note = create_review_task(
-                    board_dir, project_root, task, lane_id, lanes, output_dir
+                # no review task is spawned for it. Otherwise the review policy decides:
+                # a receipt that proves the gates waives the per-commit review, and the
+                # waiver is recorded; everything else keeps the current path.
+                needed, reason = review_needed(
+                    task, receipt_of(ledger, aid), lanes[lane_id]["family"]
                 )
-                write_source_link(
-                    board_dir, task, aid, lane_id, lanes, receipt_digest_of(ledger, aid)
-                )
-                if created is None and note != "review task already exists":
-                    result = ("passed; review task not created: " + note)[:200]
+                if needed:
+                    next_state = "review_pending"
+                    created, note = create_review_task(
+                        board_dir, project_root, task, lane_id, lanes, output_dir
+                    )
+                    write_source_link(
+                        board_dir, task, aid, lane_id, lanes, receipt_digest_of(ledger, aid)
+                    )
+                    if created is None and note != "review task already exists":
+                        result = ("passed; review task not created: " + note)[:200]
+                else:
+                    next_state = "passed"
+                    record_waiver(board_dir, task, reason, ledger=ledger, attempt=aid)
             else:
                 next_state = "passed"
                 if task["id"].startswith("review-"):

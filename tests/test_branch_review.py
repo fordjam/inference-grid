@@ -117,9 +117,7 @@ def test_review_branch_refuses_paths_outside_the_allow_list(tmp_path):
     tip = rev(repo, "HEAD")
     board, project = board_and_project(tmp_path)
     with pytest.raises(ValueError, match="allow-list"):
-        branch_review.review_branch(
-            board, project, {"repo": str(repo), "base": base, "tip": tip}
-        )
+        branch_review.review_branch(board, project, {"repo": str(repo), "base": base, "tip": tip})
     assert not any(board.rglob("*.json"))  # nothing written
 
 
@@ -134,9 +132,7 @@ def test_two_staged_files_sharing_a_basename_are_disambiguated(tmp_path):
     commit(repo, "a second app.py", "Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>")
     tip = rev(repo, "HEAD")
     board, project = board_and_project(tmp_path)
-    out = branch_review.review_branch(
-        board, project, {"repo": str(repo), "base": base, "tip": tip}
-    )
+    out = branch_review.review_branch(board, project, {"repo": str(repo), "base": base, "tip": tip})
     staged = out["tasks"][0]["staged"] if "tasks" in out else out["staged"]
     names = sorted(PurePosixPath(s).name for s in staged if s.endswith(".py"))
     assert names == ["new.py", "src__api__app.py", "src__app.py"]
@@ -155,8 +151,11 @@ def test_a_commit_split_honours_the_per_project_allow_list(tmp_path):
     tip = rev(repo, "HEAD")
     board, project = board_and_project(tmp_path)
     out = branch_review.review_branch(
-        board, project, {"repo": str(repo), "base": f"{tip}^", "tip": tip},
-        split="commit", allowed_prefixes=["src/", "frontend/"],
+        board,
+        project,
+        {"repo": str(repo), "base": f"{tip}^", "tip": tip},
+        split="commit",
+        allowed_prefixes=["src/", "frontend/"],
     )
     assert len(out["tasks"]) == 1
 
@@ -169,9 +168,7 @@ def test_review_branch_refuses_credential_looking_paths(tmp_path):
     tip = rev(repo, "HEAD")
     board, project = board_and_project(tmp_path)
     with pytest.raises(ValueError, match="credential"):
-        branch_review.review_branch(
-            board, project, {"repo": str(repo), "base": base, "tip": tip}
-        )
+        branch_review.review_branch(board, project, {"repo": str(repo), "base": base, "tip": tip})
 
 
 def test_review_branch_refuses_mixed_trailer_families(tmp_path):
@@ -180,9 +177,7 @@ def test_review_branch_refuses_mixed_trailer_families(tmp_path):
     )
     board, project = board_and_project(tmp_path)
     with pytest.raises(ValueError, match="mixed"):
-        branch_review.review_branch(
-            board, project, {"repo": str(repo), "base": base, "tip": tip}
-        )
+        branch_review.review_branch(board, project, {"repo": str(repo), "base": base, "tip": tip})
     assert not any(board.rglob("*.json"))
 
 
@@ -191,9 +186,7 @@ def test_review_branch_refuses_an_existing_task(tmp_path):
     board, project = board_and_project(tmp_path)
     branch_review.review_branch(board, project, {"repo": str(repo), "base": base, "tip": tip})
     with pytest.raises(FileExistsError):
-        branch_review.review_branch(
-            board, project, {"repo": str(repo), "base": base, "tip": tip}
-        )
+        branch_review.review_branch(board, project, {"repo": str(repo), "base": base, "tip": tip})
 
 
 def test_review_branch_overrides_lanes_and_budget(tmp_path):
@@ -262,8 +255,10 @@ def test_generated_and_locked_content_is_excluded_and_named_in_the_brief(tmp_pat
 
 def test_oversized_files_are_represented_by_their_hunks_only(tmp_path):
     repo, base, tip = reviewed_repo(tmp_path)
-    big = (repo / "src/big.py")
-    big.write_text("BIG = [\n" + "".join(f'    "line {i} pad pad pad",\n' for i in range(1200)) + "]\n")
+    big = repo / "src/big.py"
+    big.write_text(
+        "BIG = [\n" + "".join(f'    "line {i} pad pad pad",\n' for i in range(1200)) + "]\n"
+    )
     assert big.stat().st_size > branch_review.MAX_FILE_BYTES
     git(repo, "add", "-A")
     commit(repo, "add a big table")
@@ -508,9 +503,7 @@ def test_split_packets_stage_files_as_of_their_commit(tmp_path):
     )
     by_id = {entry["id"]: entry for entry in split["tasks"]}
     first_task_id = f"review-factory-frontend-{first[:7]}"
-    staged_first = next(
-        p for p in by_id[first_task_id]["staged"] if p.endswith("src/app.py")
-    )
+    staged_first = next(p for p in by_id[first_task_id]["staged"] if p.endswith("src/app.py"))
     at_commit = subprocess.run(
         ["git", "-C", str(repo), "show", f"{first}:src/app.py"],
         capture_output=True,
@@ -546,9 +539,127 @@ def test_exclude_commits_skips_the_listed_commits(tmp_path):
         f"review-factory-frontend-{hashes[0][:7]}",
         f"review-factory-frontend-{hashes[2][:7]}",
     ]
-    assert created["excluded"] == [
-        {"commit": hashes[1][:7], "note": "excluded by operator"}
-    ]
+    assert created["excluded"] == [{"commit": hashes[1][:7], "note": "excluded by operator"}]
+
+
+def write_verify_merge_task(board, branch, target, state="passed"):
+    """A verify_merge task on the board, the record the branch-scope review gates on."""
+    board.mkdir(parents=True, exist_ok=True)
+    task = {
+        "id": "verify-merge-1",
+        "category": "verify_merge",
+        "brief": "grid/briefs/verify-merge-1.txt",
+        "inputs": ["grid/briefs/verify-merge-1.txt"],
+        "tests": ["out.json"],
+        "artifacts": ["out.json"],
+        "lanes": ["code-node"],
+        "author_family": None,
+        "budget": {"wall_seconds": 600, "output_bytes": 100000, "thinking_tokens": None},
+        "state": state,
+        "blocked_reason": None if state == "passed" else "verify_merge: conflict",
+        "spec": {
+            "branch": branch,
+            "target": target,
+            "gates": [{"name": "noop", "argv": ["true"]}],
+        },
+    }
+    (board / "verify-merge-1.json").write_text(json.dumps(task, indent=1) + "\n")
+    return task
+
+
+def test_branch_scope_authors_one_packet_for_the_merged_tree(tmp_path):
+    repo, base, tip = reviewed_repo(tmp_path)
+    board, project = board_and_project(tmp_path)
+    write_verify_merge_task(board, tip, base)
+    created = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}, scope="branch"
+    )
+    assert created["id"] == f"review-factory-frontend-branch-{tip[:7]}"
+    assert created["scope"] == "branch" and created["commits"] == 2
+    task = json.loads((board / f"{created['id']}.json").read_text())
+    assert task["category"] == "independent_review" and task["author_family"] == "glm"
+    assert any("src/app.py" in path for path in task["inputs"])
+    brief = (project / f"grid/briefs/{created['id']}.txt").read_text()
+    assert "target's current tree" in brief
+    assert "not the branch's history" in brief
+
+
+def merged_repo(tmp_path):
+    """target and branch each change a different region of one file, so the merge combines
+    them: staging the merge result is observably not staging the branch tip."""
+    repo = tmp_path / "factory-frontend"
+    (repo / "src").mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "src/app.py").write_text("one\ntwo\nthree\nfour\nfive\n")
+    git(repo, "add", "-A")
+    commit(repo, "base")
+    base = rev(repo, "HEAD")
+    git(repo, "checkout", "-q", "-b", "feature", base)
+    (repo / "src/app.py").write_text("one-changed\ntwo\nthree\nfour\nfive\n")
+    git(repo, "add", "-A")
+    commit(repo, "branch edits the top", "Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>")
+    branch = rev(repo, "HEAD")
+    git(repo, "checkout", "-q", "main")
+    (repo / "src/app.py").write_text("one\ntwo\nthree\nfour\nfive-changed\n")
+    git(repo, "add", "-A")
+    commit(repo, "target edits the bottom")
+    target = rev(repo, "HEAD")
+    return repo, target, branch
+
+
+def test_branch_scope_stages_the_merged_tree_not_the_branch_tip(tmp_path):
+    repo, target, branch = merged_repo(tmp_path)
+    board, project = board_and_project(tmp_path)
+    write_verify_merge_task(board, branch, target)
+    created = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": target, "tip": branch}, scope="branch"
+    )
+    staged = next(p for p in created["staged"] if p.endswith("src/app.py"))
+    text = (project / staged).read_text()
+    assert "one-changed" in text and "five-changed" in text  # the merge, not either side
+    tip = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{branch}:src/app.py"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "five-changed" not in tip  # the branch alone never carried the target's edit
+    patch = (project / f"grid/board/review/{created['id']}/diff.patch").read_text()
+    assert "one-changed" in patch and "five-changed" not in patch
+
+
+def test_branch_scope_needs_a_passed_verify_merge_task(tmp_path):
+    repo, target, branch = merged_repo(tmp_path)
+    board, project = board_and_project(tmp_path)
+    with pytest.raises(ValueError, match="passed verify_merge"):
+        branch_review.review_branch(
+            board, project, {"repo": str(repo), "base": target, "tip": branch}, scope="branch"
+        )
+    write_verify_merge_task(board, branch, target, state="blocked")
+    with pytest.raises(ValueError, match="passed verify_merge"):
+        branch_review.review_branch(
+            board, project, {"repo": str(repo), "base": target, "tip": branch}, scope="branch"
+        )
+    assert not any(board.glob("review-*.json"))  # nothing authored
+
+
+def test_scope_is_accepted_in_the_spec_and_an_unknown_scope_refuses(tmp_path):
+    repo, target, branch = merged_repo(tmp_path)
+    board, project = board_and_project(tmp_path)
+    write_verify_merge_task(board, branch, target)
+    created = branch_review.review_branch(
+        board,
+        project,
+        {"repo": str(repo), "base": target, "tip": branch, "scope": "branch"},
+    )
+    assert created["scope"] == "branch"
+    with pytest.raises(ValueError, match="scope must be"):
+        branch_review.review_branch(
+            board,
+            project / "grid/board2",
+            {"repo": str(repo), "base": target, "tip": branch},
+            scope="sideways",
+        )
 
 
 def test_exclude_commits_refuses_single_mode_and_unknown_spec_keys(tmp_path):

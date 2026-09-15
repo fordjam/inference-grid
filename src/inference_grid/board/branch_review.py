@@ -25,7 +25,20 @@ from .runner import REVIEW_BUDGET, review_brief_text
 from .task import validate_task
 
 # Paths a review may stage, relative to the repository root; the coordinator extends it.
-ALLOWED_PREFIXES = (".gitignore", "requirements-test.txt", "requirements.txt", "pyproject.toml", "src/", "api/", "web/", "tests/", "tools/", "docs/", "scripts/", "grid/")
+ALLOWED_PREFIXES = (
+    ".gitignore",
+    "requirements-test.txt",
+    "requirements.txt",
+    "pyproject.toml",
+    "src/",
+    "api/",
+    "web/",
+    "tests/",
+    "tools/",
+    "docs/",
+    "scripts/",
+    "grid/",
+)
 
 # Co-Authored-By trailer name → the family select_lane uses for cross-family exclusion.
 TRAILER_FAMILIES = {
@@ -153,7 +166,9 @@ def _check_attr(repo, paths):
     """Which paths git attributes mark generated or -diff (the two attrs, not -a's noise)."""
     if not paths:
         return {}
-    code, out, err = run(["git", "-C", repo, "check-attr", "linguist-generated", "diff", "--", *paths])
+    code, out, err = run(
+        ["git", "-C", repo, "check-attr", "linguist-generated", "diff", "--", *paths]
+    )
     if code != 0:
         raise ValueError("git check-attr refused: " + (err or "unknown")[:200])
     attrs = {}
@@ -344,7 +359,112 @@ def _write_files(files):
         path.write_bytes(data)
 
 
-REVIEW_BRANCH_KEYS = ("repo", "base", "tip")
+REQUIRED_BRANCH_KEYS = ("repo", "base", "tip")
+REVIEW_BRANCH_KEYS = REQUIRED_BRANCH_KEYS + ("scope",)
+BRANCH_SCOPES = (None, "branch")
+
+
+def _passed_verify_merge(board_dir, branch):
+    """True when the board already holds a passed verify_merge task for this branch.
+
+    The branch-scope review reads a branch the merge node has proved: it is authored
+    only after a `verify_merge` task for the same branch settled `passed`, so the
+    whole-branch reader never runs ahead of the merge proof (B1 then B2).
+    """
+    for path in sorted(Path(board_dir).glob("*.json")):
+        try:
+            task = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        spec = task.get("spec") if isinstance(task, dict) else None
+        if (
+            isinstance(task, dict)
+            and task.get("category") == "verify_merge"
+            and task.get("state") == "passed"
+            and isinstance(spec, dict)
+            and spec.get("branch") == branch
+        ):
+            return True
+    return False
+
+
+def _review_branch_scope(
+    board_dir, project_root, repo, target, branch, lanes, budget, limit, allowed_prefixes
+):
+    """One packet for the whole branch as it would land on the target.
+
+    The staging is the *merged tree's* diff against the target's current tree
+    (`git merge-tree`), never the branch's history: a reviewer must see what the target
+    becomes, which is exactly what a per-commit diff cannot show. Authored only when the
+    board holds a passed verify_merge task for the same branch.
+    """
+    if not _passed_verify_merge(board_dir, branch):
+        raise ValueError(f"scope branch needs a passed verify_merge task for {branch} on the board")
+    code, out, err = run(["git", "-C", repo, "merge-tree", "--write-tree", target, branch])
+    merged = out.splitlines()[0].strip() if out.strip() else ""
+    if code != 0 or not re.fullmatch(r"[0-9a-f]{40}", merged):
+        raise ValueError(
+            f"{branch} does not merge cleanly into {target}: " + (err or "conflicts")[:200]
+        )
+    code, changed, err = run(["git", "-C", repo, "diff", "--name-only", target, merged])
+    if code != 0:
+        raise ValueError("git diff refused the merged tree: " + (err or "unknown")[:200])
+    paths = [line for line in changed.splitlines() if line.strip()]
+    if not paths:
+        raise ValueError("the branch changes nothing against the target tree; nothing to review")
+    prefixes = tuple(allowed_prefixes) if allowed_prefixes else ALLOWED_PREFIXES
+    _check_paths(paths, prefixes)
+    code, log, err = run(
+        ["git", "-C", repo, "log", "--format=%H%n%an%n%s%n%(trailers)", f"{target}..{branch}"]
+    )
+    if code != 0:
+        raise ValueError("git log refused the branch: " + (err or "unknown")[:200])
+    commits = parse_commits(log)
+    family = commits_family(commits)
+    repo_name = re.sub(r"[^a-z0-9-]+", "-", PurePosixPath(repo).name.lower()).strip("-")
+    board_dir = Path(board_dir)
+    project_root = Path(project_root)
+    cache, attrs = {}, _check_attr(repo, paths)
+    staged, oversized, omitted, file_bytes = _classify(repo, merged, cache, attrs, paths)
+    code, diff, err = run(["git", "-C", repo, "diff", target, merged])
+    if code != 0:
+        raise ValueError("git diff refused the merged tree: " + (err or "unknown")[:200])
+    patch, _ = _filter_patch(diff, attrs)
+    total = file_bytes + len(patch.encode())
+    if total > limit:
+        raise ValueError(
+            f"the branch packet is {total} bytes over the {limit}-byte budget; "
+            "review it in parts with the per-commit scope"
+        )
+    subjects = "; ".join(commit["subject"] for commit in commits if commit["subject"])
+    context = (
+        f"The work under review is the branch {branch} as it would land on {target}: the "
+        f"merged tree ({merged[:7]}) diffed against the target's current tree, not the "
+        f"branch's history ({len(commits)} commit(s): {subjects}). Findings must be made "
+        "against the target's current tree, not against what each commit changed when it "
+        "was written; every finding must quote the staged file or the diff next to the "
+        "requirement it violates." + _packet_notes(oversized, omitted)
+    )
+    short = re.sub(r"[^a-z0-9-]+", "", branch.lower())[:7]
+    files, created = _plan_task(
+        board_dir,
+        project_root,
+        f"review-{repo_name}-branch-{short}"[:60],
+        family,
+        lanes,
+        budget,
+        context,
+        staged,
+        patch,
+    )
+    created["commits"] = len(commits)
+    created["scope"] = "branch"
+    if omitted:
+        created["omitted"] = omitted
+    if oversized:
+        created["oversized"] = oversized
+    _write_files(files)
+    return created
 
 
 def review_branch(
@@ -358,6 +478,7 @@ def review_branch(
     include_docs=None,
     exclude_commits=None,
     allowed_prefixes=None,
+    scope=None,
 ):
     """Author review task(s) judging a git range; one task, or one per commit when split.
 
@@ -370,16 +491,24 @@ def review_branch(
     `include_docs: true` reviews them too. `exclude_commits: [sha, …]` (sha prefixes)
     skips the listed commits in a split, listed as `excluded by operator`; in single
     mode their changes ride in the whole-range diff, so such a range refuses.
+
+    `scope: "branch"` (also accepted as the `scope` argument) authors one packet for the
+    whole branch: the merged tree's diff against the target's current tree, and only when
+    a `verify_merge` task for the same branch has settled `passed`. `base` is the target,
+    `tip` the branch; the brief asks for findings against the target's current tree.
     """
     if not isinstance(spec, dict) or not all(
-        isinstance(spec.get(key), str) and spec.get(key) for key in REVIEW_BRANCH_KEYS
+        isinstance(spec.get(key), str) and spec.get(key) for key in REQUIRED_BRANCH_KEYS
     ):
         raise ValueError("review_branch needs repo, base and tip")
     unknown = sorted(set(spec) - set(REVIEW_BRANCH_KEYS))
     if unknown:
         raise ValueError(
-            "review_branch accepts only repo, base, tip; unknown keys: " + ", ".join(unknown)
+            "review_branch accepts only repo, base, tip, scope; unknown keys: " + ", ".join(unknown)
         )
+    scope = spec.get("scope", scope)
+    if scope not in BRANCH_SCOPES:
+        raise ValueError("scope must be 'branch'")
     if split not in (None, "commit", "none"):
         raise ValueError("split must be 'commit' or 'none'")
     excluded = []
@@ -389,6 +518,11 @@ def review_branch(
             raise ValueError(f"exclude_commits entries must be commit sha prefixes: {sha!r}")
         excluded.append(sha)
     repo, base, tip = spec["repo"], spec["base"], spec["tip"]
+    if scope == "branch":
+        limit = MAX_INPUT_BYTES if max_input_bytes is None else max_input_bytes
+        return _review_branch_scope(
+            board_dir, project_root, repo, base, tip, lanes, budget, limit, allowed_prefixes
+        )
 
     code, changed, err = run(["git", "-C", repo, "diff", "--name-only", f"{base}..{tip}"])
     if code != 0:
@@ -476,7 +610,17 @@ def review_branch(
     plans, skipped, docs_only, excluded_list = [], [], [], []
     for commit in reversed(commits):
         code, c_paths, err = run(
-            ["git", "-C", repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit["hash"]]
+            [
+                "git",
+                "-C",
+                repo,
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "--root",
+                commit["hash"],
+            ]
         )
         if code != 0:
             raise ValueError("git diff-tree refused: " + (err or "unknown")[:200])
@@ -509,7 +653,8 @@ def review_branch(
         total = file_bytes + len(patch.encode())
         if total > limit:
             sizes = ", ".join(
-                f"{relative} {len(data)} bytes" for relative, data in sorted(staged, key=lambda s: -len(s[1]))[:5]
+                f"{relative} {len(data)} bytes"
+                for relative, data in sorted(staged, key=lambda s: -len(s[1]))[:5]
             )
             raise ValueError(
                 f"commit {commit['hash'][:7]} alone exceeds the {limit}-byte budget "
