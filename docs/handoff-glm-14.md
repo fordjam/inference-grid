@@ -198,6 +198,76 @@ inputs_bytes)` that prepares `select_lane`'s inputs and post-filters its answer:
 - Size: medium.
 - Operator step: redeploy `deployments/capacity` (`railway up`), as for every cloud change.
 
+## Phase D — the grid dispatches its own development (interactive Z.ai session)
+
+These two packets are for the interactive GLM session, not the Command Code lanes. Lanes a and
+b are working A1/B1/C1 and A2/C2/B2 concurrently on `glm/work`; **do not create or edit**
+`src/inference_grid/watch.py`, `board/verify_merge.py`, `board/policy.py`, `lanes/route.py`,
+`operator_queue.py`, or anything under `deployments/local/` — those files belong to running
+packets and the coordinator merges them. Branch from `main` (`8302bf9` or later) in your own
+worktree; the coordinator integrates.
+
+#### D1. `packet`: a board task kind that runs the build→gate→re-enter loop on a CLI lane
+Tonight's six packets ran through `scripts/run_lane.py`, an operator-launched driver that uses
+the sandbox, the scout and `lanes/packet.py::build_loop` but bypasses the board, admission and
+lane selection, and tells the ledger afterwards via `external`. The board itself can only run a
+task as one attempt (prompt → artifacts → tests). Close that:
+- `docs/SPEC.md` and `board/task.py`'s callers: a task with `category: "packet"` carries
+  `spec: {brief: <path>, packet_id: "A1", gates: [{name, argv, cwd?, timeout?, env?}],
+  max_rounds?: 3, base: <branch>}`; `validate_task` accepts the shape (do not edit `board/task.py`
+  itself if it is provider-authored — check `docs/CONTRIBUTIONS.md`; adapt the caller).
+- `board/runner.py`: when a `packet` task is dispatched to a lane whose kind is `goat_cli`,
+  `cline_cli` or `zcode_cli`, the attempt runs `build_loop` in the attempt's worktree (branch from
+  `base` in a scratch clone of `project_root`, never the operator checkout) with the lane's
+  adapter — reuse `scripts/run_lane.py`'s `packet_text`, `hard_rules`, `mentioned_paths`,
+  `compose_prompt`, `commit_gate_script` by moving them into `src/inference_grid/lanes/brief.py`
+  and importing from both places (the script keeps working). The ledger attempt is opened
+  **before** the loop (admission, quota reservation, workspace lease) and completed or held after
+  it with the loop's verdict as the receipt: `verified_in_lane` from the verdict, `repairs` =
+  rounds − 1, `state` `completed` on `gates_passed` else `held` with `reason` naming the loop's
+  `reason`. A passed packet's branch is fetched into the coordinator's repo under
+  `packet/<task-id>` and the task settles `passed`; the base branch is **not** advanced by the
+  runner (that stays an operator/`inbox-integrate` step).
+- Adapter mapping: `goat_cli` → `packet.CommandCodeAdapter` (model from the lane, effort mod
+  written into the worktree as `goat.py` does), `zcode_cli` → a new `ZcodeAdapter` in
+  `lanes/packet.py` following the ZCode CLI's headless/resume flags (read `lanes/zcode.py` for
+  the invocation and session-DB evidence; document the flags you rely on), `cline_cli` → a
+  `ClineAdapter` only if the CLI can resume a session (check `lanes/cline.py`; if it cannot,
+  register the mapping as `unsupported` with a reason and a test that says so).
+- `board-tick --dry-run` reports packet tasks with their candidate lanes like any other task.
+- Tests (`tests/test_packet_task.py`): validation of the spec shape; the runner opening the
+  attempt before the loop and settling it from the verdict (fake adapter that writes a commit,
+  fake gates); a held packet leaves the branch and names the reason; the operator checkout's
+  HEAD and index untouched; `brief.py` functions covered by moving `tests/test_run_lane.py`'s
+  cases alongside.
+- `docs/BOARD.md`: a "Packet tasks" section, and a sentence in `docs/LANES.md`'s `external`
+  paragraph saying `external` is now the fallback for work the board could not run.
+- Size: large. This is the packet that makes `run_lane.py` unnecessary.
+
+#### D2. `opencode_cli`: a lane kind for the Go subscription as an agent
+The Go subscription is used only through `go_http` (one request, no tools). The `opencode` CLI
+can run an agent with tools and resume a session (`opencode run --session`, `--format json`,
+`--dir`), and `lanes/packet.py::OpencodeAdapter` already shapes its argv. What is missing is the
+lane kind for the board:
+- `lanes/opencode.py` with the same contract as `lanes/goat.py`: attempt request, write sandbox
+  scoped to the worktree, wall deadline, the CLI's own JSON event stream as native evidence,
+  `classify_opencode` from the terminal event (finish reason, model id echoed, terminal text),
+  a receipt, and `user_config_digests` over the CLI's config **and** auth files before and after
+  the run — the same discipline `goat.py` uses for a CLI that must read its own login.
+- `lanes/config.py` is provider-authored: do not edit it. Add the kind name where the accepted
+  set is consumed, or document in your report that the set must grow by one entry and provide
+  the one-line patch for the coordinator.
+- **Policy gate, decided by the operator, not the code:** the operator's deny-read list
+  currently includes the opencode auth file. The lane must refuse to start with a clear verdict
+  (`refusal: credential_denied_by_policy`) when the sandbox profile denies that path, and the
+  report must state plainly what removing the entry exposes (the model's shell could read the
+  key; the digest check proves only that it was not modified). Do not edit the deny list.
+- Tests: fake CLI happy path, deadline hold, refusal when the auth path is denied, digest
+  mismatch hold, receipt shape; `OpencodeAdapter.session_id` against a captured event line.
+- `docs/LANES.md`: the `go-agent` lane entry as documentation only (kind `opencode_cli`, family
+  `glm`, model `opencode/glm-5.3-flash`, categories `pure_function`, `tests_multi_file`).
+- Size: medium.
+
 ---
 
 ## Definition of done, per packet
