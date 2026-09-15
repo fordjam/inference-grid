@@ -301,6 +301,7 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
     gates = gates_for(args.python, f"origin/{args.base}", attempt_dir / "gate-scripts")
     print(f"[{args.lane}] {packet_id} → {branch} (attempt {attempt_dir})", flush=True)
     if resuming:
+        (attempt_dir / "gates-0").mkdir(exist_ok=True)
         pre = run_gates(clone, gates, env, attempt_dir / "gates-0")
         if all(r.ok for r in pre):
             verdict = {
