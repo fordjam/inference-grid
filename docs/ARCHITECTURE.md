@@ -161,17 +161,29 @@ inference-grid board-status --json /tmp/tick.json           # verdicts, holds, f
 Findings arrive as `blocked_reason` on the reviewed task. "Approved, nothing accepted" means the
 reviewer found nothing — read it against the calibration number, not on faith.
 
-### Run a build packet through a lane
+### Run build packets through a lane
+
+A job file names the repo, brief, base and one entry per lane; `--job` launches every entry
+as its own process, logs each to `lane-<name>.log` beside the packets, and prints a table
+when they are all done. Relative paths in the file resolve against the file's directory.
+
+```json
+{"repo": ".", "brief": "docs/handoff-glm-15.md", "base": "glm/work",
+ "python": ".venv/bin/python", "packets_root": "~/.grid-workspaces/packets",
+ "lanes": [{"name": "goat-glm", "clone": "~/.grid-workspaces/ig-lane-a",
+            "adapter": "command_code", "model": "z-ai/glm-5.3-flash", "packets": ["E1", "E2"]}]}
+```
 
 ```sh
+python scripts/run_lane.py --job lanes.json          # every lane, concurrently
 python scripts/run_lane.py --repo . --clone ~/.grid-workspaces/ig-lane-a \
   --brief docs/handoff-glm-14.md --packets A1 B1 --base glm/work \
   --model z-ai/glm-5.3-flash --python .venv/bin/python \
-  --database sqlite:///$HOME/.local/share/inference-grid/board.sqlite
+  --database sqlite:///$HOME/.local/share/inference-grid/board.sqlite   # one lane, from flags
 ```
 
 Each packet: its own branch, scout, agent, gates, up to three rounds, then a fast-forward of
-the base and an `external` record. Two drivers on two clones run two packets concurrently.
+the base and an `external` record. The flags still take exactly one lane.
 
 ### Measure a reviewer
 
