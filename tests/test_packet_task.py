@@ -366,7 +366,16 @@ def test_an_unsupported_lane_kind_refuses_and_touches_nothing(world):
 
 def test_dry_run_plans_the_packet_task(world):
     plan = tick(world, dry_run=True)
-    assert plan["plan"] == [{"task": "d1-packet", "lane": "packet-cli", "reason": "selected"}]
+    # route (brief 14 C1) adds candidates/dropped/score to every plan row; the packet task
+    # is planned like any other task.
+    assert len(plan["plan"]) == 1
+    row = plan["plan"][0]
+    assert {k: row[k] for k in ("task", "lane", "reason")} == {
+        "task": "d1-packet",
+        "lane": "packet-cli",
+        "reason": "selected",
+    }
+    assert row["candidates"] == ["packet-cli"] and row["dropped"] == []
     task = json.loads((world["board"] / "d1-packet.json").read_text())
     assert task["state"] == "ready"
     assert world["ledger"].status() == [] or all(
