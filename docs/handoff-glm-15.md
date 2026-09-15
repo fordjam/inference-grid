@@ -139,3 +139,24 @@ brief 15`, `ruff format` and `ruff check` clean on the files you changed, the su
 inherited failures (the harness names them; you do not need to capture a baseline by hand once
 E2 lands — until then, the driver's pytest gate is the judge). Report in
 `docs/reports/brief-15-<packet>.md`.
+
+## Phase G — the Cline subscription over HTTP (any lane)
+
+#### G1. `cline-http`: the Go lane kind pointed at ClinePass
+`lanes/go.py` hard-codes the OpenCode Go endpoint. ClinePass exposes the same OpenAI-compatible
+chat-completions protocol at `https://api.cline.bot/api/v1/chat/completions`, with two
+differences observed on 2026-09-15: the response body is wrapped as `{"data": {...}}`, and
+only some models are covered by the subscription on the raw API (`z-ai/glm-5.3-flash`
+answered; `moonshotai/kimi-k3` and `deepseek/deepseek-v4-flash-0731` returned
+`402 insufficient_credits` — those are billed to pay-as-you-go credits unless called through
+the Cline client). Make the endpoint a property of the lane's `provider` (`opencode` → the Go
+URL, `clinepass` → the Cline URL) inside `go.py` — `lanes/config.py` is provider-authored;
+do not add a key there — unwrap `data` when present, classify `402` as
+`refusal: model_not_in_plan` (never retried), and record the `provider` field of the response
+in the verdict.
+- Tests: injected `send` returning the wrapped shape; the 402 refusal; the endpoint chosen
+  per provider; existing Go tests unchanged.
+- `docs/LANES.md`: a `cline-http` entry (provider `clinepass`, family `glm`, model
+  `z-ai/glm-5.3-flash`, kind `go_http`, categories `independent_review`, `pure_function`, key
+  path only) and the plan-coverage note above.
+- Size: small–medium.
