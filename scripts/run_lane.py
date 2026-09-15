@@ -414,6 +414,9 @@ def main(argv=None):
     p.add_argument(
         "--resume", action="store_true", help="keep an existing packet branch; gates decide"
     )
+    p.add_argument(
+        "--cline-key-file", default=None, help="0600 file holding the Cline API key (adapter cline)"
+    )
     p.add_argument("--python", required=True, help="interpreter with the package's dependencies")
     p.add_argument("--packets-root", default="~/.grid-workspaces/packets")
     p.add_argument(
