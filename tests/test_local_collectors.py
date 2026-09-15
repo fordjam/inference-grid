@@ -12,7 +12,10 @@ import io
 import json
 import os
 import plistlib
+import signal
 import tempfile
+import threading
+import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -50,6 +53,18 @@ def iso_s(ts):
 
 def raise_(exc):
     return lambda *a, **k: (_ for _ in ()).throw(exc)
+
+
+def raise_exit(code):
+    raise SystemExit(code)
+
+
+def with_drain_handlers(test, drain):
+    """Real SIGTERM/SIGINT handlers for the process, restored after the test."""
+    previous = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
+    tick_boards.install_drain(drain)
+    test.addCleanup(signal.signal, signal.SIGTERM, previous[0])
+    test.addCleanup(signal.signal, signal.SIGINT, previous[1])
 
 
 class _TmpDir:
@@ -600,6 +615,119 @@ class TickBoardsTests(unittest.TestCase):
         self.assertEqual(tick_boards.count_ready(str(tmp.path)), 1)
         self.assertEqual(tick_boards.count_ready(None), 0)
 
+    def test_a_signal_lets_the_tick_finish_then_ends_the_loop(self):
+        tmp = self.enterContext(_TmpDir())
+        state = tmp.path / "tick-boards.draining"
+        drain = tick_boards.Drain(state)
+        with_drain_handlers(self, drain)
+        events = []
+        started = threading.Event()
+        finish = threading.Event()
+
+        def tick(board):
+            events.append("tick:" + board)
+            started.set()
+            self.assertTrue(finish.wait(5))
+            return 0
+
+        def send():
+            self.assertTrue(started.wait(5))
+            os.kill(os.getpid(), signal.SIGTERM)
+            finish.set()
+
+        sender = threading.Thread(target=send)
+        sender.start()
+        tick_boards.run(
+            ["a", "b"],
+            deadline=time.time() + 30,
+            prepare=lambda: None,
+            tick=tick,
+            sleep=lambda seconds: events.append("sleep"),
+            clock=time.time,
+            drain=drain,
+        )
+        sender.join(5)
+        self.assertEqual(events, ["tick:a"])
+        self.assertTrue(drain.draining)
+        self.assertEqual(state.read_text(), "draining\n")
+
+    def test_a_second_signal_ends_the_tick_at_once(self):
+        tmp = self.enterContext(_TmpDir())
+        drain = tick_boards.Drain(tmp.path / "tick-boards.draining", exit=raise_exit)
+        with_drain_handlers(self, drain)
+        events = []
+        started = threading.Event()
+
+        def tick(board):
+            events.append("tick:" + board)
+            started.set()
+            time.sleep(5)
+            events.append("finished")
+
+        def send():
+            self.assertTrue(started.wait(5))
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        sender = threading.Thread(target=send)
+        sender.start()
+        with self.assertRaises(SystemExit) as caught:
+            tick_boards.run(
+                ["a"],
+                deadline=time.time() + 30,
+                prepare=lambda: None,
+                tick=tick,
+                sleep=lambda seconds: None,
+                clock=time.time,
+                drain=drain,
+            )
+        sender.join(5)
+        self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+        self.assertEqual(events, ["tick:a"])
+
+
+class DrainTests(unittest.TestCase):
+    def test_first_signal_starts_the_drain_and_writes_the_state_file(self):
+        tmp = self.enterContext(_TmpDir())
+        state = tmp.path / "tick-boards.draining"
+        drain = tick_boards.Drain(state, clock=lambda: 100.0)
+        drain.on_signal(signal.SIGTERM, None)
+        self.assertTrue(drain.draining)
+        self.assertEqual(drain.since, 100.0)
+        self.assertEqual(state.read_text(), "draining\n")
+
+    def test_second_signal_within_the_grace_exits_at_once(self):
+        tmp = self.enterContext(_TmpDir())
+        now = [100.0]
+        exits = []
+        drain = tick_boards.Drain(tmp.path / "s", clock=lambda: now[0], exit=exits.append)
+        drain.on_signal(signal.SIGTERM, None)
+        now[0] += 10
+        drain.on_signal(signal.SIGINT, None)
+        self.assertEqual(exits, [128 + signal.SIGINT])
+        self.assertTrue(drain.draining)
+
+    def test_second_signal_after_the_grace_keeps_draining(self):
+        tmp = self.enterContext(_TmpDir())
+        now = [100.0]
+        exits = []
+        drain = tick_boards.Drain(tmp.path / "s", clock=lambda: now[0], exit=exits.append)
+        drain.on_signal(signal.SIGTERM, None)
+        now[0] += tick_boards.DRAIN_GRACE_SECONDS + 1
+        drain.on_signal(signal.SIGTERM, None)
+        self.assertEqual(exits, [])
+        self.assertTrue(drain.draining)
+
+    def test_clear_removes_the_marker_and_tolerates_its_absence(self):
+        tmp = self.enterContext(_TmpDir())
+        state = tmp.path / "s"
+        drain = tick_boards.Drain(state)
+        drain.clear()
+        state.write_text("draining\n")
+        drain.clear()
+        self.assertFalse(state.exists())
+
 
 class CalibrationTriggerTests(unittest.TestCase):
     def test_due_when_never_scored_or_past_the_window(self):
@@ -791,13 +919,23 @@ class InstallTests(unittest.TestCase):
             "/usr/bin/python3",
             "/x/capacity_loop.py",
             "/x/loop.log",
+            3660,
         )
         self.assertIn("<string>com.inference-grid.capacity-loop</string>", text)
         self.assertIn("<string>/usr/bin/python3</string>", text)
         self.assertIn("<string>/x/capacity_loop.py</string>", text)
         self.assertIn("<key>KeepAlive</key>", text)
         self.assertIn("<key>RunAtLoad</key>", text)
+        self.assertIn("<key>ExitTimeOut</key>", text)
+        self.assertIn("<integer>3660</integer>", text)
         self.assertEqual(text.count("<string>/x/loop.log</string>"), 2)
+
+    def test_exit_timeout_is_the_longest_wall_clock_plus_a_minute(self):
+        lanes = {"lanes": {"a": {"wall_seconds": 600}, "b": {"wall_seconds": 3600}}}
+        self.assertEqual(installer.exit_timeout(lanes), 3660)
+        self.assertEqual(installer.exit_timeout({"lanes": {"a": {"wall_seconds": 900}}}), 960)
+        self.assertEqual(installer.exit_timeout(), 3660)
+        self.assertEqual(installer.exit_timeout({"lanes": {"a": {"wall_seconds": "900"}}}), 3660)
 
     def test_main_writes_the_plist_and_prints_the_bootstrap_command(self):
         tmp = self.enterContext(_TmpDir())
@@ -843,7 +981,27 @@ class InstallTests(unittest.TestCase):
             self.assertIs(data["KeepAlive"], True)
             self.assertIs(data["RunAtLoad"], True)
             self.assertEqual(data["ProcessType"], "Interactive")
+            self.assertEqual(data["ExitTimeOut"], installer.exit_timeout())
             self.assertIn(f"launchctl bootstrap gui/{os.getuid()} {plist}", out.getvalue())
+
+    def test_lanes_file_sets_the_rendered_exit_timeout(self):
+        tmp = self.enterContext(_TmpDir())
+        lanes = tmp.path / "lanes.json"
+        lanes.write_text(json.dumps({"lanes": {"a": {"wall_seconds": 600}}}))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            installer.main(
+                [
+                    "--out-dir",
+                    str(tmp.path / "out"),
+                    "--python",
+                    "/usr/bin/python3",
+                    "--lanes",
+                    str(lanes),
+                ]
+            )
+        plist = tmp.path / "out" / "com.inference-grid.tick-boards.plist"
+        self.assertEqual(plistlib.loads(plist.read_bytes())["ExitTimeOut"], 660)
 
     def test_no_rendered_plist_carries_a_start_interval(self):
         tmp = self.enterContext(_TmpDir())
