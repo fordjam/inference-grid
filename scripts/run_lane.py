@@ -201,7 +201,12 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
     )
     if args.adapter == "cline":
         env["CLINE_API_KEY"] = cline_key
-    gates = gates_for(args.python, f"origin/{args.base}", trailer_for(args.model))
+    gates = gates_for(
+        args.python,
+        f"origin/{args.base}",
+        trailer_for(args.model),
+        str(Path(args.packets_root).expanduser()),
+    )
     print(f"[{args.lane}] {packet_id} → {branch} (attempt {attempt_dir})", flush=True)
     if resuming:
         (attempt_dir / "gates-0").mkdir(exist_ok=True)
