@@ -306,8 +306,12 @@ def land(
         )
 
     if dry_run:
+        # The same scratch root as a landing: a project's own test guards may treat
+        # the OS temp root specially (monarch's isolation guard allows it wholesale),
+        # so a probe under $TMPDIR would not report what the landing will see.
+        land_dir = Path(packets_root) / task_id / "land" if packets_root is not None else None
         try:
-            probe = verify_merge(project_root, branch, base, gates)
+            probe = verify_merge(project_root, branch, base, gates, work_dir=land_dir)
         except Exception as exc:
             return _report(
                 task_id, base, branch, reason="verify_merge: " + str(exc)[:200], dry_run=True

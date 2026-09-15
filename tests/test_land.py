@@ -281,10 +281,23 @@ def test_a_live_lock_serializes_and_a_stale_one_is_stolen(world, tmp_path):
     assert not lock.exists()
 
 
-def test_dry_run_reports_without_touching_anything(world):
+def test_dry_run_reports_without_touching_anything(world, monkeypatch):
     world_ = world
     before = _base_head(world_)
+    # The probe runs under the packets root, as the landing does, never under $TMPDIR:
+    # a project's test guards may treat the temp root differently from a real path.
+    from inference_grid.board import land as land_module
+
+    seen = {}
+    real = land_module.verify_merge
+
+    def spy(*args, **kw):
+        seen["work_dir"] = kw.get("work_dir")
+        return real(*args, **kw)
+
+    monkeypatch.setattr(land_module, "verify_merge", spy)
     report = _land(world_, dry_run=True)
+    assert seen["work_dir"] == world_["packets"] / "t1" / "land"
     assert report["dry_run"] is True and report["would_land"] is True
     assert report["how"] == "ff" and report["landed"] is False
     assert _base_head(world_) == before
