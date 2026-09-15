@@ -519,6 +519,7 @@ def test_record_true_without_a_ledger_refuses(tmp_path):
 
 
 CORPUS_V1 = Path(__file__).resolve().parents[1] / "calibration" / "example"
+PRIVATE_CORPUS = Path.home() / ".config/inference-grid/calibration/corpus-v1"
 
 
 def test_the_example_corpus_loads_and_authors_its_tasks(tmp_path):
@@ -527,19 +528,9 @@ def test_the_example_corpus_loads_and_authors_its_tasks(tmp_path):
     # The shipped corpus is a four-case example (two clean, two with a planted defect); the
     # operator's own corpus lives outside the repository and is not published.
     cases = load_corpus(CORPUS_V1)
-    assert [c["case"] for c in cases] == [
-        "clean-normalize",
-        "dangling-pin",
-        "mutant-classified-invalid",
-        "sum-drops-last",
-    ]
+    assert [c["case"] for c in cases] == ["clean-normalize", "sum-drops-last"]
     clean = {c["case"]: c["answer"]["clean"] for c in cases}
-    assert clean == {
-        "clean-normalize": True,
-        "dangling-pin": False,
-        "mutant-classified-invalid": True,
-        "sum-drops-last": False,
-    }
+    assert clean == {"clean-normalize": True, "sum-drops-last": False}
     board, project = board_and_project(tmp_path)
     created = calibration.author_calibration(board, project, CORPUS_V1, ["go"], "seed-v1")
     assert [t["id"] for t in created["tasks"]] == [f"calib-seed-v1-{c['case']}" for c in cases]
@@ -549,12 +540,16 @@ def test_the_example_corpus_loads_and_authors_its_tasks(tmp_path):
         assert all("answer" not in p for p in task["inputs"])
 
 
-def test_the_two_new_example_cases_load_and_author(tmp_path):
+@pytest.mark.skipif(
+    not (Path.home() / ".config/inference-grid/calibration/corpus-v1/dangling-pin").is_dir(),
+    reason="the operator's private corpus is not on this machine",
+)
+def test_the_two_real_defect_cases_load_and_author(tmp_path):
     # dangling-pin: the diff pins a commit the branch cannot reach, and the answer key
     # names the file and demands the finding say so. mutant-classified-invalid: the
     # classifier reads as if it swallows a KeyError, but the un-tampered path returns the
     # row, so a correct reviewer approves (clean).
-    cases = {c["case"]: c for c in load_corpus(CORPUS_V1)}
+    cases = {c["case"]: c for c in load_corpus(PRIVATE_CORPUS)}
     pin = cases["dangling-pin"]
     assert pin["answer"]["clean"] is False
     defect = pin["answer"]["defects"][0]
@@ -563,7 +558,7 @@ def test_the_two_new_example_cases_load_and_author(tmp_path):
     assert cases["mutant-classified-invalid"]["answer"] == {"defects": [], "clean": True}
 
     board, project = board_and_project(tmp_path)
-    created = calibration.author_calibration(board, project, CORPUS_V1, ["go"], "new-v1")
+    created = calibration.author_calibration(board, project, PRIVATE_CORPUS, ["go"], "new-v1")
     by_id = {t["id"]: t for t in created["tasks"]}
     assert "calib-new-v1-dangling-pin" in by_id
     assert "calib-new-v1-mutant-classified-invalid" in by_id
@@ -610,13 +605,7 @@ def test_calibrate_round_trips_through_main(tmp_path, monkeypatch):
     )
     payload = json.loads(out)
     assert [t["id"] for t in payload["tasks"]] == [
-        f"calib-cli-v1-{c}"
-        for c in (
-            "clean-normalize",
-            "dangling-pin",
-            "mutant-classified-invalid",
-            "sum-drops-last",
-        )
+        f"calib-cli-v1-{c}" for c in ("clean-normalize", "sum-drops-last")
     ]
     assert (board / "calibration" / "cli-v1" / "manifest.json").is_file()
 

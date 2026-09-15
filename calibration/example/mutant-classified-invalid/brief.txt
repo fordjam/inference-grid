@@ -1,3 +1,0 @@
-Review the new mutation harness. It classifies each mutant as killed, survived or
-invalid, and the score is the fraction killed; check the classifier against the paths it
-actually runs, not against how its rules read in isolation.

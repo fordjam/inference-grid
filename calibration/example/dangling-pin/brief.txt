@@ -1,3 +1,0 @@
-Review the new nightly export script. It reads its dataset from a commit pinned in the
-source, so the export is reproducible; check that the pin is something a clone of this
-branch can actually resolve.
