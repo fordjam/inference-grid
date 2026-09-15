@@ -19,7 +19,7 @@
   "thinking_tokens": 6000
  },
  "state": "blocked",
- "blocked_reason": "assigned to the interactive Z.ai session 2026-09-15 (operator decision); not for board dispatch",
+ "blocked_reason": "git commit -q -m land: merge packet/packet-i1 into glm/work: ",
  "spec": {
   "brief": "grid/briefs/packet-i1.txt",
   "packet_id": "I1",
