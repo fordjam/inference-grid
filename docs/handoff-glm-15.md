@@ -160,3 +160,26 @@ in the verdict.
   `z-ai/glm-5.3-flash`, kind `go_http`, categories `independent_review`, `pure_function`, key
   path only) and the plan-coverage note above.
 - Size: small–medium.
+
+## Phase H — the GOAT and Cline accounts admit work
+
+#### H1. `board_prepare.py` configures `goat-account` and `cline` from their observations
+`docs/LANES.md` ("board-prepare", from brief 14 C1) describes it; `deployments/local/board_prepare.py`
+does not do it yet, so the ledger's `goat-account` reading is from 2026-09-12 and `cline`
+has no windows — neither lane can be admitted. Implement exactly what the paragraph says:
+- `goat-observation.json` (`collect_goat.py`): windows `five_hour`, `weekly`, `monthly` as
+  `used_percent`; caps 14 / 35 / 70 credits; remaining = cap × (100 − used) / 100;
+  `configure_account("goat-account", 1, remaining, observed + 900, [<models the lanes name>],
+  [<lane ids with provider goat>], observed_at=observed)`; a lane record per goat lane with
+  `used_percent_max`, `admission_limit_percent` 80, `quota_freshness_seconds` 900.
+- `cline-observation.json` (`collect_cline.py`): the same three windows as percentages with no
+  published unit caps — use a 100-unit scale per window (remaining = 100 − used), `ok` only
+  when all three windows answered; account id `cline`.
+- Lane ids and models come from the config (`goat_lanes`, `cline_lanes`: lists of
+  `{lane, model}`), never from `lanes.json`; absent config → those accounts are left alone.
+- Also port the same into the operator's running copy? No — the operator cuts over to this
+  file; say so in the report.
+- Tests (`tests/test_local_board_prepare.py` or extend the existing): fixture observations →
+  the exact `configure_account` and `record_lane` calls through a fake ledger; a stale or
+  non-ok observation leaves the account untouched and records the lane `stale`.
+- Size: small.
