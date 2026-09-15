@@ -63,6 +63,51 @@ def slug(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40]
 
 
+UNION_FILES = ("docs/CONTRIBUTIONS.md", "docs/LANES.md")
+
+
+class landing_lock:
+    """A directory lock (mkdir is atomic) held while a branch lands on the base."""
+
+    def __init__(self, path: Path, wait_s: int = 900):
+        self.path, self.wait_s = path, wait_s
+
+    def __enter__(self):
+        deadline = time.monotonic() + self.wait_s
+        while True:
+            try:
+                self.path.mkdir(parents=True, exist_ok=False)
+                return self
+            except FileExistsError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"landing lock held too long: {self.path}")
+                time.sleep(3)
+
+    def __exit__(self, *exc):
+        try:
+            self.path.rmdir()
+        except OSError:
+            pass
+
+
+def union_resolve(wt: Path, files) -> bool:
+    """Resolve conflicts only in `files`, keeping both sides; False if any other file conflicts."""
+    conflicted = git(wt, "diff", "--name-only", "--diff-filter=U").split()
+    if not conflicted or any(f not in files for f in conflicted):
+        return False
+    for f in conflicted:
+        path = wt / f
+        text = re.sub(
+            r"<<<<<<< [^\n]*\n(.*?)=======\n(.*?)>>>>>>> [^\n]*\n",
+            lambda m: m.group(1) + m.group(2),
+            path.read_text(),
+            flags=re.S,
+        )
+        path.write_text(text)
+        git(wt, "add", f)
+    return True
+
+
 def base_worktree(repo: Path, base: str):
     """The worktree that has `base` checked out, if any."""
     out = git(repo, "worktree", "list", "--porcelain")
@@ -258,13 +303,27 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
             if not merge_wt.exists():
                 git(repo, "worktree", "add", "-q", str(merge_wt), args.base)
             wt = merge_wt
-        git(wt, "checkout", "-q", args.base)
-        try:
-            git(wt, "merge", "-q", "--ff-only", branch)
-            how = "fast-forwarded"
-        except RuntimeError:
-            git(wt, "merge", "--no-edit", branch)
-            how = "merged"
+        # Landing is serialized across lanes: one merge at a time into the base worktree.
+        with landing_lock(
+            Path(args.packets_root).expanduser() / f"landing-{args.base.replace('/', '-')}.lock"
+        ):
+            git(wt, "checkout", "-q", args.base)
+            try:
+                git(wt, "merge", "-q", "--ff-only", branch)
+                how = "fast-forwarded"
+            except RuntimeError:
+                try:
+                    git(wt, "merge", "--no-edit", branch)
+                    how = "merged"
+                except RuntimeError:
+                    # Independent packets each add a CONTRIBUTIONS row (and sometimes a LANES
+                    # paragraph) in the same place; keep both sides for those files only.
+                    if union_resolve(wt, UNION_FILES):
+                        git(wt, "-c", "core.editor=true", "commit", "-q", "--no-edit")
+                        how = "merged (union on " + ", ".join(UNION_FILES) + ")"
+                    else:
+                        git(wt, "merge", "--abort", check=False)
+                        raise
         note = f"{packet_id} {title}: gates green in {len(verdict['rounds'])} round(s); {how} onto {args.base}"
     else:
         note = f"{packet_id} {title}: {verdict.get('reason')}; branch {branch} at {head} left for the operator"
