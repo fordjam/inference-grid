@@ -1,14 +1,19 @@
 """Refresh the board ledger's accounts and lane records from live readings. No credentials.
 
-Reads the operator's Z.ai quota file and the go-live observation, and reconfigures the
-zai/zcode/go accounts plus their lane records. Paths come from the config (``database_url``,
-``zai_quota_path``, ``go_live_path``); the inference_grid package is expected installed in the
-interpreter that runs this (``package_src`` may point at a checkout when it is not).
+Reads the operator's Z.ai quota file, the go-live observation and the goat/cline quota
+observations, and reconfigures the zai/zcode/go/goat-account/cline accounts plus their lane
+records. The goat and cline lane ids and models come from the config (``goat_lanes`` /
+``cline_lanes``, lists of ``{lane, model}``); with either absent that account is left alone.
+Paths come from the config (``database_url``, ``zai_quota_path``, ``go_live_path``,
+``goat_observation_path``, ``cline_observation_path``); the inference_grid package is expected
+installed in the interpreter that runs this (``package_src`` may point at a checkout when it
+is not).
 """
 
 import json
 import datetime
 import sys
+import time
 from pathlib import Path
 
 from inference_grid.ledger import Ledger, Refused
@@ -26,6 +31,13 @@ ZAI_ATTESTED_VALID = 86400
 ZAI_PLAN = {"five_hour": 2000, "weekly": 10000}
 GO_WINDOW_UNITS = {"five_hour": 12, "weekly": 30, "monthly": 60}
 GO_VALID = 900
+# The GOAT plan's caps are 14 / 35 / 70 credits (five-hour / weekly / monthly, per
+# collect_goat.py); ClinePass publishes no unit caps, so its windows read against a
+# 100-unit scale per window. Both observations keep their value for 15 minutes.
+GOAT_WINDOW_UNITS = {"five_hour": 14, "weekly": 35, "monthly": 70}
+CLINE_WINDOW_UNITS = {"five_hour": 100, "weekly": 100, "monthly": 100}
+GOAT_VALID = 900
+CLINE_VALID = 900
 ADMISSION_LIMIT_PERCENT = 80
 
 
@@ -112,7 +124,84 @@ def configure(config, ledger):
     lanes["go-kimi"] = dict(go_lane, provider="go-kimi")
     for lane, record in lanes.items():
         print(lane, ledger.record_lane(lane, record)["state"])
+    configure_goat(config, ledger, now)
+    configure_cline(config, ledger, now)
     print("zcode window", flash_window(now))
+
+
+def _read_observation(config, key, default):
+    try:
+        return json.loads(Path(config.get(key, default)).read_text())
+    except OSError:
+        return None
+
+
+def configure_observation(config, ledger, account, obs, window_units, valid, lanes_config, now):
+    """One observation file -> configure_account plus a lane record per configured lane.
+
+    A missing, non-ok or older-than-``valid`` observation leaves the account untouched and
+    records every configured lane stale.
+    """
+    if not lanes_config:
+        return
+    lane_ids = [entry["lane"] for entry in lanes_config]
+    models = list(dict.fromkeys(entry["model"] for entry in lanes_config))
+    observed = _ts(obs["observed_at"]) if obs else None
+    used = {
+        w["id"]: w["used_percent"]
+        for w in (obs or {}).get("windows", [])
+        if w.get("id") in window_units
+        and isinstance(w["used_percent"], (int, float))
+        and not isinstance(w["used_percent"], bool)
+    }
+    ok = obs is not None and obs.get("status") == "ok" and used
+    if ok and observed + valid > now:
+        remaining = {w: window_units[w] * (100 - used[w]) / 100 for w in used}
+        try:
+            ledger.configure_account(
+                account, 1, remaining, observed + valid, models, lane_ids, observed_at=observed
+            )
+        except Refused as exc:
+            print(account, exc)
+    record = {
+        "auth": "ok",
+        "quota_observed_at": observed if ok else None,
+        "quota_freshness_seconds": valid,
+        "used_percent_max": float(max(used.values())) if used else None,
+        "admission_limit_percent": ADMISSION_LIMIT_PERCENT,
+        "cooldown_until": None,
+        "qualification": "qualified",
+        "blocked_until": None,
+        "blocker": None,
+    }
+    for lane in lane_ids:
+        print(lane, ledger.record_lane(lane, dict(record, provider=lane))["state"])
+
+
+def configure_goat(config, ledger, now=None):
+    configure_observation(
+        config,
+        ledger,
+        "goat-account",
+        _read_observation(config, "goat_observation_path", DEFAULT_DIR / "goat-observation.json"),
+        GOAT_WINDOW_UNITS,
+        GOAT_VALID,
+        config.get("goat_lanes") or [],
+        time.time() if now is None else now,
+    )
+
+
+def configure_cline(config, ledger, now=None):
+    configure_observation(
+        config,
+        ledger,
+        "cline",
+        _read_observation(config, "cline_observation_path", DEFAULT_DIR / "cline-observation.json"),
+        CLINE_WINDOW_UNITS,
+        CLINE_VALID,
+        config.get("cline_lanes") or [],
+        time.time() if now is None else now,
+    )
 
 
 def main(argv=None):
