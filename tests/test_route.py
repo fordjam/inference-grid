@@ -3,10 +3,10 @@ import json
 import time
 import unittest
 
-from test_board_runner import make_task, ready_record, world  # noqa: F401 -- binds the world fixture here
+from test_board_runner import make_review_task, make_task, ready_record, world  # noqa: F401 -- binds the world fixture here
 
 from inference_grid.board import runner
-from inference_grid.lanes.route import blended_row, max_tokens_cap, route
+from inference_grid.lanes.route import blended_row, lane_tier, max_tokens_cap, route, wanted_tier
 
 LANES = {
     "go": {
@@ -187,6 +187,127 @@ class BudgetTests(unittest.TestCase):
             route(task(), LANES, {}, [], [], 0, 0)
 
 
+class TierTests(unittest.TestCase):
+    """The lane record's tier, read by route (J2): plan | build | review."""
+
+    # A lane that declares another tier than the task asks for loses even when its
+    # evidence is the better of the two: 8/8 acceptance for go against nothing for kimi.
+    REVIEW_SCORECARD = [
+        {
+            "family": "glm",
+            "model": "glm-5.3-flash",
+            "category": "independent_review",
+            "attempts": 8,
+            "accepted": 8,
+        }
+    ]
+
+    def test_the_lane_of_the_task_tier_wins_and_the_other_is_dropped(self):
+        lanes = {
+            "go": dict(
+                LANES["go"], categories=["pure_function", "independent_review"], tier="build"
+            ),
+            "kimi": dict(LANES["kimi"], tier="review"),
+        }
+        ready = {k: {"state": "ready"} for k in lanes}
+        out = route(
+            task(category="independent_review", lanes=["go", "kimi"]),
+            lanes,
+            ready,
+            self.REVIEW_SCORECARD,
+            [],
+            0,
+            0,
+        )
+        # go's Laplace 9/10 would have won the selection; the task's tier decides first,
+        # so the only offered lane is the review one, at its default score.
+        self.assertEqual(
+            (out["lane"], out["score"], out["candidates"]),
+            ("kimi", 0.5, [{"lane": "kimi", "cap": 16000}]),
+        )
+        self.assertEqual(out["tier"], "review")
+        self.assertEqual(
+            [(d["lane"], d["reason"], d["detail"]) for d in out["dropped"]],
+            [("go", "tier_mismatch", "lane tier build, task wants review")],
+        )
+
+    def test_ties_within_the_task_tier_break_on_the_existing_score(self):
+        # Both lanes declare review: the tier filter has nothing to drop, and the
+        # evidence decides — go's 9/10 over kimi's default 1/2.
+        lanes = {
+            "go": dict(
+                LANES["go"], categories=["pure_function", "independent_review"], tier="review"
+            ),
+            "kimi": dict(LANES["kimi"], tier="review"),
+            "zcode": dict(LANES["zcode"], categories=["pure_function"], tier="build"),
+        }
+        ready = {k: {"state": "ready"} for k in lanes}
+        out = route(
+            task(category="independent_review", lanes=["go", "kimi"]),
+            lanes,
+            ready,
+            self.REVIEW_SCORECARD,
+            [],
+            0,
+            0,
+        )
+        self.assertEqual((out["lane"], out["score"], out["dropped"]), ("go", 0.9, []))
+
+    def test_a_plan_task_prefers_the_lane_marked_tier_plan(self):
+        lanes = {
+            "sota": dict(LANES["go"], categories=["plan"], tier="plan"),
+            "go": dict(LANES["go"], categories=["plan"], tier="build"),
+        }
+        ready = {k: {"state": "ready"} for k in lanes}
+        out = route(task(category="plan", lanes=["sota", "go"]), lanes, ready, [], [], 0, 0)
+        self.assertEqual(
+            (out["lane"], out["tier"], [d["reason"] for d in out["dropped"]]),
+            ("sota", "plan", ["tier_mismatch"]),
+        )
+
+    def test_an_absent_or_non_string_tier_is_build(self):
+        # The packaged lanes.json key set cannot carry the key, so an absent tier is the
+        # workhorse default — the same read runner.lane_view performs.
+        for lane_dict in (
+            LANES["go"],
+            dict(LANES["go"], tier=None),
+            dict(LANES["go"], tier=1),
+        ):
+            self.assertEqual(lane_tier(lane_dict), "build")
+        self.assertEqual(lane_tier(dict(LANES["go"], tier="review")), "review")
+        # ... and the category's tier: plan → plan, review → review, else build.
+        self.assertEqual(
+            [wanted_tier(c) for c in ("plan", "independent_review", "packet", "canary", None)],
+            ["plan", "review", "build", "build", "build"],
+        )
+
+    def test_a_build_task_drops_a_review_tier_lane(self):
+        lanes = {
+            "go": dict(LANES["go"], tier="review"),
+            "zcode": LANES["zcode"],  # absent tier → build
+        }
+        ready = {k: {"state": "ready"} for k in lanes}
+        out = route(task(lanes=["go", "zcode"]), lanes, ready, [], [], 0, 0)
+        self.assertEqual(
+            (out["lane"], out["candidates"]), ("zcode", [{"lane": "zcode", "cap": 16000}])
+        )
+        self.assertEqual(out["dropped"][0]["reason"], "tier_mismatch")
+        self.assertEqual(out["tier"], "build")
+
+    def test_no_lane_of_the_task_tier_leaves_every_lane_offered(self):
+        # A board whose records predate the key, or a category with no SOTA lane yet:
+        # the filter never empties the offer, so routing is what it always was.
+        lanes = {"go": LANES["go"], "kimi": LANES["kimi"]}
+        ready = {k: {"state": "ready"} for k in lanes}
+        out = route(
+            task(category="independent_review", lanes=["go", "kimi"]), lanes, ready, [], [], 0, 0
+        )
+        self.assertEqual(
+            (out["lane"], out["dropped"], out["tier"]),
+            ("kimi", [], "review"),
+        )
+
+
 class BlendTests(unittest.TestCase):
     SCORECARD = [
         {
@@ -310,6 +431,53 @@ def test_the_plan_row_carries_the_cap_of_each_candidate(request):
     # The offered candidate carries the cap it would run under — the dry run shows the
     # request size the lane will be asked for before anything is dispatched.
     assert entry["candidates"] == [{"lane": "go", "cap": 16000}]
+
+
+def test_the_dry_run_explains_a_tier_mismatch(request):
+    w = request.getfixturevalue("world")
+    # A review task naming a workhorse and a SOTA lane: the build lane is not offered for
+    # it, and the plan row names the tier each declares.
+    (w["board"] / "review-tier.json").write_text(
+        json.dumps(
+            dict(
+                make_review_task("review-tier", "brief-approve.txt", author_family="glm"),
+                lanes=["go", "sota"],
+            )
+        )
+    )
+    lanes = dict(
+        w["lanes"],
+        sota=dict(w["lanes"]["go"], family="kimi", model="kimi-k3", tier="review"),
+    )
+    now = time.time()
+    # The review lane's model has its evidence rows (the fixture seeds them); the account
+    # only has to be configured and named for readiness.
+    w["ledger"].configure_account(
+        "sota-acct",
+        1,
+        {"five_hour": 10, "weekly": 20},
+        now + 600,
+        ["kimi-k3"],
+        ["sota-alias"],
+    )
+    w["ledger"].record_lane("go", ready_record(now))
+    w["ledger"].record_lane("sota", dict(ready_record(now), provider="sota"))
+    plan = runner.tick(
+        w["board"],
+        w["project"],
+        w["ledger"],
+        lanes,
+        w["lanes_path"],
+        {"go": w["account"], "sota": "sota-alias"},
+        w["packets"],
+        now=now,
+        dry_run=True,
+    )
+    entry = next(row for row in plan["plan"] if row["task"] == "review-tier")
+    assert (entry["lane"], entry["candidates"]) == ("sota", [{"lane": "sota", "cap": 16000}])
+    assert entry["dropped"] == [
+        {"lane": "go", "reason": "tier_mismatch", "detail": "lane tier build, task wants review"}
+    ]
 
 
 if __name__ == "__main__":

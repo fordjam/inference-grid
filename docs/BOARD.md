@@ -38,9 +38,20 @@ Nothing merges automatically. Held attempts wait for `resolve` with evidence, wi
 
 ## Lane kinds
 
+Lane records carry a `tier` — `plan`, `build` or `review` (J2). The policy is one sentence: SOTA
+models for plan and review, workhorses for build. `route` asks for the tier the task's category
+implies (`plan` → plan, `independent_review` → review, everything else → build) and, among the
+lanes that fit the packet's size, offers only the lanes declaring it; the others appear in the plan
+row's `dropped` as `tier_mismatch`, naming the tier each declares, so `board-tick --dry-run` says
+why a lane sat out. The filter never empties the offer — with no lane of the asked tier offered,
+every fitting lane stays in play, which is how a board whose records predate the key routes as it
+always did — and an absent key is `build`.
+
 First-party families (`claude`, `openai`) are `explicit_only` in the runner's lane view: a task's `lanes` must name them for them to be selected, so first-party review lanes run only where the author chose them.
 
 `go_http` (dedicated subscription endpoint, JSON schema gate), `goat_cli` (`--mod` session effort, `classify_goat`), `cline_cli` (write sandbox, snapshot supervision, `classify_cline`), `claude_headless` (Anthropic-compatible base URL, thinking budget), `zcode_cli` (bundled CLI, session-DB evidence, `~/.zcode` write allowance). Configuration lives in a private `lanes.json` validated by `inference_grid.lanes.config`.
+
+`tier` is read from the lane view, not from `lanes.json` yet: the config validator's fixed key set cannot carry the key, so the runner's `lane_view` and `route` both default an absent one to `build` (the one-line coordinator edit is in the J2 report, `docs/reports/packet-j2.md`).
 
 The `go_http` request shapes reasoning explicitly, since kimi-k3 thought its whole output away at the endpoint's default effort: `lanes/go.py::REASONING_EFFORT` maps each model id to the `reasoning_effort` values its documented endpoint schema accepts (`kimi-k3` → `low`, `high`, `max`; the endpoint default is `max`), and `lanes/go.py::EFFORT_TIERS` is the coordinator's policy mapping the task's `thinking_tokens` to a tier — absent or at most 4 000 → `low`, at most 12 000 → `high`, beyond → `max` — so board review tasks (6 000) ask for `high`. The token count also sizes `max_tokens` at `3 × thinking_tokens + 4 000` (`lanes/go.py::REASONING_HEADROOM`): the endpoint bounds reasoning only by effort, never by count — on 2026-09-14 `high` reasoned 1.4–1.7× a 6 000 budget on 16–18 K-token review prompts, and a `thinking_tokens + 4 000` cap cut one review off mid-finding — so the cap guards spend rather than thinking. A model outside the map sends no effort field and the verdict records `reasoning_effort: unsupported` (plus `reasoning_budget: unsupported` when a thinking budget was requested); a `length` stop with no content is held as `reasoning_overrun` with both counts.
 
