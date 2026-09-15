@@ -18,8 +18,8 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "blocked",
- "blocked_reason": "git commit -q -m land: merge packet/packet-f3 into glm/work: ",
+ "state": "landed",
+ "blocked_reason": null,
  "spec": {
   "brief": "grid/briefs/packet-f3.txt",
   "packet_id": "F3",
@@ -83,5 +83,10 @@
   ],
   "base": "glm/work",
   "max_rounds": 3
+ },
+ "landed": {
+  "base_head": "369230c9a52c869e5a48c145fd837f1afb8803af",
+  "merge_commit": "a92bd567bcdaa11943ee15af98c1b138633bfe91",
+  "how": "merge"
  }
 }

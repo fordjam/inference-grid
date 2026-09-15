@@ -18,8 +18,8 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "blocked",
- "blocked_reason": "git commit -q -m land: merge packet/packet-i1 into glm/work: ",
+ "state": "landed",
+ "blocked_reason": null,
  "spec": {
   "brief": "grid/briefs/packet-i1.txt",
   "packet_id": "I1",
@@ -83,5 +83,10 @@
   ],
   "base": "glm/work",
   "max_rounds": 3
+ },
+ "landed": {
+  "base_head": "a92bd567bcdaa11943ee15af98c1b138633bfe91",
+  "merge_commit": "db9aef884dd1f699ab799dba67a72ea642b127c9",
+  "how": "merge"
  }
 }
