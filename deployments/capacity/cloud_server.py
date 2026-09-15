@@ -1,14 +1,12 @@
 """Authenticated snapshot dashboard; contains no native provider credentials."""
 
-import base64
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime
 import hashlib
 import hmac
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-import math
 import os
 from pathlib import Path
 import secrets
