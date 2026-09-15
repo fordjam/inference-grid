@@ -13,6 +13,10 @@ Usage (operator, from the coordinator's checkout):
       --brief docs/handoff-glm-14.md --packets A1 A2 --base glm/work \\
       --model z-ai/glm-5.3-flash --python ~/.local/share/inference-grid/venv/bin/python \\
       --packets-root ~/.grid-workspaces/packets --database sqlite:///.../board.sqlite
+
+Or, for several lanes at once, a job file (see inference_grid.lanes.job):
+
+  python scripts/run_lane.py --job lanes.json
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from inference_grid.lanes.brief import (  # noqa: E402
     trailer_for,
 )
 from inference_grid.lanes.gates import gates_for  # noqa: E402
+from inference_grid.lanes.job import JobError, run_job  # noqa: E402
 from inference_grid.lanes.packet import (  # noqa: E402
     ClineAdapter,
     CommandCodeAdapter,
@@ -358,11 +363,12 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--repo", required=True, help="coordinator's checkout (origin for the clone)")
-    p.add_argument("--clone", required=True, help="the lane's own clone; created if absent")
-    p.add_argument("--brief", required=True, help="brief path relative to the repo")
+    p.add_argument("--job", default=None, help="job file: repo, brief and one entry per lane")
+    p.add_argument("--repo", default=None, help="coordinator's checkout (origin for the clone)")
+    p.add_argument("--clone", default=None, help="the lane's own clone; created if absent")
+    p.add_argument("--brief", default=None, help="brief path relative to the repo")
     p.add_argument("--rules", default="docs/handoff-glm.md")
-    p.add_argument("--packets", nargs="+", required=True)
+    p.add_argument("--packets", nargs="+", default=None)
     p.add_argument("--base", default="glm/work")
     p.add_argument("--branch-prefix", default="glm")
     p.add_argument("--lane", default="glm")
@@ -374,7 +380,7 @@ def main(argv=None):
     p.add_argument(
         "--cline-key-file", default=None, help="0600 file holding the Cline API key (adapter cline)"
     )
-    p.add_argument("--python", required=True, help="interpreter with the package's dependencies")
+    p.add_argument("--python", default=None, help="interpreter with the package's dependencies")
     p.add_argument("--packets-root", default="~/.grid-workspaces/packets")
     p.add_argument(
         "--database", default=None, help="ledger URL; records each packet via `external`"
@@ -382,6 +388,18 @@ def main(argv=None):
     p.add_argument("--wall-seconds", type=int, default=5400)
     p.add_argument("--max-rounds", type=int, default=3)
     args = p.parse_args(argv)
+    single = ("repo", "clone", "brief", "packets", "python")
+    if args.job:
+        given = [n for n in single if getattr(args, n) is not None]
+        if given:
+            p.error("--job cannot be combined with " + ", ".join(f"--{n}" for n in given))
+        try:
+            return run_job(args.job, script=Path(__file__).resolve())
+        except JobError as exc:
+            p.error(str(exc))
+    missing = [n for n in single if getattr(args, n) is None]
+    if missing:
+        p.error("required without --job: " + ", ".join(f"--{n}" for n in missing))
     repo, clone = Path(args.repo).resolve(), Path(args.clone).expanduser().resolve()
     if not clone.exists():
         subprocess.run(["git", "clone", "-q", "--shared", str(repo), str(clone)], check=True)
