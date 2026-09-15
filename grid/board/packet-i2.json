@@ -18,7 +18,7 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
+ "state": "dispatched",
  "blocked_reason": null,
  "spec": {
   "brief": "grid/briefs/packet-i2.txt",

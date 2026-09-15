@@ -1,16 +1,16 @@
 {
- "id": "packet-i3",
+ "id": "packet-j3",
  "category": "packet",
- "brief": "grid/briefs/packet-i3.txt",
+ "brief": "grid/briefs/packet-j3.txt",
  "inputs": [
-  "grid/briefs/packet-i3.txt"
+  "grid/briefs/packet-j3.txt"
  ],
  "tests": [],
  "artifacts": [
-  "docs/reports/brief-16-i3.md"
+  "docs/reports/brief-17-j3.md"
  ],
  "lanes": [
-  "cline-deepseek"
+  "goat"
  ],
  "author_family": null,
  "budget": {
@@ -21,8 +21,10 @@
  "state": "ready",
  "blocked_reason": null,
  "spec": {
-  "brief": "grid/briefs/packet-i3.txt",
-  "packet_id": "I3",
+  "brief": "grid/briefs/packet-j3.txt",
+  "packet_id": "J3",
+  "base": "glm/work",
+  "max_rounds": 3,
   "gates": [
    {
     "name": "pytest",
@@ -80,8 +82,6 @@
      "PYTHONPATH": "src"
     }
    }
-  ],
-  "base": "glm/work",
-  "max_rounds": 3
+  ]
  }
 }

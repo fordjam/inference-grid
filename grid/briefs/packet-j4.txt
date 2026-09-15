@@ -1,0 +1,45 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### J4. Failover on failure, not race
+When a `packet` task settles `held` or `blocked` with reason `rounds_exhausted`,
+`agent_stopped_early` or a transport refusal, and the task carries `"failover": true`
+(default true for packet tasks; the operator can turn it off), the runner authors **one**
+retry task on a lane of a *different family* that declares the category, with
+`failover_from: <task id>` recorded on both, the predecessor marked `superseded:` in the
+existing way, and the ledger event naming the family swap. No second attempt is ever
+authored on the same family by this path, and a failover task never fails over again.
+- Tests: a held packet on `deepseek` re-appears once on `glm`; the reverse; no third; a
+  task with `failover: false` stays put; the dry run reports the pending failover.
+- Size: small–medium. Why: the hedge race-N buys, at the cost of one extra attempt only
+  when something already failed.
+
+---
