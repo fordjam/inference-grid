@@ -37,7 +37,7 @@ overhead, so small jobs are wasted on it.
 
 ```json
 "cline": {
-  "provider": "cline", "family": "qwen", "model": "cline-pass/qwen3.8-max",
+  "provider": "cline", "family": "kimi", "model": "cline-pass/kimi-k3",
   "kind": "cline_cli", "executable": "/path/from/operator/cline",
   "categories": ["pure_function", "independent_review"]
 }
@@ -46,6 +46,15 @@ overhead, so small jobs are wasted on it.
 Run only after the weekly reset (the account exhausts quickly); never give Cline size
 hints — a passing artifact was once deleted to chase a line count. The ledger seeds a
 `cline` alias placeholder on `init`; `configure_account` fills it in.
+
+The subscription's models live in their own id namespace: `cline-pass/<model>`
+(`cline-pass/kimi-k3`, `cline-pass/deepseek-v4.1-flash`, `cline-pass/qwen3.8-max`, …), listed
+under "Subscribed" by `cline auth`. A vendor id (`moonshotai/kimi-k3`) reaches the same model
+through pay-as-you-go credits and refuses with `insufficient_credits` when the balance is
+empty, whether called through the CLI or the HTTP API — the plan windows stay at 0% and the
+call never happens. Only the `cline-pass/` ids draw on the pass. The free tier
+(`z-ai/glm-5.3-flash` and a few others, separate from the pass quota) is what `cline-http`
+uses, with its own daily cap.
 
 macOS 27 note: the package's `bin/.cline` launcher is rewritten by Cline's own
 postinstall, which breaks its code signature — the kernel then SIGKILLs the binary and
