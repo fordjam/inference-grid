@@ -329,6 +329,12 @@ def dispatch_packet(ledger, lanes, lane_id, task, project_root, packet_dir, acco
         "manifest_sha256": digest({}),
         "artifacts": [{"path": branch, "sha256": commit_digest}],
         "verified_in_lane": bool(verdict.get("verified_in_lane")),
+        # The final round's gate results, so the review policy can read what the receipt
+        # claims was proved instead of trusting a single boolean.
+        "gates": [
+            {"name": r.get("name"), "ok": r.get("ok")}
+            for r in (verdict.get("rounds") or [{}])[-1].get("results") or []
+        ],
         "repairs": repairs,
         "branch": branch,
         "head": head,

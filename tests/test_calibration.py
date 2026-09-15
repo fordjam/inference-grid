@@ -524,12 +524,22 @@ CORPUS_V1 = Path(__file__).resolve().parents[1] / "calibration" / "example"
 def test_the_example_corpus_loads_and_authors_its_tasks(tmp_path):
     from inference_grid.board.task import validate_task
 
-    # The shipped corpus is a two-case example (one clean, one planted defect); the
+    # The shipped corpus is a four-case example (two clean, two with a planted defect); the
     # operator's own corpus lives outside the repository and is not published.
     cases = load_corpus(CORPUS_V1)
-    assert [c["case"] for c in cases] == ["clean-normalize", "sum-drops-last"]
+    assert [c["case"] for c in cases] == [
+        "clean-normalize",
+        "dangling-pin",
+        "mutant-classified-invalid",
+        "sum-drops-last",
+    ]
     clean = {c["case"]: c["answer"]["clean"] for c in cases}
-    assert clean == {"clean-normalize": True, "sum-drops-last": False}
+    assert clean == {
+        "clean-normalize": True,
+        "dangling-pin": False,
+        "mutant-classified-invalid": True,
+        "sum-drops-last": False,
+    }
     board, project = board_and_project(tmp_path)
     created = calibration.author_calibration(board, project, CORPUS_V1, ["go"], "seed-v1")
     assert [t["id"] for t in created["tasks"]] == [f"calib-seed-v1-{c['case']}" for c in cases]
@@ -537,6 +547,29 @@ def test_the_example_corpus_loads_and_authors_its_tasks(tmp_path):
         task = validate_task(json.loads((board / (entry["id"] + ".json")).read_text()))
         assert task["author_family"] == "calibration"
         assert all("answer" not in p for p in task["inputs"])
+
+
+def test_the_two_new_example_cases_load_and_author(tmp_path):
+    # dangling-pin: the diff pins a commit the branch cannot reach, and the answer key
+    # names the file and demands the finding say so. mutant-classified-invalid: the
+    # classifier reads as if it swallows a KeyError, but the un-tampered path returns the
+    # row, so a correct reviewer approves (clean).
+    cases = {c["case"]: c for c in load_corpus(CORPUS_V1)}
+    pin = cases["dangling-pin"]
+    assert pin["answer"]["clean"] is False
+    defect = pin["answer"]["defects"][0]
+    assert defect["file"] == "scripts/export.py" and "reachable" in defect["must_mention"]
+    assert [relative for relative, _ in pin["files"]] == ["scripts/export.py"]
+    assert cases["mutant-classified-invalid"]["answer"] == {"defects": [], "clean": True}
+
+    board, project = board_and_project(tmp_path)
+    created = calibration.author_calibration(board, project, CORPUS_V1, ["go"], "new-v1")
+    by_id = {t["id"]: t for t in created["tasks"]}
+    assert "calib-new-v1-dangling-pin" in by_id
+    assert "calib-new-v1-mutant-classified-invalid" in by_id
+    task = json.loads((board / "calib-new-v1-dangling-pin.json").read_text())
+    assert any("scripts/export.py" in path for path in task["inputs"])
+    assert all("answer" not in path for path in task["inputs"])
 
 
 def run_cli(monkeypatch, tmp_path, name, payload, database):
@@ -577,7 +610,13 @@ def test_calibrate_round_trips_through_main(tmp_path, monkeypatch):
     )
     payload = json.loads(out)
     assert [t["id"] for t in payload["tasks"]] == [
-        f"calib-cli-v1-{c}" for c in ("clean-normalize", "sum-drops-last")
+        f"calib-cli-v1-{c}"
+        for c in (
+            "clean-normalize",
+            "dangling-pin",
+            "mutant-classified-invalid",
+            "sum-drops-last",
+        )
     ]
     assert (board / "calibration" / "cli-v1" / "manifest.json").is_file()
 

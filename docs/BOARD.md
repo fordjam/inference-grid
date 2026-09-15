@@ -88,7 +88,7 @@ tasks like any other.
 
 `board-new --json {task: …}` writes one validated task file with its empty brief (handoff-1 B4); `{retry, change, budget?, lanes?, author_family?}` authors the authorised retry — a new task with a `superseded:` predecessor, the source link moved for board-work reviews (handoff-5/7).
 
-`{review_branch: {repo, base, tip}}` authors independent_review task(s) from a git range, staging the changed files plus a generated `diff.patch` under `grid/board/review/<task-id>/`. The keys inside `review_branch` are exactly `repo`, `base`, `tip` — anything else is refused. The top-level knobs are:
+`{review_branch: {repo, base, tip, scope?}}` authors independent_review task(s) from a git range, staging the changed files plus a generated `diff.patch` under `grid/board/review/<task-id>/`. The keys inside `review_branch` are exactly `repo`, `base`, `tip` and the optional `scope` — anything else is refused. `scope: "branch"` (see Review policy) stages the merged tree's diff instead of the commit range and requires a passed `verify_merge` task for the same branch. The top-level knobs are:
 
 | Knob | Meaning |
 | --- | --- |
@@ -98,12 +98,43 @@ tasks like any other.
 | `exclude_commits` | Sha prefixes to skip in a split, listed `excluded by operator` |
 | `lanes`, `budget` | The review task's lanes and budget (defaults `["go"]` and the review budget) |
 
+## Review policy
+
+Every passing work task gets one `independent_review` task by default. That is not free and
+it is not always informative: when the source attempt's receipt already proves the work —
+`verified_in_lane: true` **and** every declared gate passed — and the author family is not
+`claude`, the per-commit review is **waived** (`board/policy.py::review_needed`). Only that
+proof waives. A missing receipt, an unverified lane, a receipt that declares no gate
+results, any declared gate that did not pass, and a first-party author all keep the current
+path and author the review. A packet task whose lane could not verify itself also keeps the
+current path (no per-commit review; see Packet tasks), and the branch-scope review below is
+what reads such a branch as a whole.
+
+A waiver is never silent. It is recorded as the source task's review record at
+`<board>/review/<task-id>/review.json` (`{"review": {"waived": true, "reason": …}}`) and, in
+the ledger, as a `review_waived` event. The record is a board-owned sidecar, not a task
+field: `board/task.py` is provider-authored (integrated unmodified) and refuses any key
+outside its fixed schema, so the record lands where a review task's `source.json` link
+already lives.
+
+The evidence that earns the waiver is calibration recall, not the boolean. A green gate
+says the code the gate exercises behaved; `board/calibration.py` measures how much a
+reviewer actually finds, per lane, against known answer keys. Read a lane's recorded recall
+and the waiver is a decision made on measured evidence; without it, `verified_in_lane` is
+only a claim a lane makes about itself.
+
+`review_branch(..., scope: "branch")` reads a branch the merge node has already proved: one
+packet for the whole branch-vs-target diff, staged as the merged tree (`git merge-tree`)
+against the *target's* current tree, never the branch's history. It is authored only when a
+`verify_merge` task for the same branch settled `passed`, and its brief asks for findings
+against the target's current tree — the thing no per-commit review can see.
+
 ## Reviewer calibration
 
 The board routes reviews by an acceptance rate that measures whether a reviewer produced
 a well-formed verdict, not whether the verdict was right. Calibration measures the
 difference with a corpus whose defects are known. `calibration/example/` in this
-repository shows the format — one clean case to catch false positives and one with a
+repository shows the format — clean cases to catch false positives beside cases with a
 planted defect — each holding a `diff.patch`, the changed files and a brief, plus an
 `answer.json` that is never staged. A real corpus is built from the defect classes an
 operator's own gates have caught; it lives outside the repository (pass its path as
