@@ -119,7 +119,7 @@ def test_cline_adapter_and_transcript_compaction(tmp_path):
     )
     first = a.first("do it")
     assert first[:2] == ["/x/cline", "do it"] and "--auto-approve" in first and "--json" in first
-    assert a.resume("s1", "fix")[:4] == ["/x/cline", "--id", "s1", "fix"]
+    assert a.resume("s1", "fix")[:2] == ["/x/cline", "fix"]  # fresh session: --id refuses a prompt
     native = tmp_path / "native-1.jsonl"
     native.write_text(
         '{"sessionId":"abc"}\n{"type":"thinking_delta","d":"x"}\n{"type":"tool_completed"}\n'

@@ -210,7 +210,10 @@ class ClineAdapter(Adapter):
         return [self.binary, prompt] + self._tail()
 
     def resume(self, session_id: str, prompt: str) -> List[str]:
-        return [self.binary, "--id", session_id, prompt] + self._tail()
+        # cline 3.0.61 refuses a prompt with --id in JSON mode ("interactive mode is
+        # unsupported"), so a later round is a fresh session on the fix prompt: the branch
+        # and the gate output carry the context; the first session id stays in the verdict.
+        return self.first(prompt)
 
     def session_id(self, native_jsonl: Path) -> Optional[str]:
         return _first_match(

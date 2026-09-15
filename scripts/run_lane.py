@@ -115,7 +115,9 @@ def compose_prompt(
         f"- Finish with exactly ONE commit on this branch whose message explains why and ends "
         f"with the trailer `{TRAILER}`, one row in docs/CONTRIBUTIONS.md under "
         "`## 2026-09-15 — brief 14`, and your report at "
-        f"`docs/reports/{report_name}`. Leave the working tree clean. Do not push.\n\n"
+        f"`docs/reports/{report_name}`. Leave the working tree clean. Do not push.\n"
+        "- Keep working until that commit exists: a reply that uses no tool ends your "
+        "session, and a session that ends without the commit is a failed round.\n\n"
         f"{orientation}\n\n## Your packet\n\n{packet}"
     )
 
@@ -300,8 +302,14 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
             mod_path=attempt_dir / "grid-effort.mjs",
             session_name=f"lane-{args.lane}-14-{packet_id}-{stamp}",
         )
+    # Nothing from this shell's own model configuration reaches the lane or its gates.
+    inherited = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("ANTHROPIC_", "CLAUDE_", "OPENAI_"))
+    }
     env = dict(
-        os.environ,
+        inherited,
         HOME=str(home),
         TMPDIR=str(attempt_dir),
         COMMANDCODE_SKIP_UPDATES="1",
