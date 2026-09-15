@@ -47,4 +47,62 @@ async function refresh(manual=false){
   clearTimeout(timeout);refreshInFlight=false;button.disabled=false;button.textContent='↻ Refresh';button.setAttribute('aria-busy','false');
  }
 }
-$('refresh').onclick=()=>refresh(true);$('filter').onchange=draw;for(const m of ['remaining','used'])$(m).onclick=()=>{mode=m;$('remaining').setAttribute('aria-pressed',m==='remaining');$('used').setAttribute('aria-pressed',m==='used');draw()};window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installEvent=e});$('install').onclick=async()=>{if(installEvent){await installEvent.prompt();installEvent=null}else $('installHelp').showModal()};$('closeHelp').onclick=()=>$('installHelp').close();window.addEventListener('offline',()=>{online=false;$('connection').textContent='Offline · live readings unavailable';draw()});if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});refresh();setInterval(refresh,15000);
+$('refresh').onclick=()=>refresh(true);$('filter').onchange=draw;for(const m of ['remaining','used'])$(m).onclick=()=>{mode=m;$('remaining').setAttribute('aria-pressed',m==='remaining');$('used').setAttribute('aria-pressed',m==='used');draw()};window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installEvent=e});$('install').onclick=async()=>{if(installEvent){await installEvent.prompt();installEvent=null}else $('installHelp').showModal()};$('closeHelp').onclick=()=>$('installHelp').close();window.addEventListener('offline',()=>{online=false;$('connection').textContent='Offline · live readings unavailable';draw()});if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});refresh();setInterval(refresh,15000);// --- Boards: planned, running, blocked and landed work, local only (never uploaded) ---
+const BOARDLISTS=[['active','Running'],['planned','Planned'],['blocked','Blocked'],['landed_today','Landed today']];
+const BOARDSTATES={active:'active',planned:'planned',blocked:'blocked',landed_today:'landed'};
+let boards=[],boardProject='',boardState='',boardSort={key:'project',dir:1};
+const esc=v=>v==null?'':String(v);
+function allBoardRows(){const rows=[];for(const b of boards){for(const [key] of BOARDLISTS){for(const r of (b[key]||[]))rows.push(Object.assign({},r,{board:b.name,state:BOARDSTATES[key]}))}}return rows;}
+function boardAge(r){const s=Number(r.age);return Number.isFinite(s)?duration(s)+' ago':'—';}
+function boardMeta(r,state){
+ if(state==='active'){const gate=r.gate?('gate '+esc(r.gate.name)):'gates pending';return 'round '+(r.round||1)+' of '+(r.max_rounds||1)+' · '+gate+' · '+(esc(r.lane)||'lane unknown')+(r.model?' · '+esc(r.model):'')+' · '+duration((Number(r.minutes)||0)*60);}
+ if(state==='planned'){const why=r.reason?esc(r.reason):(r.lane?('ready for '+esc(r.lane)):'cannot dispatch');return (r.lane?('lane '+esc(r.lane)+' · '):'')+why+' · waiting '+boardAge(r);}
+ if(state==='blocked')return esc(r.reason||'blocked')+' · '+(r.operator_owed?'needs you':'no action needed')+' · '+boardAge(r);
+ return esc(r.state||'landed')+' · '+boardAge(r);
+}
+function boardRow(r,state){const row=node('div',undefined,'workrow boardrow');row.tabIndex=0;row.setAttribute('role','button');row.append(node('strong',r.title||r.id),node('span',esc(r.id),'badge'),node('span',boardMeta(r,state),'boardmeta'));row.onclick=()=>openDrawer(r,state);row.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openDrawer(r,state);}};return row;}
+function drawBoards(){
+ const cards=$('boardcards');if(!cards)return;
+ const projectSel=$('boardproject');
+ if(projectSel){const current=projectSel.value;projectSel.replaceChildren();const all=node('option','All projects');all.value='';projectSel.append(all);for(const name of boards.map(b=>b.name).filter(Boolean).slice().sort()){const o=node('option',name);o.value=name;projectSel.append(o);}projectSel.value=boards.some(b=>b.name===current)?current:'';boardProject=projectSel.value;}
+ cards.replaceChildren();
+ if(!boards.length)cards.append(node('div','No boards reported by the local overlay yet.','empty'));
+ for(const b of boards){const card=node('article',undefined,'card boardcard');const top=node('div',undefined,'cardtop');top.append(node('div',(b.name||'?').slice(0,1).toUpperCase(),'monogram'));const info=node('div');const counts=BOARDLISTS.map(([k])=>((b[k]||[]).length)).join(' / ');info.append(node('div',b.name||'board','provider'),node('span',counts+' · running / planned / blocked / landed','state'));top.append(info);card.append(top);
+  for(const [key,label] of BOARDLISTS){const list=b[key]||[];if(!list.length)continue;card.append(node('h3',label+' ('+list.length+')','boardlisthead'));for(const r of list)card.append(boardRow(r,BOARDSTATES[key]));}
+  if(!BOARDLISTS.some(([k])=>(b[k]||[]).length))card.append(node('div','Nothing planned, running, blocked or landed today.','empty'));
+  cards.append(card);}
+ drawAllWork();
+}
+function drawAllWork(){
+ const host=$('allwork');if(!host)return;
+ const rows=allBoardRows().filter(r=>(!boardProject||r.board===boardProject)&&(!boardState||r.state===boardState));
+ const cols=[['project','Project'],['title','Title'],['state','State'],['lane','Lane'],['age','Age']];
+ const value=r=>{const v=r[boardSort.key];if(boardSort.key==='age'){const n=Number(v);return Number.isFinite(n)?n:Infinity;}return (v==null?'':String(v)).toLowerCase();};
+ rows.sort((a,b)=>{const x=value(a),y=value(b);return x<y?-boardSort.dir:x>y?boardSort.dir:0;});
+ const table=node('table',undefined,'boardtable');const head=node('tr');
+ for(const [key,label] of cols){const th=node('th',label+(boardSort.key===key?(boardSort.dir>0?' ▲':' ▼'):''));th.onclick=()=>{boardSort=boardSort.key===key?{key,dir:-boardSort.dir}:{key,dir:1};drawAllWork();};head.append(th);}
+ const thead=node('thead');thead.append(head);table.append(thead);
+ const body=node('tbody');
+ for(const r of rows){const tr=node('tr');tr.tabIndex=0;tr.onclick=()=>openDrawer(r,r.state);tr.append(node('td',r.project||''),node('td',r.title||r.id),node('td',r.state||''),node('td',r.lane||'—'),node('td',boardAge(r)));body.append(tr);}
+ table.append(body);
+ host.replaceChildren();host.append(node('h3','All work across boards','boardlisthead'),rows.length?table:node('div','No rows match the filter.','empty'));
+}
+function openDrawer(r,state){
+ const title=$('drawertitle'),meta=$('drawermeta'),body=$('drawerbody');
+ if(!title||!body)return;
+ title.textContent=r.title||r.id||'Task';
+ if(meta)meta.textContent=[r.project,r.id,state,r.lane,r.model,(r.round?('round '+r.round+' of '+(r.max_rounds||1)):'')].filter(Boolean).join(' · ');
+ body.replaceChildren();
+ if(r.focus)body.append(node('p',r.focus,'caption'));
+ const links=r.links||{},linkList=[];
+ for(const [key,label] of [['brief','Brief'],['report','Report'],['attempt','Attempt']])if(links[key])linkList.push(label+': '+links[key]);
+ if(linkList.length)body.append(node('pre',linkList.join('\n'),'drawerpaths'));
+ if(r.gate&&r.gate.tail){body.append(node('h3','Last gate · '+esc(r.gate.name)));body.append(node('pre',r.gate.tail,'gate'));}
+ if(r.section){body.append(node('h3','Packet section'));body.append(node('pre',r.section,'sectiontail'));}
+ const dialog=$('boarddrawer');if(dialog&&dialog.showModal)dialog.showModal();
+}
+async function loadBoards(){try{const r=await fetch('/api/boards',{cache:'no-store'});if(!r.ok)throw Error('http');const data=await r.json();boards=Array.isArray(data.boards)?data.boards:[];}catch(error){boards=[];}drawBoards();}
+if($('boardstate'))$('boardstate').onchange=()=>{boardState=$('boardstate').value;drawAllWork();};
+if($('closedrawer'))$('closedrawer').onclick=()=>$('boarddrawer').close();
+if($('doneclick'))$('doneclick').onclick=()=>$('boarddrawer').close();
+loadBoards();setInterval(loadBoards,30000);

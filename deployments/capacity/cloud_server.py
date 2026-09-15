@@ -73,6 +73,10 @@ def clean_snapshot(raw, now=None):
     now = time.time() if now is None else now
     if not isinstance(raw, dict):
         raise ValueError("object required")
+    if "boards" in raw:
+        # The Boards section is local-only: its rows carry task ids and titles, which are
+        # the operator's own project names. Refuse it outright rather than strip it.
+        raise ValueError("boards is local only")
     captured = raw.get("captured_at")
     dt = datetime.fromisoformat(captured.replace("Z", "+00:00"))
     if dt.utcoffset() is None or not now - 600 <= dt.timestamp() <= now + 60:

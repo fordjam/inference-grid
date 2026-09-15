@@ -10,6 +10,20 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 PROVIDERS = {"codex", "claude", "clinepass", "command-code", "opencode", "zai"}
+MAX_BOARD_ROWS = 200
+BOARD_LISTS = ("planned", "active", "blocked", "landed_today")
+BOARD_ROW_STRINGS = (
+    "project",
+    "id",
+    "title",
+    "focus",
+    "section",
+    "state",
+    "lane",
+    "model",
+    "reason",
+)
+BOARD_ROW_NUMBERS = ("age", "minutes", "round", "max_rounds")
 SCORECARD_COUNTS = (
     "attempts",
     "completed",
@@ -143,6 +157,65 @@ def clean_reviewer_recall(rows):
     return clean
 
 
+def _clean_board_row(row):
+    entry = {}
+    for key in BOARD_ROW_STRINGS:
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            entry[key] = value[:2000]
+        elif value is None:
+            entry[key] = None
+    if not isinstance(entry.get("id"), str):
+        return None
+    for key in BOARD_ROW_NUMBERS:
+        value = row.get(key)
+        if type(value) in (int, float) and not isinstance(value, bool) and math.isfinite(value):
+            entry[key] = value
+    if "operator_owed" in row:
+        entry["operator_owed"] = bool(row["operator_owed"])
+    gate = row.get("gate")
+    if isinstance(gate, dict):
+        entry["gate"] = {
+            k: (gate[k][:2000] if isinstance(gate.get(k), str) else None)
+            for k in ("name", "tail")
+            if k in gate
+        }
+    links = row.get("links")
+    if isinstance(links, dict):
+        entry["links"] = {
+            k: (links[k][:2000] if isinstance(links.get(k), str) else None)
+            for k in ("brief", "report", "attempt")
+            if k in links
+        }
+    return entry
+
+
+def clean_boards(boards):
+    """Local-only Boards section: the fixed row shape with every string bounded.
+
+    Task ids and titles are the operator's project names, so this section never leaves
+    the machine — `upload.py` drops it and the cloud's `clean_snapshot` refuses it. The
+    cleaner keeps only what the page renders and drops rows without an id.
+    """
+    if not isinstance(boards, list):
+        return []
+    clean = []
+    for board in boards[:20]:
+        if not isinstance(board, dict) or not isinstance(board.get("name"), str):
+            continue
+        entry = {"name": board["name"][:80]}
+        for key in BOARD_LISTS:
+            rows = board.get(key)
+            rows = rows if isinstance(rows, list) else []
+            entry[key] = [
+                cleaned
+                for cleaned in (_clean_board_row(row) for row in rows[:MAX_BOARD_ROWS])
+                if cleaned is not None
+            ]
+        clean.append(entry)
+    return clean
+
+
 def timestamp(value):
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
@@ -152,7 +225,9 @@ def timestamp(value):
 
 def project(raw, overlays=()):
     # An overlay is a list of account observations or {"accounts": [...], "attempts": [...],
-    # "scorecard": [...], "operator": [...], "accepted_work": [...]}; overlay attempts replace
+    # "scorecard": [...], "operator": [...], "accepted_work": [...], "boards": [...]};
+    # the boards list is local-only (task ids are project names) and carried for the local
+    # page; overlay attempts replace
     # the upstream activity list when present, the scorecard (per model routing evidence) and
     # the operator/accepted-work lists (needs-you rows and the goal's weekly metric) are
     # accepted from the overlay only.
@@ -162,6 +237,7 @@ def project(raw, overlays=()):
     overlay_operator = overlays.get("operator") if isinstance(overlays, dict) else None
     overlay_accepted = overlays.get("accepted_work") if isinstance(overlays, dict) else None
     overlay_recall = overlays.get("reviewer_recall") if isinstance(overlays, dict) else None
+    overlay_boards = overlays.get("boards") if isinstance(overlays, dict) else None
     accounts = {}
     for a in [*raw.get("accounts", []), *overlay_accounts]:
         if not isinstance(a, dict) or a.get("provider") not in PROVIDERS:
@@ -211,6 +287,7 @@ def project(raw, overlays=()):
         operator=clean_operator(overlay_operator),
         accepted_work=clean_accepted_work(overlay_accepted),
         reviewer_recall=clean_reviewer_recall(overlay_recall),
+        boards=clean_boards(overlay_boards),
         served_at=datetime.now(timezone.utc).isoformat(),
     )
 
@@ -257,20 +334,30 @@ def main():
             self.end_headers()
             self.wfile.write(body)
 
+        def overlay(self):
+            if args.overlay and args.overlay.exists():
+                try:
+                    return json.loads(args.overlay.read_text())
+                except (OSError, ValueError):
+                    return []
+            return []
+
         def do_GET(self):
             if self.headers.get("Host") not in {f"127.0.0.1:{args.port}", f"localhost:{args.port}"}:
                 return self.reply(403, b"Forbidden", "text/plain")
             path = urlsplit(self.path).path
+            if path == "/api/boards":
+                # Local only and independent of the upstream feed: the Boards section the
+                # overlay builder writes is always answerable, even with no quota feed.
+                overlays = self.overlay()
+                boards = overlays.get("boards") if isinstance(overlays, dict) else None
+                body = json.dumps({"boards": clean_boards(boards)}, allow_nan=False).encode()
+                return self.reply(200, body, "application/json")
             if path == "/api/usage":
                 try:
                     with urlopen(args.upstream, timeout=8) as response:
                         raw = json.load(response)
-                    overlays = (
-                        json.loads(args.overlay.read_text())
-                        if args.overlay and args.overlay.exists()
-                        else []
-                    )
-                    body = json.dumps(project(raw, overlays), allow_nan=False).encode()
+                    body = json.dumps(project(raw, self.overlay()), allow_nan=False).encode()
                     return self.reply(200, body, "application/json")
                 except Exception:
                     return self.reply(

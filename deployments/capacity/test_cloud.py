@@ -209,6 +209,14 @@ class Tests(Base):
             400,
         )
 
+    def test_boards_rejected(self):
+        # The local Boards section is never uploaded: its rows are the operator's project
+        # names, so the cloud refuses the key outright instead of stripping it.
+        s = self.sample()
+        s["boards"] = [{"name": "myproject", "planned": [{"id": "packet-x1", "title": "Some"}]}]
+        with self.assertRaises(ValueError):
+            clean_snapshot(s)
+
     def test_future_or_naive_observation_rejected(self):
         s = self.sample()
         s["accounts"][0]["observed_at"] = "2999-01-01T00:00:00Z"

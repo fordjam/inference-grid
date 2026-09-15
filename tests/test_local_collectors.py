@@ -837,6 +837,27 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(posted["headers"]["Authorization"], "Bearer fake-token")
         self.assertEqual(posted["url"], "http://remote.example/api/snapshot")
 
+    def test_boards_never_leave_the_machine(self):
+        # The local Boards section carries task ids and titles (the operator's project
+        # names); the upload body is built from the account keys only.
+        posted = {}
+
+        def fetch(url, headers, timeout, data=None, want_status=False):
+            if url == self.config()["local_feed"]:
+                return {
+                    "accounts": [{"provider": "zai", "status": "ok", "observed_at": "t"}],
+                    "boards": [
+                        {"name": "myproject", "planned": [{"id": "packet-x1", "title": "S"}]}
+                    ],
+                }
+            posted["body"] = json.loads(data)
+            return 200
+
+        status = upload.run(self.config(), fetch, now="now")
+        self.assertEqual(status["status"], "ok")
+        self.assertNotIn("boards", posted["body"])
+        self.assertNotIn("packet-x1", json.dumps(posted["body"]))
+
     def test_failure_is_reported_not_raised(self):
         status = upload.run(self.config(), raise_(RuntimeError("feed down")), now="now")
         self.assertEqual((status["status"], status["error"]), ("failed", "RuntimeError"))

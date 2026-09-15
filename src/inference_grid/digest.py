@@ -41,11 +41,22 @@ def digest(ledger, boards_dir, now=None):
     from .cli import board_status
     from .tick_all import ordered_configs
 
-    lines = ["# Operator digest", "", f"Generated {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(now))}.", ""]
+    lines = [
+        "# Operator digest",
+        "",
+        f"Generated {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(now))}.",
+        "",
+    ]
     suggestions = []
     inbox = []
+    seen = set()
     for config in ordered_configs(boards_dir):
         name = Path(config["project_root"]).name
+        # One entry per board name: a config directory holding duplicates (two files for
+        # one board) would otherwise list the board twice with the same counts.
+        if name in seen:
+            continue
+        seen.add(name)
         rows = board_status(ledger, config["board_dir"])
         counts = {}
         oldest_ready = None
@@ -105,9 +116,7 @@ def digest(ledger, boards_dir, now=None):
         entry["refused"] += bool(row.get("reason") and str(row["reason"]).startswith("Refused"))
     for account in sorted(by_account):
         entry = by_account[account]
-        lines.append(
-            f"| {account} | {entry['attempts']} | {entry['held']} | {entry['refused']} |"
-        )
+        lines.append(f"| {account} | {entry['attempts']} | {entry['held']} | {entry['refused']} |")
     if not by_account:
         lines.append("| (no attempts) | 0 | 0 | 0 |")
     return "\n".join(lines) + "\n"
