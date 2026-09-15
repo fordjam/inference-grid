@@ -8,8 +8,10 @@ loading the agents is an operator step.
 
 Every plist is the same shape — ``KeepAlive`` and ``RunAtLoad`` true, ``ProcessType:
 Interactive``, a PATH that includes ``/opt/homebrew/bin`` (the CLIs the lanes spawn are
-``#!/usr/bin/env node`` scripts, and launchd's default PATH cannot find node) — and never
-``StartInterval``. launchd parks interval spawns for a GUI-session
+``#!/usr/bin/env node`` scripts, and launchd's default PATH cannot find node), and an
+``ExitTimeOut`` of the longest packet wall clock plus a minute, so launchd does not
+``SIGKILL`` the tick loop while it drains a signal — and never ``StartInterval``. launchd
+parks interval spawns for a GUI-session
 agent while the display is off ("pended nondemand spawn = interval"), which is exactly when
 the phone dashboard is the only view; a process that is already running is not held. So the
 runtimes are kept alive rather than scheduled, and they come back after a reboot: the
@@ -22,12 +24,16 @@ KeepAlive agent survived.
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
 
 DEFAULT_DIR = Path.home() / ".local/share/inference-grid-capacity"
 DOMAIN = "com.inference-grid"
+# lanes/config.py caps a lane's wall_seconds at 3600, so without a lanes.json that is the
+# longest packet wall clock there can be.
+LANE_WALL_CAP = 3600
 
 # One row per runtime: short name (also the label suffix), default script file, default log.
 RUNTIMES = (
@@ -49,6 +55,8 @@ PLIST_TEMPLATE = """\
 \t\t<key>PATH</key>
 \t\t<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 \t</dict>
+\t<key>ExitTimeOut</key>
+\t<integer>{exit_timeout}</integer>
 \t<key>Label</key>
 \t<string>{label}</string>
 \t<key>ProcessType</key>
@@ -72,9 +80,26 @@ def _arguments(argv):
     return "".join(f"\t\t<string>{arg}</string>\n" for arg in argv)
 
 
-def render(label, python, script, log):
-    """The plist for one runtime: label, interpreter, script and log paths."""
-    return PLIST_TEMPLATE.format(label=label, arguments=_arguments([python, script]), log=log)
+def exit_timeout(lanes=None):
+    """launchd's ExitTimeOut: the longest packet wall clock plus a minute.
+
+    A draining tick loop must outlast the board tick in flight, whose packets each run up
+    to their lane's ``wall_seconds``; ``lanes`` is the parsed operator lanes.json, and
+    without one the wall cap stands in for the longest lane.
+    """
+    walls = [
+        spec["wall_seconds"]
+        for spec in (lanes or {}).get("lanes", {}).values()
+        if isinstance(spec, dict) and isinstance(spec.get("wall_seconds"), int)
+    ]
+    return (max(walls) if walls else LANE_WALL_CAP) + 60
+
+
+def render(label, python, script, log, timeout):
+    """The plist for one runtime: label, interpreter, script, log paths and ExitTimeOut."""
+    return PLIST_TEMPLATE.format(
+        label=label, arguments=_arguments([python, script]), log=log, exit_timeout=timeout
+    )
 
 
 def bootstrap_command(plist_path):
@@ -87,6 +112,12 @@ def main(argv=None):
     parser.add_argument(
         "--python", default=sys.executable, help="interpreter that runs every runtime"
     )
+    parser.add_argument(
+        "--lanes",
+        default=None,
+        help="operator lanes.json; ExitTimeOut comes from its longest wall_seconds "
+        "(default: the 3600 cap) plus a minute",
+    )
     for name, script, log in RUNTIMES:
         key = name.replace("-", "_")
         script_flags = [f"--{name}-script"]
@@ -97,6 +128,7 @@ def main(argv=None):
         parser.add_argument(*script_flags, dest=f"{key}_script", default=str(DEFAULT_DIR / script))
         parser.add_argument(*log_flags, dest=f"{key}_log", default=str(DEFAULT_DIR / log))
     args = parser.parse_args(argv)
+    timeout = exit_timeout(json.loads(Path(args.lanes).read_text()) if args.lanes else None)
 
     out_dir = Path(args.out_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -105,7 +137,13 @@ def main(argv=None):
         label = f"{DOMAIN}.{name}"
         plist_path = out_dir / (label + ".plist")
         plist_path.write_text(
-            render(label, args.python, getattr(args, f"{key}_script"), getattr(args, f"{key}_log"))
+            render(
+                label,
+                args.python,
+                getattr(args, f"{key}_script"),
+                getattr(args, f"{key}_log"),
+                timeout,
+            )
         )
         print(f"wrote {plist_path}")
         print(bootstrap_command(plist_path))
