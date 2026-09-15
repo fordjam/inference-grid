@@ -121,7 +121,7 @@ def test_commit_gate_trailer_is_a_parameter(tmp_path, monkeypatch):
 
 
 def test_gates_for_builds_the_five_module_invoked_gates():
-    built = gates.gates_for("/py", "origin/glm/work", "TRAILER")
+    built = gates.gates_for("/py", "origin/glm/work", "TRAILER", "/cache")
     assert [g.name for g in built] == [
         "pytest",
         "ruff-format",
@@ -129,7 +129,14 @@ def test_gates_for_builds_the_five_module_invoked_gates():
         "no-home-paths",
         "commit",
     ]
-    assert built[0].argv == ["/py", "-m", "pytest", "-q", "-p", "no:cacheprovider", "-x"]
+    assert built[0].argv == [
+        "/py",
+        "-m",
+        "inference_grid.lanes.gates",
+        "pytest",
+        "origin/glm/work",
+        "/cache",
+    ]
     assert built[1].argv == [
         "/py",
         "-m",
@@ -170,3 +177,77 @@ def test_the_module_is_the_gate_command(tmp_path):
         text=True,
     )
     assert proc.returncode == 0 and "commit gate ok" in proc.stdout
+
+
+def _failing_suite(base_output, branch_output):
+    """A fake suite: the branch (the cwd) answers one way, the scratch worktree another."""
+
+    def suite(work):
+        return branch_output if Path(work) == Path.cwd() else base_output
+
+    return suite
+
+
+def test_failing_node_ids_takes_the_id_before_the_message():
+    output = "1 failed\nFAILED tests/a.py::test_x[param with space] - AssertionError: no\n"
+    assert gates.failing_node_ids(output) == ["tests/a.py::test_x[param with space]"]
+    assert gates.failing_node_ids("3 passed\n") == []
+
+
+def test_pytest_gate_names_inherited_failures_and_fails_only_on_new_ones(
+    tmp_path, monkeypatch, capsys
+):
+    repo = _repo(tmp_path / "repo", {"a.txt": "a\n"})
+    monkeypatch.chdir(repo)
+    base = "FAILED tests/test_old.py::test_sandbox - PermissionError\n1 failed\n"
+    branch = base + "FAILED tests/test_new.py::test_packet - AssertionError\n2 failed\n"
+
+    assert (
+        gates.run_pytest("base", tmp_path / "cache", "py", suite=_failing_suite(base, branch)) == 1
+    )
+    out = capsys.readouterr().out
+    assert "inherited: ['tests/test_old.py::test_sandbox']" in out
+    assert "new failures:" in out and "tests/test_new.py::test_packet" in out
+
+
+def test_pytest_gate_passes_when_every_failure_is_inherited(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path / "repo", {"a.txt": "a\n"})
+    monkeypatch.chdir(repo)
+    output = "FAILED tests/test_old.py::test_sandbox - PermissionError\n1 failed\n"
+
+    assert (
+        gates.run_pytest("base", tmp_path / "cache", "py", suite=_failing_suite(output, output))
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "inherited: ['tests/test_old.py::test_sandbox']" in out
+    assert "no new failures" in out
+
+
+def test_pytest_gate_reports_an_inherited_failure_that_now_passes(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path / "repo", {"a.txt": "a\n"})
+    monkeypatch.chdir(repo)
+    base = "FAILED tests/test_old.py::test_sandbox - PermissionError\n1 failed\n"
+
+    assert (
+        gates.run_pytest("base", tmp_path / "cache", "py", suite=_failing_suite(base, "1 passed\n"))
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "repaired: ['tests/test_old.py::test_sandbox']" in out
+
+
+def test_the_baseline_is_cached_per_base_commit(tmp_path, monkeypatch):
+    repo = _repo(tmp_path / "repo", {"a.txt": "a\n"})
+    monkeypatch.chdir(repo)
+    cache = tmp_path / "cache"
+    runs = {"base": 0, "branch": 0}
+
+    def suite(work):
+        runs["branch" if Path(work) == Path.cwd() else "base"] += 1
+        return "FAILED tests/test_old.py::test_sandbox - PermissionError\n"
+
+    assert gates.run_pytest("base", cache, "py", suite=suite) == 0
+    assert gates.run_pytest("base", cache, "py", suite=suite) == 0
+    assert runs == {"base": 1, "branch": 2}
+    assert len(list(cache.glob("pytest-baseline-*.json"))) == 1
