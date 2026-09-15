@@ -42,12 +42,12 @@ def board_counts(board_dir):
     path = Path(board_dir)
     if not path.is_dir():
         return {"missing": 1}
-    from .board.task import validate_task
+    from .board.packet_task import validate_board_task
 
     counts = {}
     for file in sorted(path.glob("*.json")):
         try:
-            task = validate_task(json.loads(file.read_text()))
+            task = validate_board_task(json.loads(file.read_text()))
         except Exception:
             counts["invalid"] = counts.get("invalid", 0) + 1
             continue

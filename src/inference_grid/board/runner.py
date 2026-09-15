@@ -28,6 +28,12 @@ from ..ledger import ACTIVE, Refused, classifier_view, digest, lanes as lane_rec
 from ..ledger import aliases as alias_records, attempts as attempt_records
 from ..ledger import events as ledger_events, tasks as task_records
 from ..worker import execute
+from .failover import (
+    author_failover,
+    failover_candidate,
+    failed_family,
+    pending_failover_note,
+)
 from .guard import check_input
 from .land import land
 from .packet_task import dispatch_packet, validate_board_task
@@ -1078,6 +1084,40 @@ def tick(
                 )
             )
             continue
+        if failover_candidate(task, board):
+            # J4: a packet that settled with an exhaustion or transport reason is due one
+            # different-family retry. A dry run names the pending swap without writing;
+            # a real tick authors it here (a blocked task never reaches the dispatch
+            # path, so settlement-time authoring alone would leave it pending forever).
+            if dry_run:
+                results.append(
+                    {
+                        "task": task_id,
+                        "lane": None,
+                        "attempt": None,
+                        "result": pending_failover_note(ledger, task, lanes),
+                    }
+                )
+                continue
+            family = failed_family(ledger, task["blocked_reason"])
+            authored = author_failover(
+                board_dir, project_root, ledger, path, task, family, lanes, board
+            )
+            if authored is None:
+                continue
+            results.append(
+                {
+                    "task": task_id,
+                    "lane": None,
+                    "attempt": None,
+                    "result": (
+                        "failover: " + authored["task"]
+                        if authored.get("authored")
+                        else "failover: " + authored["reason"]
+                    ),
+                }
+            )
+            continue
         if task["state"] != "ready":
             continue
         if task["category"] == "verify_merge":
@@ -1309,7 +1349,10 @@ def tick(
                     if verdict.get("reason")
                     else f"{state}; resolve with evidence"
                 )
-                save_task(
+                ledger_reason = next(
+                    (r.get("reason") for r in ledger.status() if r["id"] == aid), None
+                )
+                task = save_task(
                     path,
                     task,
                     state="blocked",
@@ -1317,7 +1360,23 @@ def tick(
                         :300
                     ],
                 )
-                results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"})
+                # J4: one retry on a different family, authored here where the failed
+                # family is known; the block reason above is what makes it eligible.
+                authored = author_failover(
+                    board_dir,
+                    project_root,
+                    ledger,
+                    path,
+                    task,
+                    lanes[lane_id]["family"],
+                    lanes,
+                    board,
+                    texts=(verdict.get("reason"), verdict.get("refusal"), ledger_reason),
+                )
+                row = {"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"}
+                if authored and authored.get("authored"):
+                    row["failover"] = authored["task"]
+                results.append(row)
                 continue
             note_model_refusal(ledger, lanes, lane_id, packet_dir, aid)
             reason = hold_block_reason(aid, read_verdict(packet_dir, aid), state) or (

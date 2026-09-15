@@ -84,6 +84,11 @@ def validate_packet_task(raw):
     terminal state after `passed` that the provider-authored state list refuses, so
     board/land.py's transition is validated here: the record ({base_head, merge_commit,
     how}) and the state come together or not at all.
+
+    Failover (brief J4) rides on two more packet-only keys, handled the same way:
+    `failover` (bool, default true — the operator turns the one different-family retry
+    off per task) and `failover_from` (the predecessor id, present only on a task the
+    runner authored as a failover).
     """
 
     def err(k, m):
@@ -96,7 +101,17 @@ def validate_packet_task(raw):
     if "spec" not in raw:
         err("task", "missing spec key")
     landed = raw.get("landed")
-    core = {k: v for k, v in raw.items() if k not in ("spec", "landed")}
+    failover = raw.get("failover", True)
+    failover_from = raw.get("failover_from")
+    if not isinstance(failover, bool):
+        err("failover", "must be a bool")
+    if failover_from is not None and (
+        not isinstance(failover_from, str) or not failover_from or len(failover_from) > 60
+    ):
+        err("failover_from", "must be a non-empty str of at most 60 chars")
+    core = {
+        k: v for k, v in raw.items() if k not in ("spec", "landed", "failover", "failover_from")
+    }
     core["category"] = "pure_function"
     if core.get("state") == "landed":
         # The shared check's nearest terminal state; the real state is restored below.
@@ -162,8 +177,11 @@ def validate_packet_task(raw):
     out = {
         k: (dict(v) if k == "budget" else list(v) if isinstance(v, list) else v)
         for k, v in raw.items()
-        if k not in ("spec", "landed")
+        if k not in ("spec", "landed", "failover", "failover_from")
     }
+    out["failover"] = failover
+    if failover_from is not None:
+        out["failover_from"] = failover_from
     out["spec"] = {
         "brief": spec["brief"],
         "packet_id": spec["packet_id"],
