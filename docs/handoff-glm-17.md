@@ -90,16 +90,30 @@ directory holds duplicates — fix that while here: one entry per board name). A
   *blocked* carries the reason and whether it is operator-owed (reuse
   `operator_queue.OPERATOR_REASON_WORDS`), *landed_today* the tasks settled `landed` or
   `passed` since midnight local. Reads only; never dispatches; never spends quota.
+- **Every task row is legible without the id.** Ids like `packet-q5` / `J6` / `M2` say nothing
+  about the work. Each row carries `project` (the board name), `id`, `title` — the packet
+  heading text from the task's brief (`#### <ID>. <title>`, via `lanes/brief.py`'s heading
+  pattern; the task id when the brief has no heading), `focus` — the first sentence of that
+  packet section — and `links`: the brief file, the newest `docs/reports/*<id>*.md` when one
+  exists, and the attempt directory for active rows. The data node reads only the brief and
+  the filesystem for these; nothing is fetched.
 - `deployments/local/overlay_build.py` calls it and writes the result under `boards` in
   `overlay.json`; `capacity_web` serves it at `/api/boards` and the page renders one card per
   board (counts in the header, the four lists beneath, the active row's round and gate first).
-  The theme tokens the page already uses; no new dependency.
+  Rows show **title first**, the id as a small badge, the project name on the card; clicking a
+  row opens a drawer with the focus sentence, the full packet section, lane / model / round,
+  the last gate tail, and the links. Above the cards, an **All work** table lists every row
+  across boards with columns project · title · state · lane · age, sortable by column and
+  filterable by project and state, so one glance answers "what is running, for which project,
+  doing what". The theme tokens the page already uses; no new dependency.
 - **Local only.** `upload.py` must not send `boards`, and the cloud's `clean_snapshot` must
   reject it if it ever arrives: task ids are the operator's project names.
 - Tests: the data node against a temp board with one task in each state and a fake attempt
-  directory; the digest's duplicate fix; `upload.py` strips `boards`; `clean_snapshot`
-  refuses it; a static check that `app.js` references `/api/boards`.
-- Size: medium.
+  directory; a task whose brief carries `#### X1. Some title` reports that title and its
+  first sentence as focus, one without a heading reports its id; the digest's duplicate fix;
+  `upload.py` strips `boards`; `clean_snapshot` refuses it; a static check that `app.js`
+  references `/api/boards`, renders `title`, and contains the All-work table.
+- Size: medium–large.
 
 #### J6. Concurrent dispatch within a tick
 `board-tick` dispatches the ready tasks of a board one after another and returns when the
