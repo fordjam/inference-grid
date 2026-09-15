@@ -218,10 +218,48 @@ class GoLaneTests(unittest.TestCase):
 
     def test_http_error_records_status_only(self):
         request, attempt = self.attempt(expected=["out.py"])
-        error = urllib.error.HTTPError(ENDPOINT, 402, "Payment Required", {}, None)
+        # 402 carries its own plan refusal now; the bare-status form is any other error.
+        error = urllib.error.HTTPError(ENDPOINT, 500, "Internal Server Error", {}, None)
         receipt, verdict = go.run(request, self.lane, attempt, send=self.send(error))
-        self.assertEqual((receipt, verdict["refusal"]), (None, "endpoint returned HTTP 402"))
-        self.assertNotIn("Payment Required", json.dumps(verdict))
+        self.assertEqual((receipt, verdict["refusal"]), (None, "endpoint returned HTTP 500"))
+        self.assertNotIn("Internal Server Error", json.dumps(verdict))
+
+    def test_402_names_a_model_outside_the_subscription_plan(self):
+        import io
+
+        request, attempt = self.attempt(expected=["out.py"])
+        error = urllib.error.HTTPError(
+            ENDPOINT,
+            402,
+            "Payment Required",
+            {},
+            io.BytesIO(b'{"error": {"message": "insufficient_credits"}}'),
+        )
+        receipt, verdict = go.run(request, self.lane, attempt, send=self.send(error))
+        self.assertIsNone(receipt)
+        # ClinePass bills uncovered models (kimi-k3, deepseek-v4-flash) to pay-as-you-go
+        # credits; the refusal names the plan gap so the driver never retries it.
+        self.assertEqual(verdict["refusal"], "model_not_in_plan")
+        self.assertNotIn("insufficient_credits", json.dumps(verdict))
+        self.assertFalse((attempt / "native.json").exists())
+
+    def test_clinepass_wrapped_response_is_unwrapped_and_provider_recorded(self):
+        request, attempt = self.attempt(expected=["out.py"])
+        wrapped = {"provider": "clinepass", "data": self.native()}
+        receipt, verdict = go.run(
+            request, dict(self.lane, provider="clinepass"), attempt, send=self.send(wrapped)
+        )
+        self.assertIsNone(verdict["refusal"], verdict)
+        self.assertEqual([a["path"] for a in receipt["artifacts"]], ["out.py"])
+        # The response's provider field reaches the verdict; usage and finish reason are
+        # read from the unwrapped chat-completions document.
+        self.assertEqual(verdict["provider"], "clinepass")
+        self.assertEqual(verdict["usage"], {"input_tokens": 11, "output_tokens": 7})
+        self.assertEqual(verdict["finish_reason"], "stop")
+        # native.json keeps the endpoint's own document, wrapper included.
+        native = json.loads((attempt / "native.json").read_text())
+        self.assertEqual(native["provider"], "clinepass")
+        self.assertEqual(native["data"]["model"], MODEL)
 
     def test_key_never_reaches_attempt_files(self):
         request, attempt = self.attempt(expected=["out.py"])
@@ -272,7 +310,6 @@ class GoLaneTests(unittest.TestCase):
         self.assertIsNone(verdict["refusal"])
         self.assertEqual(sender.recorded["timeout"], 600)
         self.assertEqual(verdict["transport_timeout"], 600)
-
 
     def test_task_budget_bounds_the_transport_timeout(self):
         # The attempt request carries the task's budget.wall_seconds; the transport waits
@@ -581,3 +618,46 @@ def self_response_sender(content):
         }
 
     return send
+
+
+class ProviderEndpointTests(unittest.TestCase):
+    def test_endpoint_follows_the_lane_provider(self):
+        self.assertEqual(
+            go.endpoint_for("opencode"), "https://opencode.ai/zen/go/v1/chat/completions"
+        )
+        self.assertEqual(
+            go.endpoint_for("clinepass"), "https://api.cline.bot/api/v1/chat/completions"
+        )
+        # A lane without a provider key keeps the Go endpoint.
+        self.assertEqual(go.ENDPOINT, go.endpoint_for("opencode"))
+
+    def test_an_unknown_provider_refuses_before_any_request_or_credential(self):
+        tmp = tempfile.TemporaryDirectory(dir=str(scratch_base()))
+        try:
+            root = Path(tmp.name)
+            attempt = root / "attempt"
+            (attempt / "inputs").mkdir(parents=True)
+            (attempt / "inputs/brief.txt").write_text("write the module")
+            request = {
+                "attempt": "a",
+                "generation": 1,
+                "model": "m",
+                "manifest_sha256": "m" * 64,
+                "input_directory": str(attempt / "inputs"),
+                "output_directory": str(attempt / "artifacts"),
+            }
+            # No credential file exists at all: the provider is resolved first.
+            lane = {
+                "credential_path": str(root / "absent.json"),
+                "provider": "goat",
+                "wall_seconds": 30,
+            }
+
+            def send(*args):
+                raise AssertionError("no request may be sent for an unknown provider")
+
+            receipt, verdict = go.run(request, lane, attempt, send=send)
+            self.assertIsNone(receipt)
+            self.assertEqual(verdict["refusal"], "unknown provider: goat")
+        finally:
+            tmp.cleanup()

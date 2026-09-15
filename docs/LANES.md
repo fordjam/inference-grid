@@ -9,7 +9,7 @@ way: `inference-grid lane-init --json {"lane_id": …, "board_dir": …}`, then 
 
 | Kind | Module | Family | Contract |
 | --- | --- | --- | --- |
-| `go_http` | `go` | varies by model | One chat-completions call to the OpenCode Go endpoint; `reasoning_effort` per `REASONING_EFFORT`, `max_tokens` capped by the task's thinking budget |
+| `go_http` | `go` | varies by model | One chat-completions call to the lane provider's endpoint (`opencode` → the OpenCode Go subscription, `clinepass` → ClinePass); `reasoning_effort` per `REASONING_EFFORT`, `max_tokens` capped by the task's thinking budget |
 | `goat_cli` | `goat` | glm | Command Code CLI, `--mod` session effort, config-hash guard, `classify_goat` |
 | `cline_cli` | `cline` | qwen | Write sandbox, `iteration_end` snapshots with deletion restore, `classify_cline` |
 | `claude_headless` | `zai` | claude | Anthropic-compatible base URL, `MAX_THINKING_TOKENS` from the task budget |
@@ -98,6 +98,32 @@ say so (`reasoning_effort: unsupported`).
 | `go-qwen` | `qwen3.8-max` | qwen | Third family candidate; canary before use |
 | `go-minimax` | `minimax-m3` | minimax | Unqualified; canary before use |
 | `go-grok` | `grok-4.6` | grok | Refuses the OpenAI-compatible endpoint (protocol fact); re-probe only after the endpoint changes |
+
+## Cline subscription over HTTP — `cline-http`
+
+```json
+"cline-http": {
+  "provider": "clinepass", "family": "glm", "model": "z-ai/glm-5.3-flash",
+  "kind": "go_http", "credential_path": "/path/from/operator/credential.json",
+  "plan_units": {"five_hour": 1}, "window": null, "max_concurrency": 1,
+  "wall_seconds": 600, "categories": ["independent_review", "pure_function"]
+}
+```
+
+The same `go_http` module with `provider: clinepass`: `lanes/go.py` sends the identical
+chat-completions request to the ClinePass endpoint, unwraps the `{"data": {...}}` wrapper
+it puts around the response document (the wrapper itself is preserved in `native.json`),
+and records the response's `provider` field in the verdict. Key path only — no
+executable; the credential file is the same 0o600 JSON document `read_key` already
+parses. An unknown `provider` in a `go_http` lane refuses before anything is sent.
+
+Plan coverage, observed on the raw API 2026-09-15: only some models are covered by the
+subscription — `z-ai/glm-5.3-flash` answered, while `moonshotai/kimi-k3` and
+`deepseek/deepseek-v4-flash-0731` returned `402 insufficient_credits` (those are billed
+to pay-as-you-go credits unless called through the Cline client). `go.py` classifies a
+402 as `refusal: model_not_in_plan`, which the driver never retries — a model outside
+the plan is a lane-config fact, not a transient fault. Qualify new models through a
+canary row before dispatching work on them.
 
 ## Go subscription as an agent — `opencode_cli`
 

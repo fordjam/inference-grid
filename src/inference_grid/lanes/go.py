@@ -20,7 +20,17 @@ from pathlib import Path
 from .. import structured_output
 from ..receipts import safe_path
 
-ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions"
+# The chat-completions endpoint is a property of the lane's provider (brief 15, G1):
+# lanes.json is provider-authored, so the mapping lives here and an unknown provider
+# refuses before credentials are read or anything is sent. ClinePass exposes the same
+# OpenAI-compatible protocol with the response wrapped as {"data": {...}} and a
+# narrower subscription plan (docs/LANES.md, `cline-http`).
+ENDPOINTS = {
+    "opencode": "https://opencode.ai/zen/go/v1/chat/completions",
+    "clinepass": "https://api.cline.bot/api/v1/chat/completions",
+}
+ENDPOINT = ENDPOINTS["opencode"]
+DEFAULT_PROVIDER = "opencode"
 USER_AGENT = "inference-grid-lane/1.0"
 MAX_BODY = 4 * 1024 * 1024
 MAX_CONTENT = 40000
@@ -107,6 +117,14 @@ def read_key(credential_path):
     return key, None
 
 
+def endpoint_for(provider):
+    """The chat-completions URL for a lane provider; ValueError names an unknown one."""
+    try:
+        return ENDPOINTS[provider]
+    except (KeyError, TypeError):
+        raise ValueError("unknown provider: " + str(provider)) from None
+
+
 def expected_artifact(work):
     """The single artifact name listed in inputs/expected.json."""
     try:
@@ -120,10 +138,10 @@ def expected_artifact(work):
     return names[0], None
 
 
-def http_send(body, key, session, timeout):
-    """POST one chat completion; return the parsed JSON document."""
+def http_send(body, key, session, timeout, endpoint=ENDPOINT):
+    """POST one chat completion to endpoint; return the parsed JSON document."""
     request = urllib.request.Request(
-        ENDPOINT,
+        endpoint,
         data=json.dumps(body).encode(),
         headers={
             "Authorization": "Bearer " + key,
@@ -173,6 +191,28 @@ def region_optin_refusal(error):
     if any(marker in text for marker in ("region", "opt-in", "opt_in", "china")):
         return "region_optin_required: enable China hosting in the Go console"
     return None
+
+
+def unwrap_data(response):
+    """(chat-completions document, provider) — ClinePass wraps the document as {"data": …}.
+
+    The wrapper carries the provider field the verdict records; when it does not, the
+    inner document's own provider field serves. A response that is not wrapped passes
+    through unchanged with whatever provider field it carries (None for the Go endpoint).
+    """
+    wrapped = {}
+    if (
+        isinstance(response, dict)
+        and "choices" not in response
+        and isinstance(response.get("data"), dict)
+    ):
+        wrapped, document = response, response["data"]
+    else:
+        document = response
+    provider = wrapped.get("provider")
+    if provider is None and isinstance(document, dict):
+        provider = document.get("provider")
+    return document, provider
 
 
 def _content_of(response):
@@ -266,10 +306,18 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
     verdict = {
         "supervisor": None,
         "session": session,
+        "provider": None,
         "usage": None,
         "finish_reason": None,
         "refusal": None,
     }
+    # The endpoint is a property of the lane's provider (docs/LANES.md): an unknown one
+    # refuses before credentials are read or a request is built.
+    try:
+        endpoint = endpoint_for(lane.get("provider", DEFAULT_PROVIDER))
+    except ValueError as exc:
+        verdict["refusal"] = str(exc)
+        return None, verdict
     key, problem = read_key(lane["credential_path"])
     if problem:
         verdict["refusal"] = problem
@@ -313,12 +361,17 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
         if send is not None:
             response = send(body, key, session, transport_timeout)
         else:
-            response = http_send(body, key, session, transport_timeout)
+            response = http_send(body, key, session, transport_timeout, endpoint)
     except urllib.error.HTTPError as exc:
         # The status code and a fixed reason only; the error body is read solely to
         # classify a hosting opt-in 403 and is never recorded.
         verdict["refusal"] = f"endpoint returned HTTP {exc.code}"
-        if exc.code == 403:
+        if exc.code == 402:
+            # ClinePass bills models outside the subscription plan to pay-as-you-go
+            # credits (402 insufficient_credits, observed 2026-09-15): the plan gap is
+            # named and never retried, the way a region 403 is its own refusal.
+            verdict["refusal"] = "model_not_in_plan"
+        elif exc.code == 403:
             verdict["refusal"] = region_optin_refusal(exc) or verdict["refusal"]
         return None, verdict
     except ResponseTooLarge as exc:
@@ -334,6 +387,11 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
         return None, verdict
     with (attempt_dir / "native.json").open("xb") as stream:
         stream.write(native_text.encode())
+    # ClinePass wraps the chat-completions document as {"data": {...}}; unwrap when
+    # present so qualification, usage and finish reason read the inner document, and
+    # record the response's provider field in the verdict (brief 15, G1).
+    response, response_provider = unwrap_data(response)
+    verdict["provider"] = response_provider
     if isinstance(response, dict):
         verdict["usage"] = response.get("usage")
         choices = response.get("choices")
