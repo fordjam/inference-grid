@@ -253,7 +253,15 @@ def test_tick_dispatches_tests_and_records(world):
         world["packets"],
         now=now + 1,
     ) == [
-        {"task": "review-copy-ok", "lane": None, "attempt": None, "result": "no_independent_family"}
+        {
+            "task": "review-copy-ok",
+            "lane": None,
+            "attempt": None,
+            "result": "no_independent_family",
+            "candidates": ["go"],
+            "dropped": [],
+            "score": None,
+        }
     ]
 
 
@@ -384,9 +392,7 @@ def test_advisory_size_finding_matches_only_size_citations():
     assert runner.advisory_size_finding(
         {"expected": "size under 2 KB", "observed": "length exceeds the budget"}
     )
-    assert not runner.advisory_size_finding(
-        {"expected": "VALUE = 1", "observed": "VALUE = 2"}
-    )
+    assert not runner.advisory_size_finding({"expected": "VALUE = 1", "observed": "VALUE = 2"})
     assert not runner.advisory_size_finding(
         {"expected": "45 lines", "observed": "crashes on empty input"}
     )
@@ -767,7 +773,15 @@ def test_tree_task_keeps_paths_and_discovers_tests(world):
         now=now,
     )
     assert results == [
-        {"task": "tree-ok", "lane": "go", "attempt": results[0]["attempt"], "result": "passed"}
+        {
+            "task": "tree-ok",
+            "lane": "go",
+            "attempt": results[0]["attempt"],
+            "result": "passed",
+            "candidates": ["go"],
+            "dropped": [],
+            "score": results[0]["score"],
+        }
     ]
     packet = next((world["packets"] / "tree-ok").iterdir())
     assert (packet / "input/pkg/mod.py").is_file() and json.loads(
@@ -916,7 +930,9 @@ def seed_accepted_row(world, model="glm-5.3-flash", category="canary", task_id=N
         "inputs": {},
         "manifest_sha256": manifest,
     }
-    world["ledger"].submit(task_id or (category + "-seed-" + model.replace(".", "-")), "project", spec)
+    world["ledger"].submit(
+        task_id or (category + "-seed-" + model.replace(".", "-")), "project", spec
+    )
     aid, generation = world["ledger"].claim(
         task_id or (category + "-seed-" + model.replace(".", "-")),
         alias or world["account"],
@@ -1021,9 +1037,7 @@ def test_dry_run_plans_without_touching_anything(world):
         json.dumps(dict(make_task("copy-ok", "brief.txt"), lanes=["go", "zai"]))
     )
     (world["board"] / "review-fam.json").write_text(
-        json.dumps(
-            dict(make_review_task("review-fam", "brief-approve.txt"), lanes=["zai"])
-        )
+        json.dumps(dict(make_review_task("review-fam", "brief-approve.txt"), lanes=["zai"]))
     )
     lanes = dict(world["lanes"])
     lanes["zai"] = dict(
@@ -1041,7 +1055,9 @@ def test_dry_run_plans_without_touching_anything(world):
         ["zai-alias"],
     )
     seed_active_attempt(world, "seed-busy")  # the go account is at capacity
-    seed_accepted_row(world, model="kimi-k3", alias="canary-evidence")  # the zai lane's model has its canary row
+    seed_accepted_row(
+        world, model="kimi-k3", alias="canary-evidence"
+    )  # the zai lane's model has its canary row
     now = time.time()
     world["ledger"].record_lane("go", ready_record(now))
     world["ledger"].record_lane("zai", dict(ready_record(now), provider="zai"))
@@ -1057,17 +1073,36 @@ def test_dry_run_plans_without_touching_anything(world):
         now=now,
         dry_run=True,
     )
-    qualified = sorted(
-        ("canary", "independent_review", "pure_function", "tests_multi_file")
-    )
+    qualified = sorted(("canary", "independent_review", "pure_function", "tests_multi_file"))
     assert plan["readiness"] == {
         "go": {"state": "busy", "qualified_for": qualified},
         "zai": {"state": "ready", "qualified_for": qualified},
     }
     assert plan["plan"] == [
-        {"task": "copy-ok", "lane": "zai", "reason": "selected"},
-        {"task": "copy-wrong", "lane": None, "reason": "lane_busy"},
-        {"task": "review-fam", "lane": None, "reason": "no_independent_family"},
+        {
+            "task": "copy-ok",
+            "lane": "zai",
+            "reason": "selected",
+            "candidates": ["go", "zai"],
+            "dropped": [],
+            "score": 0.5,
+        },
+        {
+            "task": "copy-wrong",
+            "lane": None,
+            "reason": "lane_busy",
+            "candidates": ["go"],
+            "dropped": [],
+            "score": None,
+        },
+        {
+            "task": "review-fam",
+            "lane": None,
+            "reason": "no_independent_family",
+            "candidates": ["zai"],
+            "dropped": [],
+            "score": None,
+        },
     ]
     # Nothing was dispatched, written or staged.
     assert {p.name: p.read_bytes() for p in world["board"].glob("*.json")} == before
@@ -1426,7 +1461,11 @@ def test_a_region_optin_refusal_excludes_the_model_until_expiry(world, monkeypat
     seed_accepted_row(world, model="deepseek-v4-flash", alias="ds-alias")
     for i in range(2):
         seed_accepted_row(
-            world, model="deepseek-v4-flash", category="pure_function", task_id=f"ds-pf-{i}", alias="ds-alias"
+            world,
+            model="deepseek-v4-flash",
+            category="pure_function",
+            task_id=f"ds-pf-{i}",
+            alias="ds-alias",
         )
     monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(refusing)])
     now = time.time()
@@ -1560,7 +1599,9 @@ def test_reasoning_overrun_hold_names_the_counts(world, monkeypatch):
         "attempt "
         + results[0]["attempt"]
         + " held: reasoning_overrun: finish_reason length with no content"
-        + " (" + counts + "); resolve with evidence"
+        + " ("
+        + counts
+        + "); resolve with evidence"
     )
 
 
@@ -1664,7 +1705,9 @@ def test_a_canary_dispatches_on_an_unverified_lane_and_nothing_else_does(world, 
     )
     monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(adapter)])
     now = time.time()
-    world["ledger"].record_lane("go", dict(ready_record(now), auth="unknown", qualification="unqualified"))
+    world["ledger"].record_lane(
+        "go", dict(ready_record(now), auth="unknown", qualification="unqualified")
+    )
     results = runner.tick(
         world["board"],
         world["project"],
@@ -1759,7 +1802,11 @@ def test_a_lane_without_canary_evidence_is_unqualified_until_its_canary_passes(w
     seed_accepted_row(world, model="qwen3.8-max", alias="qwen-alias")
     for i in range(2):
         seed_accepted_row(
-            world, model="qwen3.8-max", category="pure_function", task_id=f"qwen-pf-{i}", alias="qwen-alias"
+            world,
+            model="qwen3.8-max",
+            category="pure_function",
+            task_id=f"qwen-pf-{i}",
+            alias="qwen-alias",
         )
     view = runner.readiness_view(world["ledger"], lanes, now, accounts, world["ledger"].scorecard())
     assert view["go-qwen"]["state"] == "ready"

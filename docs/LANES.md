@@ -19,12 +19,13 @@ way: `inference-grid lane-init --json {"lane_id": …, "board_dir": …}`, then 
 
 ## Command Code GOAT
 
+Documentation only: the fields below are what a `goat` entry declares; no credential
+values are recorded here — the operator's `lanes.json` carries the credential path.
+
 ```json
 "goat": {
   "provider": "goat", "family": "glm", "model": "glm-5.3-flash",
-  "kind": "goat_cli", "credential_path": "/path/from/operator/config.json",
-  "executable": "/path/from/operator/commandcode", "plan_units": {"five_hour": 1, "weekly": 1},
-  "window": null, "max_concurrency": 1, "wall_seconds": 900,
+  "kind": "goat_cli", "executable": "/path/from/operator/commandcode",
   "categories": ["tests_multi_file", "fixtures_multi_file"]
 }
 ```
@@ -37,9 +38,7 @@ overhead, so small jobs are wasted on it.
 ```json
 "cline": {
   "provider": "cline", "family": "qwen", "model": "cline-pass/qwen3.8-max",
-  "kind": "cline_cli", "credential_path": "/path/from/operator/auth.json",
-  "executable": "/path/from/operator/cline", "plan_units": {"weekly": 1},
-  "window": null, "max_concurrency": 1, "wall_seconds": 600,
+  "kind": "cline_cli", "executable": "/path/from/operator/cline",
   "categories": ["pure_function", "independent_review"]
 }
 ```
@@ -54,6 +53,19 @@ every launch dies before it prints anything (`--version` names the signal). Poin
 `CLINE_BIN_PATH` at the platform package's real binary instead of `bin/.cline`: the
 launcher honours that variable first, and `doctor` runs `--version` so a broken launcher
 is a named `lane_binary_unavailable` finding rather than a silent failure.
+
+## board-prepare
+
+The capacity loop's `board_prepare.py` reconfigures each account from its observation
+file before every board tick. The `goat` account is configured from
+`goat-observation.json` (written by `collect_goat.py`: the `windowLimits` five-hour and
+weekly readings plus the monthly credits read against the plan's 70-cap monthly window)
+and the `cline` account from `cline-observation.json` (written by `collect_cline.py`:
+the three usage-limit windows, `ok` only when all answered). Each observation's windows
+map to remaining units against the documented caps — remaining share of the window ×
+the window's unit cap, the same shape the zai and go accounts already use — and the
+result, with the observation timestamp, is what `configure_account` writes for the
+lane's admission decision.
 
 ## Codex (OpenAI) — `codex_cli`, pending operator confirmation
 
