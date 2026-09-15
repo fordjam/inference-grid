@@ -25,6 +25,7 @@ from pathlib import Path
 from ..ledger import Refused, digest
 from ..lanes.brief import (
     commit_gate_script,
+    trailer_for,
     compose_prompt,
     hard_rules,
     mentioned_paths,
@@ -232,8 +233,9 @@ def _git(repo, *args, check=True):
     return proc.stdout
 
 
-def _gates_for(spec, base_rev, attempt_dir):
-    """The task's declared gates, then the commit gate: one trailered commit, clean tree."""
+def _gates_for(spec, base_rev, attempt_dir, trailer):
+    """The task's declared gates, then the commit gate: one commit carrying the lane's
+    own trailer (the model that did the work, never the GLM default), clean tree."""
     gates = [
         Gate(
             g["name"],
@@ -247,7 +249,7 @@ def _gates_for(spec, base_rev, attempt_dir):
     gate_dir = Path(attempt_dir) / "gate-scripts"
     gate_dir.mkdir(parents=True, exist_ok=True)
     script = gate_dir / "commit_gate.py"
-    script.write_text(commit_gate_script(base_rev))
+    script.write_text(commit_gate_script(base_rev, trailer))
     gates.append(Gate("commit", [sys.executable, str(script)], timeout=60))
     return gates
 
@@ -340,6 +342,7 @@ def dispatch_packet(ledger, lanes, lane_id, task, project_root, packet_dir, acco
             base=spec["base"],
             python=sys.executable,
             report_name=task["id"] + ".md",
+            trailer=trailer_for(lane["model"]),
         )
         verdict = build_loop(
             adapter,
@@ -347,7 +350,7 @@ def dispatch_packet(ledger, lanes, lane_id, task, project_root, packet_dir, acco
             clone,
             env,
             prompt,
-            _gates_for(spec, base_rev, attempt_dir),
+            _gates_for(spec, base_rev, attempt_dir, trailer_for(lane["model"])),
             attempt_dir,
             wall_seconds=task["budget"]["wall_seconds"],
             max_rounds=spec["max_rounds"],

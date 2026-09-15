@@ -7,6 +7,7 @@ sandbox and adapter seams are monkeypatched; no test opens the real sandbox or n
 """
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -50,9 +51,10 @@ report.write_text(prior + "report for the packet\\n")
 subprocess.run(["git", "add", "-A"], check=True)
 staged = subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode != 0
 if staged:
+    trailer = sys.argv[2] if len(sys.argv) > 2 else "Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>"
     subprocess.run(
         ["git", "-c", "user.email=p@t", "-c", "user.name=p", "commit", "-q",
-         "-m", "packet work\\n\\nCo-Authored-By: GLM-5.3-Flash <noreply@z.ai>"],
+         "-m", "packet work\\n\\n" + trailer],
         check=True,
     )
 print(json.dumps({"sessionId": "sess-packet-1"}))
@@ -68,7 +70,10 @@ class FakeCommitAdapter(packet.Adapter):
         self.report_name = report_name
 
     def _argv(self, prompt):
-        return [sys.executable, str(Path(FAKE_AGENT_SOURCE)), self.report_name]
+        # The agent commits with whatever trailer the prompt told it to use, as a real
+        # lane does: the gate and the prompt must name the same one.
+        told = re.findall(r"`(Co-Authored-By: [^`]+)`", prompt)
+        return [sys.executable, str(Path(FAKE_AGENT_SOURCE)), self.report_name, *told[:1]]
 
     def first(self, prompt):
         return self._argv(prompt)
@@ -385,3 +390,23 @@ def test_dry_run_plans_the_packet_task(world):
     assert world["ledger"].status() == [] or all(
         r["account"] != world["account"] for r in world["ledger"].status()
     )
+
+
+def test_the_commit_gate_and_the_prompt_carry_the_lanes_own_trailer(world):
+    """A DeepSeek lane's packet is attributed to DeepSeek — the gate demanded the GLM
+    trailer for every lane, so DeepSeek's landed work was signed GLM."""
+    lane = world["lanes"]["packet-cli"]
+    lane.update(family="deepseek", model="cline-pass/deepseek-v4.1-flash", kind="cline_cli")
+    world["lanes_path"].write_text(json.dumps({"lanes": world["lanes"]}))
+    world["ledger"].configure_account(
+        world["account"],
+        1,
+        {"five_hour": 10, "weekly": 20},
+        time.time() + 600,
+        ["cline-pass/deepseek-v4.1-flash"],
+    )
+    results = tick(world)
+    assert [r["result"] for r in results] == ["passed"]
+    message = git(world["project"], "log", "-1", "--format=%B", "packet/d1-packet")
+    assert "Co-Authored-By: Deepseek-V4.1-Flash <noreply@deepseek.com>" in message
+    assert "GLM" not in message
