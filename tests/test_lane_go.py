@@ -317,21 +317,22 @@ class GoLaneTests(unittest.TestCase):
 
     def test_thinking_budget_rides_on_max_tokens(self):
         # The endpoint's documented request schema honours no token-count reasoning field
-        # for the model, so the task's thinking budget caps max_tokens (plus a generous
-        # content allowance) and the verdict records that the budget itself could not be
-        # forwarded: no effort field in the body, reasoning_effort unsupported.
+        # for the model, so the task's thinking budget only sizes max_tokens (three times the
+        # budget plus a content allowance: the cap guards spend, it does not bound thinking)
+        # and the verdict records that the budget itself could not be forwarded: no effort
+        # field in the body, reasoning_effort unsupported.
         request, attempt = self.attempt(expected=["out.py"])
         sender = self.send(self.native())
         receipt, verdict = go.run(
             dict(request, thinking_tokens=6000), self.lane, attempt, send=sender
         )
         self.assertIsNone(verdict["refusal"], verdict)
-        self.assertEqual(sender.recorded["body"]["max_tokens"], 10000)
+        self.assertEqual(sender.recorded["body"]["max_tokens"], 22000)
         self.assertNotIn("reasoning_effort", sender.recorded["body"])
         self.assertNotIn("thinking_tokens", sender.recorded["body"])
         self.assertEqual(verdict["reasoning_effort"], "unsupported")
         self.assertEqual(verdict["reasoning_budget"], "unsupported")
-        self.assertEqual((verdict["thinking_tokens"], verdict["max_tokens"]), (6000, 10000))
+        self.assertEqual((verdict["thinking_tokens"], verdict["max_tokens"]), (6000, 22000))
         self.assertTrue((attempt / "artifacts/out.py").is_file())
 
     def test_deepseek_v4_flash_gets_the_tier_policy(self):
@@ -363,7 +364,7 @@ class GoLaneTests(unittest.TestCase):
         self.assertEqual(
             verdict["refusal"],
             "reasoning_overrun: finish_reason length with no content"
-            " (reasoning_tokens 9000 of max_tokens 10000)",
+            " (reasoning_tokens 9000 of max_tokens 22000)",
         )
 
     def test_deepseek_served_by_an_unexpected_model_is_refused(self):
@@ -431,7 +432,7 @@ class GoLaneTests(unittest.TestCase):
             self.assertEqual(verdict["reasoning_effort"], effort, thinking)
             self.assertNotIn("reasoning_budget", verdict)
             if thinking is not None and thinking > 0:
-                self.assertEqual(sender.recorded["body"]["max_tokens"], thinking + 4000)
+                self.assertEqual(sender.recorded["body"]["max_tokens"], 3 * thinking + 4000)
             else:
                 self.assertEqual(sender.recorded["body"]["max_tokens"], 16000)
             self.assertTrue((attempt / "artifacts/out.py").is_file())
@@ -449,7 +450,7 @@ class GoLaneTests(unittest.TestCase):
         self.assertEqual(
             verdict["refusal"],
             "reasoning_overrun: finish_reason length with no content"
-            " (reasoning_tokens 16000 of max_tokens 10000)",
+            " (reasoning_tokens 16000 of max_tokens 22000)",
         )
         self.assertEqual(verdict["finish_reason"], "length")
         self.assertTrue((attempt / "native.json").is_file())

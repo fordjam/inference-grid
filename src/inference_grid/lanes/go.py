@@ -27,6 +27,12 @@ MAX_CONTENT = 40000
 # Generous room for the reply itself when a thinking budget caps max_tokens; the reply
 # is a single JSON object.
 CONTENT_ALLOWANCE = 4000
+# max_tokens is a spend guard, not a thinking limit: the endpoint shapes reasoning only by
+# the categorical reasoning_effort below, never by a token count, and on 2026-09-14 kimi-k3
+# at "high" reasoned 1.4-1.7x a 6 000 budget on 16-18 K-token review prompts — the one
+# capped at thinking_tokens + CONTENT_ALLOWANCE (10 000) overran with no content, mid-way
+# through a real finding. Three times the budget leaves that room and still bounds a runaway.
+REASONING_HEADROOM = 3
 # Capability map: the reasoning_effort values the model's documented request schema
 # honours on this OpenAI-compatible endpoint. kimi-k3: low/high/max, endpoint default
 # max (OpenCode Zen docs). deepseek-v4-flash: DeepSeek's own ChatCompletions schema
@@ -282,7 +288,7 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
     verdict["lane_wall_seconds"] = lane_wall
     thinking_tokens = request.get("thinking_tokens")
     if type(thinking_tokens) is int and thinking_tokens > 0:
-        max_tokens = thinking_tokens + CONTENT_ALLOWANCE
+        max_tokens = REASONING_HEADROOM * thinking_tokens + CONTENT_ALLOWANCE
         verdict["thinking_tokens"] = thinking_tokens
     verdict["max_tokens"] = max_tokens
     body = {
