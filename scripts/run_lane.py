@@ -35,6 +35,8 @@ from inference_grid.lanes.packet import (  # noqa: E402
     Gate,
     build_loop,
     compact_transcripts,
+    fix_prompt,
+    run_gates,
 )
 from inference_grid.lanes.scout import orient  # noqa: E402
 
@@ -247,9 +249,14 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
     title = PACKET_HEADING.search(packet_text(brief, packet_id)).group(2)
     branch = f"{args.branch_prefix}/{packet_id.lower()}-{slug(title)}"
     report_name = f"glm-brief-14-{packet_id.lower()}.md"
-    # Fresh branch from the base as it stands now in the coordinator's repo.
     git(clone, "fetch", "-q", "origin")
-    git(clone, "checkout", "-q", "-B", branch, f"origin/{args.base}")
+    resuming = args.resume and git(clone, "branch", "--list", branch)
+    if resuming:
+        # Keep the branch and whatever the previous session committed; gates decide next.
+        git(clone, "checkout", "-q", branch)
+    else:
+        # Fresh branch from the base as it stands now in the coordinator's repo.
+        git(clone, "checkout", "-q", "-B", branch, f"origin/{args.base}")
     packet = packet_text(brief, packet_id)
     orientation = orient(clone, mentioned_paths(packet))
     prompt = compose_prompt(
@@ -293,17 +300,42 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
     )
     gates = gates_for(args.python, f"origin/{args.base}", attempt_dir / "gate-scripts")
     print(f"[{args.lane}] {packet_id} → {branch} (attempt {attempt_dir})", flush=True)
-    verdict = build_loop(
-        adapter,
-        lambda argv: sandbox.command(profile, argv),
-        clone,
-        env,
-        prompt,
-        gates,
-        attempt_dir,
-        wall_seconds=args.wall_seconds,
-        max_rounds=args.max_rounds,
-    )
+    if resuming:
+        pre = run_gates(clone, gates, env, attempt_dir / "gates-0")
+        if all(r.ok for r in pre):
+            verdict = {
+                "adapter": adapter.name,
+                "reason": "gates_passed",
+                "rounds": [],
+                "gates_passed": True,
+                "verified_in_lane": True,
+                "elapsed_s": 0,
+            }
+            (attempt_dir / "verdict.json").write_text(json.dumps(verdict, indent=2))
+            print(f"[{args.lane}] {packet_id} resumed: gates already green", flush=True)
+        else:
+            prompt = (
+                prompt
+                + "\n\n## Resuming\n\nA previous session on this branch already committed. "
+                + "Do not start over: amend that commit (it must stay the only commit ahead of the base) "
+                + "so that these gates pass.\n\n"
+                + fix_prompt(pre, 1, args.max_rounds)
+            )
+            verdict = None
+    else:
+        verdict = None
+    if verdict is None:
+        verdict = build_loop(
+            adapter,
+            lambda argv: sandbox.command(profile, argv),
+            clone,
+            env,
+            prompt,
+            gates,
+            attempt_dir,
+            wall_seconds=args.wall_seconds,
+            max_rounds=args.max_rounds,
+        )
     compact_transcripts(attempt_dir)
     passed = bool(verdict.get("gates_passed"))
     head = git(clone, "rev-parse", "--short", "HEAD")
@@ -366,6 +398,9 @@ def main(argv=None):
     p.add_argument("--lane", default="glm")
     p.add_argument("--model", default="z-ai/glm-5.3-flash")
     p.add_argument("--adapter", choices=("command_code", "cline"), default="command_code")
+    p.add_argument(
+        "--resume", action="store_true", help="keep an existing packet branch; gates decide"
+    )
     p.add_argument("--python", required=True, help="interpreter with the package's dependencies")
     p.add_argument("--packets-root", default="~/.grid-workspaces/packets")
     p.add_argument(
