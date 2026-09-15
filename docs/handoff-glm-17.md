@@ -75,11 +75,6 @@ authored on the same family by this path, and a failover task never fails over a
 - Size: small–medium. Why: the hedge race-N buys, at the cost of one extra attempt only
   when something already failed.
 
----
-
-## Definition of done, per packet
-As brief 15. Report at `docs/reports/brief-17-<packet>.md`.
-
 #### J5. The boards on the local dashboard
 The operator sees planned and active work only by reading board JSON and the ledger by hand;
 `inference-grid digest` is markdown with counts (and lists boards twice when a config
@@ -105,3 +100,8 @@ directory holds duplicates — fix that while here: one entry per board name). A
   directory; the digest's duplicate fix; `upload.py` strips `boards`; `clean_snapshot`
   refuses it; a static check that `app.js` references `/api/boards`.
 - Size: medium.
+
+---
+
+## Definition of done, per packet
+As brief 15. Report at `docs/reports/brief-17-<packet>.md`.
