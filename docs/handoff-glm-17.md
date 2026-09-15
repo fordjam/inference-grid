@@ -79,3 +79,29 @@ authored on the same family by this path, and a failover task never fails over a
 
 ## Definition of done, per packet
 As brief 15. Report at `docs/reports/brief-17-<packet>.md`.
+
+#### J5. The boards on the local dashboard
+The operator sees planned and active work only by reading board JSON and the ledger by hand;
+`inference-grid digest` is markdown with counts (and lists boards twice when a config
+directory holds duplicates — fix that while here: one entry per board name). Add a
+**Boards** section to the local dashboard (`src/inference_grid/capacity_web`, served by
+`deployments/local/capacity_web.py`), fed by a new data node:
+- `inference-grid boards --json {boards_dir, database, packets_root}` → JSON: per board
+  `{name, planned: [...], active: [...], blocked: [...], landed_today: [...]}` where
+  *planned* is the dry-run plan row for each `ready` task (candidate lane, `reason` when it
+  cannot dispatch — `account busy`, `quota stale`, `no_lane_for_category` — and age),
+  *active* is each `dispatched` task's live attempt (lane, model, round N of max, minutes
+  elapsed, the last gate result read from the attempt's newest `gates-*` directory),
+  *blocked* carries the reason and whether it is operator-owed (reuse
+  `operator_queue.OPERATOR_REASON_WORDS`), *landed_today* the tasks settled `landed` or
+  `passed` since midnight local. Reads only; never dispatches; never spends quota.
+- `deployments/local/overlay_build.py` calls it and writes the result under `boards` in
+  `overlay.json`; `capacity_web` serves it at `/api/boards` and the page renders one card per
+  board (counts in the header, the four lists beneath, the active row's round and gate first).
+  The theme tokens the page already uses; no new dependency.
+- **Local only.** `upload.py` must not send `boards`, and the cloud's `clean_snapshot` must
+  reject it if it ever arrives: task ids are the operator's project names.
+- Tests: the data node against a temp board with one task in each state and a fake attempt
+  directory; the digest's duplicate fix; `upload.py` strips `boards`; `clean_snapshot`
+  refuses it; a static check that `app.js` references `/api/boards`.
+- Size: medium.
