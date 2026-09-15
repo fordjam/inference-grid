@@ -335,7 +335,8 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
             args.database,
             task=f"lane-{args.lane}-14-{packet_id}-{stamp}",
             model=args.model,
-            account="cline" if args.adapter == "cline" else "goat",
+            # The ledger's account ids, as configured by board-prepare.
+            account="cline" if args.adapter == "cline" else "goat-account",
             argv=adapter.first("…"),
             workspace=attempt_dir,
             verdict=verdict,
