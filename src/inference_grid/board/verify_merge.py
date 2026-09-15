@@ -37,7 +37,13 @@ def _git(repo, *args, check=True):
 
 def _gate_nodes(spec_gates):
     return [
-        Gate(g["name"], list(g["argv"]), cwd=g.get("cwd", "."), timeout=g.get("timeout", 1800))
+        Gate(
+            g["name"],
+            list(g["argv"]),
+            cwd=g.get("cwd", "."),
+            timeout=g.get("timeout", 1800),
+            env=dict(g.get("env") or {}),
+        )
         for g in spec_gates
     ]
 

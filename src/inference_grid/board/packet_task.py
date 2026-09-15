@@ -72,6 +72,9 @@ def validate_packet_task(raw):
     board/task.py is provider-authored (integrated unmodified), so the shared key
     checks are reused by validating a copy whose category is one it accepts; everything
     packet-specific is checked here. Defaults are applied at dispatch, not here.
+    A landed task (board/land.py) is terminal after `passed` and carries the landing
+    record; the provider-authored state set has no such state, so the shared check sees
+    `passed` and the landed shape is checked here.
     """
 
     def err(k, m):
@@ -83,8 +86,27 @@ def validate_packet_task(raw):
         err("category", "expected packet")
     if "spec" not in raw:
         err("task", "missing spec key")
-    core = {k: v for k, v in raw.items() if k != "spec"}
+    landed = raw.get("landed")
+    if raw.get("state") == "landed" or landed is not None:
+        if raw.get("state") != "landed" or not isinstance(landed, dict):
+            err("landed", "state landed requires the landed record")
+        if set(landed) != {"base_head", "merge_commit", "how"}:
+            err("landed", "must have exactly base_head, merge_commit, how")
+        if landed["how"] not in ("ff", "merge", "union"):
+            err("landed", "how must be ff, merge or union")
+        for head in (landed["base_head"], landed["merge_commit"]):
+            if (
+                not isinstance(head, str)
+                or len(head) != 40
+                or not all(c in "0123456789abcdef" for c in head)
+            ):
+                err("landed", "heads must be full commit ids")
+        if raw.get("blocked_reason") is not None:
+            err("blocked_reason", "must be None when landed")
+    core = {k: v for k, v in raw.items() if k not in ("spec", "landed")}
     core["category"] = "pure_function"
+    if core["state"] == "landed":
+        core["state"] = "passed"
     validate_task(core)
     spec = raw["spec"]
     if not isinstance(spec, dict):
@@ -134,7 +156,7 @@ def validate_packet_task(raw):
         ):
             err("spec", "gate env must be a dict of strs")
     out = {
-        k: (dict(v) if k == "budget" else list(v) if isinstance(v, list) else v)
+        k: (dict(v) if isinstance(v, dict) else list(v) if isinstance(v, list) else v)
         for k, v in raw.items()
         if k != "spec"
     }

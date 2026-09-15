@@ -80,9 +80,33 @@ attempt completes with the verdict as its receipt (`verified_in_lane`, `repairs`
 rounds − 1, and an artifact digest pinning the exact head commit), and the task settles
 `passed` with no review task — the gates already ran as code inside the attempt. On any
 other outcome the attempt is held with the loop's reason and the branch is left inside the
-attempt directory for the operator. The base branch is never advanced by the runner;
-advancing it stays an operator/`inbox-integrate` step. `board-tick --dry-run` plans packet
-tasks like any other.
+attempt directory for the operator. The base branch is never advanced by the dispatch
+path; landing it is the next node. `board-tick --dry-run` plans packet tasks like any
+other.
+
+## Landing
+
+`land` (brief 16 I1) is the code node between a passed packet and the base: CLI
+`inference-grid land --json {board_dir, project_root, task, base, gates, packets_root?,
+dry_run}` — the same node `board-tick` calls for every `passed` packet task when the
+board config carries `"auto_land": true` (the dry run reports what would land and why
+not). It first proves the branch still merges into the base with the task's declared
+gates (`board/verify_merge.py`, scratch worktree), then merges in a worktree of the
+base — the worktree that owns the branch when one exists, a scratch `git worktree`
+claimed and removed for the landing otherwise — never the operator checkout.
+
+- `--no-ff` merges, except that a base the branch simply extends fast-forwards (`how:
+  "ff"` — the gates just proved that exact tree). Conflicts confined to the two
+  append-only ledgers `docs/CONTRIBUTIONS.md` and `docs/LANES.md` are union-merged
+  (rows are independent; `how: "union"`); any other conflict blocks the task with the
+  file list. The gates run once more on the tree that will actually be committed before
+  the merge commit is kept; a moved or dirty base blocks instead of committing.
+- Landings are serialized per base with a lock directory under `packets_root`; a second
+  landing reports busy and leaves the task `passed` for the next tick.
+- On success the task gains `landed: {base_head, merge_commit, how}` and settles
+  `landed` — a terminal state after `passed`, validated in `board/land.py` because
+  `board/task.py` is provider-authored — and the ledger records a `landed` event
+  naming the packet's attempt.
 
 ## Authoring tools
 

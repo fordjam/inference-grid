@@ -958,6 +958,7 @@ def tick(
     now=None,
     prepare_argv=None,
     dry_run=False,
+    auto_land=False,
 ):
     """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records.
 
@@ -967,11 +968,17 @@ def tick(
     `candidates`, `dropped` (lanes filtered out with reasons, budget_unfit foremost) and
     `score`.
 
+    With auto_land, after the ready loop the tick lands every `passed` packet task
+    through board.land (brief 16 I1): the verify proof, the union-merge, gates on the
+    merged tree, `landed` on the task. Records for those carry lane None and the result
+    `landed`, `land_blocked` or `land_busy`.
+
     With dry_run the tick stops at route for every ready task — readiness view,
     campaign windows, busy accounts, family exclusion, unsupported_until, budget fit —
     and returns {"readiness": view, "plan": [...]} instead: the plan a real tick would
     follow, without creating an attempt, writing a task file or touching a packet
-    directory.
+    directory. Auto-land appears in the plan as what would land and why not; its proof
+    runs read-only in its own scratch worktree.
     """
     now = time.time() if now is None else now
     results = []
@@ -1304,18 +1311,54 @@ def tick(
                 "score": choice["score"],
             }
         )
+    if auto_land:
+        from .land import land_packet
+
+        # Reload: a packet that passed in THIS tick is settled in its file, not in the
+        # snapshot the ready loop iterated. One landing at a time is land's own lock.
+        for task_id, (path, task) in load_board(board_dir).items():
+            if task["category"] != "packet" or task["state"] != "passed" or task.get("landed"):
+                continue
+            report = land_packet(
+                board_dir,
+                project_root,
+                task_id,
+                task["spec"]["base"],
+                task["spec"]["gates"],
+                ledger,
+                packets_root,
+                dry_run=dry_run,
+            )
+            if dry_run:
+                result = (
+                    f"auto_land: would land ({report['how']})"
+                    if report.get("would_land")
+                    else "auto_land: would not land: " + str(report.get("reason"))
+                )
+            elif report.get("landed"):
+                result = "landed"
+            elif "busy" in str(report.get("reason", "")):
+                result = "land_busy"
+            else:
+                result = "land_blocked"
+            results.append(
+                {"task": task_id, "lane": None, "attempt": None, "result": result, "land": report}
+            )
     if dry_run:
         return {
             "readiness": readiness,
             "plan": [
-                {
-                    "task": r["task"],
-                    "lane": r["lane"],
-                    "reason": r["result"],
-                    "candidates": r.get("candidates", []),
-                    "dropped": r.get("dropped", []),
-                    "score": r.get("score"),
-                }
+                dict(
+                    {
+                        "task": r["task"],
+                        "lane": r["lane"],
+                        "reason": r["result"],
+                        "candidates": r.get("candidates", []),
+                        "dropped": r.get("dropped", []),
+                        "score": r.get("score"),
+                    },
+                    **({"land": r["land"]} if "land" in r else {}),
+                )
                 for r in results
             ],
         }

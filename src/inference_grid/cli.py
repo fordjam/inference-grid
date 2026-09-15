@@ -20,6 +20,7 @@ def board_tick(
     prepare_argv=None,
     dry_run=False,
     boards=None,
+    auto_land=False,
 ):
     from .board.runner import tick as board_run
     from .lanes.runner import load_lanes
@@ -43,6 +44,7 @@ def board_tick(
                             "lanes_path",
                             "accounts_by_lane",
                             "packets_root",
+                            "auto_land",
                         )
                         if key in config
                     },
@@ -61,6 +63,7 @@ def board_tick(
         packets_root,
         prepare_argv=prepare_argv,
         dry_run=dry_run,
+        auto_land=auto_land,
     )
 
 
@@ -156,6 +159,7 @@ def main():
             "tick",
             "watch",
             "verify-merge",
+            "land",
         ],
     )
     parser.add_argument("--json", help="JSON argument file; never store credentials here")
@@ -200,6 +204,7 @@ def main():
             "cooldown",
             "watch",
             "verify-merge",
+            "land",
         }
         and not args.json
     ):
@@ -213,6 +218,13 @@ def main():
         raise SystemExit(0 if report["mergeable"] and all(g["ok"] for g in report["gates"]) else 1)
     ledger = Ledger(args.database)
     data = json.load(open(args.json)) if args.json else {}
+    if args.command == "land":
+        # A code node over git, the task file and the ledger: no lane, no quota.
+        from .board.land import land_cli
+
+        report = land_cli(data, ledger)
+        print(json.dumps(report, indent=2))
+        raise SystemExit(0 if report.get("landed") or report.get("would_land") else 1)
     if args.command == "evaluation":
         # Markdown, not JSON: stdout by default, the out file otherwise. With
         # replace_section the generated section is spliced into the file — the one
