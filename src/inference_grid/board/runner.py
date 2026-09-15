@@ -26,10 +26,11 @@ from ..flash_window import flash_window
 from ..lane_readiness import lane_readiness
 from ..ledger import ACTIVE, Refused, classifier_view, digest, lanes as lane_records, select
 from ..ledger import aliases as alias_records, attempts as attempt_records
+from ..ledger import events as ledger_events, tasks as task_records
 from ..worker import execute
 from .guard import check_input
 from .task import validate_task
-from ..lanes.select import select_lane
+from ..lanes.route import route
 
 RUNNER = [sys.executable, "-m", "inference_grid.lanes.runner"]
 
@@ -184,6 +185,10 @@ def lane_view(lanes, now):
             "categories": lane["categories"],
             "window_active": active,
             "explicit_only": lane["family"] in ("claude", "openai"),
+            # Budget-fit caps when the operator's config carries them; the packaged
+            # config's fixed key set cannot, and route falls back to the go.py policy.
+            "max_tokens": lane.get("max_tokens"),
+            "context": lane.get("context"),
         }
     return view
 
@@ -271,6 +276,55 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None, scorecard=None):
             entry["reason"] = "model_refused_recently"
         view[lane_id] = entry
     return view
+
+
+def calibration_reports(ledger):
+    """Per (family, model) aggregate of the ledger's calibration outcomes.
+
+    score_calibration records one outcome per calibration case with category
+    "calibration" and accepted = all defects recalled and no false positives
+    (board/calibration.py), so a lane's acceptance rate over those outcomes is the
+    strict recall the calibration gate measured. route blends that rate into the
+    selection score; the rows match a scorecard row's identity minus the category.
+    """
+    with ledger.engine.connect() as con:
+        specs = {t["id"]: t["spec"] for t in con.execute(select(task_records)).mappings()}
+        rows = list(con.execute(select(attempt_records)).mappings())
+        outcomes = {}
+        for e in con.execute(
+            select(ledger_events).where(ledger_events.c.kind == "outcome_recorded")
+        ).mappings():
+            detail = e["detail"]
+            if isinstance(detail, dict) and detail.get("category") == "calibration":
+                outcomes[e["attempt"]] = detail
+    agg = {}
+    for row in rows:
+        detail = outcomes.get(row["id"])
+        if detail is None:
+            continue
+        spec = specs.get(row["task"], {})
+        key = (spec.get("family", "?"), spec.get("model", "?"))
+        entry = agg.setdefault(key, {"family": key[0], "model": key[1], "cases": 0, "accepted": 0})
+        entry["cases"] += 1
+        entry["accepted"] += bool(detail.get("accepted"))
+    return [agg[key] for key in sorted(agg)]
+
+
+def packet_bytes(project_root, task):
+    """Byte size of the packet's staged inputs, the brief among them.
+
+    route estimates the prompt at inputs_bytes / 4 tokens; task validation requires the
+    brief in `inputs`, so the estimate already covers it. Inputs missing on disk are
+    skipped here — staging refuses them later with the real reason.
+    """
+    root = Path(project_root)
+    total = 0
+    for name in task["inputs"]:
+        try:
+            total += (root / name).stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def tree_task(task):
@@ -590,12 +644,14 @@ def review_brief_text(task, context=None):
     # Branch-review ids already carry the review- prefix; never double it.
     review_label = task["id"] if task["id"].startswith("review-") else "review-" + task["id"]
     return (
-        "You are an independent reviewer for task " + review_label + ". "
+        "You are an independent reviewer for task "
+        + review_label
+        + ". "
         + context.strip()
         + " Read every staged file first. The coordinator's acceptance tests "
         "are staged too; a difference between them and the artifact's own tests is a finding. "
         "Do not report style preferences or hypothetical concerns; mark judgment calls as "
-        'checked and move on. Any line, size or length budget in the original brief is '
+        "checked and move on. Any line, size or length budget in the original brief is "
         "advisory: it is a hint, not a requirement, and exceeding it is not a finding. "
         'Then decide "approved" if no demonstrated defect changes '
         'behavior, otherwise "rejected". You have no tools; every file you need is in '
@@ -835,16 +891,23 @@ def tick(
 ):
     """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records.
 
-    With dry_run the tick stops at select_lane for every ready task — readiness view,
-    campaign windows, busy accounts, family exclusion, unsupported_until — and returns
-    {"readiness": view, "plan": [{"task", "lane", "reason"}, ...]} instead: the plan a
-    real tick would follow, without creating an attempt, writing a task file or touching
-    a packet directory.
+    Selection goes through lanes.route, which defaults and budget-filters the candidate
+    set and hands select_lane a scorecard whose Laplace scores carry the calibration
+    blend; every record for a task that reached route also carries the choice's
+    `candidates`, `dropped` (lanes filtered out with reasons, budget_unfit foremost) and
+    `score`.
+
+    With dry_run the tick stops at route for every ready task — readiness view,
+    campaign windows, busy accounts, family exclusion, unsupported_until, budget fit —
+    and returns {"readiness": view, "plan": [...]} instead: the plan a real tick would
+    follow, without creating an attempt, writing a task file or touching a packet
+    directory.
     """
     now = time.time() if now is None else now
     results = []
     view = lane_view(lanes, now)
     scorecard = ledger.scorecard()
+    calibration = calibration_reports(ledger)
     readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
     board = load_board(board_dir)
     for task_id, (path, task) in board.items():
@@ -868,14 +931,22 @@ def tick(
                 }
             )
             continue
-        allowed = {k: v for k, v in view.items() if k in task["lanes"]}
-        # The canary is the only task allowed on a lane still earning its evidence:
-        # unverified (auth unknown) and unqualified (qualification pending) lanes are
-        # presented as ready for it — but never a lane whose model the endpoint refused
-        # recently, which no packet can fix by re-probing. A canary is also implicitly in
-        # every lane's categories: registering a lane costs nothing until it earns rows.
+        # route restricts an explicit `lanes` list itself and defaults an absent/empty
+        # one to every lane declaring the category (minus explicit_only families), so
+        # the whole view is presented; readiness is classified per lane below either way.
+        lanes_view = view
+        if task["category"] == "canary":
+            # The canary is the only task allowed on a lane still earning its evidence:
+            # unverified (auth unknown) and unqualified (qualification pending) lanes are
+            # presented as ready for it — but never a lane whose model the endpoint refused
+            # recently, which no packet can fix by re-probing. A canary is also implicitly in
+            # every lane's categories: registering a lane costs nothing until it earns rows.
+            lanes_view = {
+                lane_id: dict(lane, categories=list(lane.get("categories") or []) + ["canary"])
+                for lane_id, lane in view.items()
+            }
         task_readiness = {}
-        for lane_id in allowed:
+        for lane_id in view:
             entry = dict(readiness[lane_id])
             if (
                 task["category"] == "canary"
@@ -891,31 +962,51 @@ def tick(
                 entry["state"] = "unqualified"
                 entry["reason"] = "not_qualified_for_category"
             task_readiness[lane_id] = entry
-        if task["category"] == "canary":
-            allowed = {
-                lane_id: dict(lane, categories=list(lane.get("categories") or []) + ["canary"])
-                for lane_id, lane in allowed.items()
-            }
-        choice = select_lane(
-            {"category": task["category"], "author_family": task["author_family"]},
-            allowed,
+        choice = route(
+            {
+                "category": task["category"],
+                "author_family": task["author_family"],
+                "lanes": list(task["lanes"]),
+            },
+            lanes_view,
             task_readiness,
             scorecard,
+            calibration,
             now,
+            packet_bytes(project_root, task),
         )
         if choice["lane"] is None:
             reason = choice["reason"]
-            if allowed and all(readiness[k]["state"] == "busy" for k in allowed):
-                # Every allowed lane is at its concurrency cap; say so instead of the
-                # generic no-ready-lane reason.
+            candidates = choice["candidates"]
+            if candidates and all(readiness[k]["state"] == "busy" for k in candidates):
+                # Every remaining candidate is at its concurrency cap; say so instead of
+                # the generic no-ready-lane reason.
                 reason = "lane_busy"
-            results.append({"task": task_id, "lane": None, "attempt": None, "result": reason})
+            results.append(
+                {
+                    "task": task_id,
+                    "lane": None,
+                    "attempt": None,
+                    "result": reason,
+                    "candidates": candidates,
+                    "dropped": choice["dropped"],
+                    "score": choice["score"],
+                }
+            )
             continue
         lane_id = choice["lane"]
         if dry_run:
             # The plan stops here: no dispatched state, no packet, no attempt.
             results.append(
-                {"task": task_id, "lane": lane_id, "attempt": None, "result": choice["reason"]}
+                {
+                    "task": task_id,
+                    "lane": lane_id,
+                    "attempt": None,
+                    "result": choice["reason"],
+                    "candidates": choice["candidates"],
+                    "dropped": choice["dropped"],
+                    "score": choice["score"],
+                }
             )
             continue
         packet_dir = Path(packets_root) / task_id / time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
@@ -1040,9 +1131,7 @@ def tick(
                     passed = False
                     result = "review_rejected"
                     summary = f"review rejected with {len(findings)} finding(s)"
-                    advisory = [
-                        i for i, f in enumerate(findings, 1) if advisory_size_finding(f)
-                    ]
+                    advisory = [i for i, f in enumerate(findings, 1) if advisory_size_finding(f)]
                     if advisory:
                         summary += (
                             " (finding " + ", ".join(map(str, advisory)) + " advisory-only:"
@@ -1085,13 +1174,24 @@ def tick(
                 "lane": lane_id,
                 "attempt": aid,
                 "result": result,
+                "candidates": choice["candidates"],
+                "dropped": choice["dropped"],
+                "score": choice["score"],
             }
         )
     if dry_run:
         return {
             "readiness": readiness,
             "plan": [
-                {"task": r["task"], "lane": r["lane"], "reason": r["result"]} for r in results
+                {
+                    "task": r["task"],
+                    "lane": r["lane"],
+                    "reason": r["result"],
+                    "candidates": r.get("candidates", []),
+                    "dropped": r.get("dropped", []),
+                    "score": r.get("score"),
+                }
+                for r in results
             ],
         }
     return results
