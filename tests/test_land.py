@@ -347,6 +347,34 @@ def test_a_dirty_project_root_holding_the_base_is_refused(world):
     assert _base_head(world_) == before and _task_file(world_)["state"] == "passed"
 
 
+def test_a_dirty_board_directory_is_committed_on_the_base_and_landing_proceeds(tick_world):
+    """The runner rewrites the task file on every settlement; a board kept in git is dirty
+    exactly when a task has just passed. That must not stop the landing (or, worse, be
+    reset to `ready` by the checkout sync and dispatched again)."""
+    world_ = tick_world
+    _git(world_["project"], "checkout", "-q", "main")
+    _write_task(world_["board"], make_packet_task(state="ready"))
+    _git(world_["project"], "add", "grid/board")
+    _git(world_["project"], "commit", "-q", "-m", "board tracked")
+    task = json.loads((world_["board"] / "t1.json").read_text())
+    (world_["board"] / "t1.json").write_text(json.dumps(dict(task, state="passed")))
+    report = land(
+        world_["board"],
+        world_["project"],
+        "t1",
+        packets_root=world_["packets"],
+        ledger=world_["ledger"],
+    )
+    assert report["landed"] is True, report["reason"]
+    log = _git(world_["project"], "log", "--format=%s", "-3")
+    assert "board: state before landing t1" in log
+    # The committed state is `passed`; the settlement after the merge writes `landed` on top,
+    # so the only remaining tracked change is that settlement — never a revert to `ready`.
+    assert _task_file(world_)["state"] == "landed"
+    committed = _git(world_["project"], "show", "HEAD:grid/board/t1.json")
+    assert json.loads(committed)["state"] in ("passed", "landed")
+
+
 @pytest.fixture
 def tick_world(tmp_path):
     """A board world like the runner's: board inside the project, packets root beside it."""

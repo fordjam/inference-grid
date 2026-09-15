@@ -292,18 +292,37 @@ def land(
             branch,
             reason=f"base is checked out at {holder}; landing moves only the project's own checkout",
         )
-    if (
-        holder == project_root
-        and _git(project_root, "status", "--porcelain", "--untracked-files=no").stdout.strip()
-    ):
+    if holder == project_root:
         # Only tracked changes would be clobbered by the checkout sync; untracked files
-        # (the board's own task files, typically) are never touched by reset --hard.
-        return _report(
-            task_id,
-            base,
-            branch,
-            reason="base is checked out at the project root with local changes",
-        )
+        # are never touched by reset --hard. Tracked changes that are all the board's own
+        # state files (the runner rewrites them on every settlement, so a board kept in
+        # git is dirty whenever a task has just passed) are committed on the base first —
+        # otherwise a tracked board could never auto-land, and reset --hard would revert
+        # the task to `ready` and dispatch it again.
+        dirty = _git(project_root, "status", "--porcelain", "--untracked-files=no").stdout
+        dirty_paths = [line[3:].strip() for line in dirty.decode().splitlines() if line.strip()]
+        if dirty_paths:
+            try:
+                board_rel = board_dir.resolve().relative_to(project_root)
+            except ValueError:
+                board_rel = None
+            if board_rel is None or not all(
+                Path(rel).is_relative_to(board_rel) for rel in dirty_paths
+            ):
+                return _report(
+                    task_id,
+                    base,
+                    branch,
+                    reason="base is checked out at the project root with local changes",
+                )
+            if not dry_run:
+                _git(project_root, "add", "--", *dirty_paths)
+                _git(project_root, "commit", "-q", "-m", f"board: state before landing {task_id}")
+                base_head = (
+                    _git(project_root, "rev-parse", "--verify", f"refs/heads/{base}^{{commit}}")
+                    .stdout.decode()
+                    .strip()
+                )
 
     if dry_run:
         # The same scratch root as a landing: a project's own test guards may treat
