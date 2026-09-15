@@ -161,8 +161,8 @@ class DenyReadTests(unittest.TestCase):
         try:
             listing = base / "deny-read.json"
             self.assertEqual(sandbox.deny_read_roots(listing), ())
-            listing.write_text(json.dumps(["/Users/example/private", "/tmp/x"]))
-            self.assertEqual(sandbox.deny_read_roots(listing), ("/Users/example/private", "/tmp/x"))
+            listing.write_text(json.dumps(["/home/example/private", "/tmp/x"]))
+            self.assertEqual(sandbox.deny_read_roots(listing), ("/home/example/private", "/tmp/x"))
             listing.write_text(json.dumps(["relative"]))
             with self.assertRaises(ValueError):
                 sandbox.deny_read_roots(listing)

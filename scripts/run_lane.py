@@ -184,7 +184,7 @@ def gates_for(python: str, base: str, gate_dir: Path) -> list[Gate]:
             [
                 python,
                 "-c",
-                "import subprocess,sys;out=subprocess.run(['git','grep','-n','/Users/','--','src','tests','docs/handoff-glm-14.md','deployments/local','scripts'],capture_output=True,text=True).stdout;print(out or 'no home paths');sys.exit(1 if out else 0)",
+                "import subprocess,sys;out=subprocess.run(['git','grep','-n','/Us'+'ers/','--','src','tests','docs/handoff-glm-14.md','deployments/local','scripts'],capture_output=True,text=True).stdout;print(out or 'no home paths');sys.exit(1 if out else 0)",
             ],
             timeout=60,
         ),
