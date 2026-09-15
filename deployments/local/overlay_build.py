@@ -297,7 +297,37 @@ def build(config):
         "attempts": attempts(config.get("board_db", BOARD_DB))[:60],
     }
     overlay.update(operator_lists(config))
+    overlay["boards"] = boards_section(config)
     return overlay
+
+
+def boards_section(config):
+    """Per board: planned/active/blocked/landed-today rows, from the read-only data node.
+
+    Local only: task ids and titles are the operator's project names, so `upload.py` drops
+    this key and the cloud's `clean_snapshot` refuses it. An unreadable package, board or
+    ledger yields an empty list — the overlay must still be written.
+    """
+    try:
+        if config.get("package_src"):
+            sys.path.insert(0, str(config["package_src"]))
+        from inference_grid.boards import boards as read_boards
+
+        board_configs = []
+        for entry in config.get("boards") or []:
+            if not isinstance(entry, dict):
+                continue
+            entry = dict(entry)
+            entry.setdefault("lanes_path", config.get("lanes_path"))
+            entry.setdefault("packets_root", config.get("packets_root"))
+            board_configs.append(entry)
+        return read_boards(
+            database=config.get("database_url", "sqlite:///" + str(BOARD_DB)),
+            boards=board_configs,
+            packets_root=config.get("packets_root"),
+        )
+    except Exception:  # noqa: BLE001 — the overlay must still be written
+        return []
 
 
 def operator_lists(config):
