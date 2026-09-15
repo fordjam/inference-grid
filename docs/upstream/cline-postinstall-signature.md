@@ -106,3 +106,26 @@ sw_vers                 # exact macOS build
 ```
 
 Redact the install prefix and any account name before posting.
+
+## Update, 2026-09-15 06:08 local
+
+`cline auth` pulled a newer build (the platform package's binary went from 88 624 448 to
+89 390 242 bytes) and **that binary has an invalid signature too**:
+
+```
+$ codesign --verify -v .../@cline/cli-darwin-arm64/bin/cline
+...: invalid signature (code or signature have been modified)
+In architecture: arm64
+$ .../@cline/cli-darwin-arm64/bin/cline --version
+[killed: SIGKILL]  # rc=137
+```
+
+So the workaround below — removing the cached `bin/.cline` so the launcher falls through to
+the platform package's binary — no longer helps: both copies are now unsigned/modified, and
+the launcher's third resolution step lands on the same broken file. The only local remedy is
+to ad-hoc re-sign the vendor binary (`codesign --force --sign - <path>`), which is a decision
+for the machine's owner, not something a tool should do on their behalf.
+
+`bin/ca-certs.cjs` was ruled out as the cause: it writes a managed PEM bundle under
+`~/.cline` and points `NODE_EXTRA_CA_CERTS` at it; it never rewrites the executable.
+
