@@ -44,7 +44,27 @@ PACKET_HEADING = re.compile(r"^#### ([A-Z]\d+)\. (.+)$", re.M)
 PATH_IN_TEXT = re.compile(
     r"`((?:src|tests|docs|deployments|calibration|scripts|grid)/[A-Za-z0-9_./-]+)`"
 )
-TRAILER = "Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>"
+# The commit trailer names the model that produced the work; the family drives review
+# exclusion downstream, so both come from the model id.
+TRAILERS = {
+    "glm": "Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>",
+    "deepseek": "Co-Authored-By: DeepSeek-V4.1-Flash <noreply@deepseek.com>",
+    "kimi": "Co-Authored-By: Kimi-K3 <noreply@moonshot.ai>",
+    "qwen": "Co-Authored-By: Qwen3.8 <noreply@alibabacloud.com>",
+}
+TRAILER = TRAILERS["glm"]
+
+
+def family_of(model: str) -> str:
+    m = model.lower()
+    for fam in ("deepseek", "kimi", "qwen", "glm"):
+        if fam in m:
+            return fam
+    return "unknown"
+
+
+def trailer_for(model: str) -> str:
+    return TRAILERS.get(family_of(model), TRAILER)
 
 
 def git(repo, *args, check=True):
@@ -100,6 +120,7 @@ def compose_prompt(
     base: str,
     python: str,
     report_name: str,
+    trailer: str = TRAILER,
 ) -> str:
     return (
         "You are a build lane for this repository. Read every section below before you touch "
@@ -113,7 +134,7 @@ def compose_prompt(
         "failures (process-group kills) are pre-existing and must be byte-identical after.\n"
         f"- `PYTHONPATH=src {python} -m ruff format` and `-m ruff check` must be clean.\n"
         f"- Finish with exactly ONE commit on this branch whose message explains why and ends "
-        f"with the trailer `{TRAILER}`, one row in docs/CONTRIBUTIONS.md under "
+        f"with the trailer `{trailer}`, one row in docs/CONTRIBUTIONS.md under "
         "`## 2026-09-15 — brief 14`, and your report at "
         f"`docs/reports/{report_name}`. Leave the working tree clean. Do not push.\n"
         "- Keep working until that commit exists: a reply that uses no tool ends your "
@@ -122,7 +143,7 @@ def compose_prompt(
     )
 
 
-def commit_gate_script(base: str) -> str:
+def commit_gate_script(base: str, trailer: str = TRAILER) -> str:
     """A code gate: exactly one commit ahead of base, trailer present, tree clean."""
     return (
         "import subprocess,sys\n"
@@ -133,7 +154,7 @@ def commit_gate_script(base: str) -> str:
         "dirty=g('status','--porcelain')\n"
         "problems=[]\n"
         "if n!=1:problems.append(f'expected exactly one commit ahead of {base}, found {n}')\n"
-        f"if {TRAILER!r} not in msg:problems.append('commit trailer missing: {TRAILER}')\n"
+        f"if {trailer!r} not in msg:problems.append('commit trailer missing: {trailer}')\n"
         "if dirty.strip():problems.append('working tree not clean:\\n'+dirty)\n"
         "print('\\n'.join(problems) or 'commit gate ok')\n"
         "sys.exit(1 if problems else 0)\n"
@@ -152,10 +173,10 @@ def base_worktree(repo: Path, base: str):
     return None
 
 
-def gates_for(python: str, base: str, gate_dir: Path) -> list[Gate]:
+def gates_for(python: str, base: str, gate_dir: Path, trailer: str = TRAILER) -> list[Gate]:
     gate_dir.mkdir(parents=True, exist_ok=True)
     commit_check = gate_dir / "commit_gate.py"
-    commit_check.write_text(commit_gate_script(base))
+    commit_check.write_text(commit_gate_script(base, trailer))
     env = {"PYTHONPATH": "src"}
     # ruff runs only on the Python files this packet changed: the base is not format-clean,
     # and a repo-wide check drives the agent into a 50-file reformat sweep to get past it.
@@ -204,6 +225,7 @@ def record_external(
     *,
     task: str,
     model: str,
+    account: str,
     argv: list[str],
     workspace: Path,
     verdict: dict,
@@ -215,9 +237,9 @@ def record_external(
         "project": "inference-grid",
         "spec": {
             "authorized": True,
-            "account": "goat",
+            "account": account,
             "model": model,
-            "family": "glm",
+            "family": family_of(model),
             "argv": argv[:3] + ["..."],
             "workspace": str(workspace),
         },
@@ -272,6 +294,7 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
         base=f"origin/{args.base}",
         python=args.python,
         report_name=report_name,
+        trailer=trailer_for(args.model),
     )
     attempt_dir = Path(args.packets_root).expanduser() / f"lane-{args.lane}-14-{packet_id}" / stamp
     attempt_dir.mkdir(parents=True, exist_ok=True)
@@ -321,7 +344,9 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
     )
     if args.adapter == "cline":
         env["CLINE_API_KEY"] = cline_key
-    gates = gates_for(args.python, f"origin/{args.base}", attempt_dir / "gate-scripts")
+    gates = gates_for(
+        args.python, f"origin/{args.base}", attempt_dir / "gate-scripts", trailer_for(args.model)
+    )
     print(f"[{args.lane}] {packet_id} → {branch} (attempt {attempt_dir})", flush=True)
     if resuming:
         (attempt_dir / "gates-0").mkdir(exist_ok=True)
@@ -391,6 +416,7 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
             args.database,
             task=f"lane-{args.lane}-14-{packet_id}-{stamp}",
             model=args.model,
+            account="cline" if args.adapter == "cline" else "goat",
             argv=adapter.first("…"),
             workspace=attempt_dir,
             verdict=verdict,
