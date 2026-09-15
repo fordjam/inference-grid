@@ -78,6 +78,12 @@ class ClineLaneTests(unittest.TestCase):
         root = Path(self.tmp.name)
         self.saved_home = os.environ.get("HOME")
         self.key = "sk-cline-test-0000000000000000"
+        self.saved_home = os.environ.get("HOME")
+        # The gate shell exports a real CLINE_API_KEY for live rounds; the lane must
+        # source its key from lane["credential_path"] instead. The ambient value is
+        # removed here and restored in tearDown, so the leak assertion in
+        # test_key_never_written_under_attempt tests the lane, not the shell.
+        self.saved_key = os.environ.pop("CLINE_API_KEY", None)
         self.credential = root / "credential.json"
         self.write_credential(0o600)
         self.home = root / "home"
@@ -92,6 +98,8 @@ class ClineLaneTests(unittest.TestCase):
         }
 
     def tearDown(self):
+        if self.saved_key is not None:
+            os.environ["CLINE_API_KEY"] = self.saved_key
         self.tmp.cleanup()
 
     def write_credential(self, mode):

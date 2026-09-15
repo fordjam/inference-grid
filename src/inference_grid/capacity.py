@@ -61,6 +61,56 @@ def clean_scorecard(rows):
     return clean
 
 
+def clean_operator(rows):
+    """Sanitize operator rows to their kind, id, reason and since.
+
+    Unknown keys are stripped; rows without kind and id are dropped. This is routing
+    attention for the dashboard, never task names, prompts or credentials.
+    """
+    if not isinstance(rows, list):
+        return []
+    clean = []
+    for row in rows[:50]:
+        if not isinstance(row, dict):
+            continue
+        entry = {}
+        for key in ("kind", "id", "reason", "since"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip():
+                entry[key] = value[:200]
+        if "kind" in entry and "id" in entry:
+            clean.append(entry)
+    return clean
+
+
+def clean_accepted_work(rows):
+    """Sanitize accepted-work rows to week, account and their two counts.
+
+    Unknown keys are stripped; rows without week and account, or with counts outside
+    0..10^9, are dropped.
+    """
+    if not isinstance(rows, list):
+        return []
+    clean = []
+    for row in rows[:50]:
+        if not isinstance(row, dict):
+            continue
+        entry = {}
+        for key in ("week", "account"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip():
+                entry[key] = value[:200]
+        if len(entry) != 2:
+            continue
+        for key in ("accepted", "attempts"):
+            value = row.get(key)
+            if type(value) is int and not isinstance(value, bool) and 0 <= value <= 10**9:
+                entry[key] = value
+        if len(entry) == 4:
+            clean.append(entry)
+    return clean
+
+
 def timestamp(value):
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
@@ -70,11 +120,15 @@ def timestamp(value):
 
 def project(raw, overlays=()):
     # An overlay is a list of account observations or {"accounts": [...], "attempts": [...],
-    # "scorecard": [...]}; overlay attempts replace the upstream activity list when present,
-    # and the scorecard (per model routing evidence) is accepted from the overlay only.
+    # "scorecard": [...], "operator": [...], "accepted_work": [...]}; overlay attempts replace
+    # the upstream activity list when present, the scorecard (per model routing evidence) and
+    # the operator/accepted-work lists (needs-you rows and the goal's weekly metric) are
+    # accepted from the overlay only.
     overlay_accounts = overlays.get("accounts", []) if isinstance(overlays, dict) else overlays
     overlay_attempts = overlays.get("attempts") if isinstance(overlays, dict) else None
     overlay_scorecard = overlays.get("scorecard") if isinstance(overlays, dict) else None
+    overlay_operator = overlays.get("operator") if isinstance(overlays, dict) else None
+    overlay_accepted = overlays.get("accepted_work") if isinstance(overlays, dict) else None
     accounts = {}
     for a in [*raw.get("accounts", []), *overlay_accounts]:
         if not isinstance(a, dict) or a.get("provider") not in PROVIDERS:
@@ -121,6 +175,8 @@ def project(raw, overlays=()):
             if isinstance(a, dict)
         ],
         scorecard=clean_scorecard(overlay_scorecard),
+        operator=clean_operator(overlay_operator),
+        accepted_work=clean_accepted_work(overlay_accepted),
         served_at=datetime.now(timezone.utc).isoformat(),
     )
 
