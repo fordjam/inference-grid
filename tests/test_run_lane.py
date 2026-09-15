@@ -1,6 +1,5 @@
-"""The versioned lane driver: brief parsing, prompt assembly and the commit gate."""
+"""The versioned lane driver: brief parsing and prompt assembly."""
 
-import subprocess
 import sys
 from pathlib import Path
 
@@ -57,58 +56,6 @@ def test_paths_and_rules_and_prompt():
     )
     assert "PYTHONPATH=src /py -m pytest" in prompt and run_lane.TRAILER in prompt
     assert prompt.index("Hard rules") < prompt.index("Orientation") < prompt.index("#### A1")
-
-
-def test_commit_gate_requires_one_trailered_commit_and_a_clean_tree(tmp_path):
-    repo = tmp_path / "r"
-    repo.mkdir()
-
-    def g(*a):
-        return subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
-
-    g("init", "-q", "-b", "main")
-    g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base")
-    g("branch", "base")
-    script = tmp_path / "gate.py"
-    script.write_text(run_lane.commit_gate_script("base"))
-
-    def run():
-        return subprocess.run(
-            [sys.executable, str(script)], cwd=repo, capture_output=True, text=True
-        )
-
-    out = run()
-    assert out.returncode == 1 and "exactly one commit" in out.stdout
-    g(
-        "-c",
-        "user.email=t@t",
-        "-c",
-        "user.name=t",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "no trailer",
-    )
-    out = run()
-    assert out.returncode == 1 and "trailer missing" in out.stdout
-    g(
-        "-c",
-        "user.email=t@t",
-        "-c",
-        "user.name=t",
-        "commit",
-        "-q",
-        "--amend",
-        "--allow-empty",
-        "-m",
-        f"why\n\n{run_lane.TRAILER}",
-    )
-    (repo / "dirty.txt").write_text("x")
-    out = run()
-    assert out.returncode == 1 and "not clean" in out.stdout
-    (repo / "dirty.txt").unlink()
-    assert run().returncode == 0
 
 
 def test_cline_adapter_and_transcript_compaction(tmp_path):

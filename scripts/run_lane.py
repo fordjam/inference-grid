@@ -29,10 +29,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from inference_grid.lanes import sandbox  # noqa: E402
+from inference_grid.lanes.gates import gates_for  # noqa: E402
 from inference_grid.lanes.packet import (  # noqa: E402
     ClineAdapter,
     CommandCodeAdapter,
-    Gate,
     build_loop,
     compact_transcripts,
     fix_prompt,
@@ -143,24 +143,6 @@ def compose_prompt(
     )
 
 
-def commit_gate_script(base: str, trailer: str = TRAILER) -> str:
-    """A code gate: exactly one commit ahead of base, trailer present, tree clean."""
-    return (
-        "import subprocess,sys\n"
-        f"base={base!r}\n"
-        "def g(*a):return subprocess.run(['git',*a],capture_output=True,text=True).stdout\n"
-        "n=len([l for l in g('log','--oneline',base+'..HEAD').splitlines() if l])\n"
-        "msg=g('log','-1','--format=%B')\n"
-        "dirty=g('status','--porcelain')\n"
-        "problems=[]\n"
-        "if n!=1:problems.append(f'expected exactly one commit ahead of {base}, found {n}')\n"
-        f"if {trailer!r} not in msg:problems.append('commit trailer missing: {trailer}')\n"
-        "if dirty.strip():problems.append('working tree not clean:\\n'+dirty)\n"
-        "print('\\n'.join(problems) or 'commit gate ok')\n"
-        "sys.exit(1 if problems else 0)\n"
-    )
-
-
 def base_worktree(repo: Path, base: str):
     """The worktree that has `base` checked out, if any."""
     out = git(repo, "worktree", "list", "--porcelain")
@@ -171,51 +153,6 @@ def base_worktree(repo: Path, base: str):
         elif line == f"branch refs/heads/{base}":
             return path
     return None
-
-
-def gates_for(python: str, base: str, gate_dir: Path, trailer: str = TRAILER) -> list[Gate]:
-    gate_dir.mkdir(parents=True, exist_ok=True)
-    commit_check = gate_dir / "commit_gate.py"
-    commit_check.write_text(commit_gate_script(base, trailer))
-    env = {"PYTHONPATH": "src"}
-    # ruff runs only on the Python files this packet changed: the base is not format-clean,
-    # and a repo-wide check drives the agent into a 50-file reformat sweep to get past it.
-    scoped = gate_dir / "ruff_scoped.py"
-    scoped.write_text(
-        "import subprocess,sys\n"
-        f"base={base!r}\n"
-        "mode=sys.argv[1]\n"
-        "files=[f for f in subprocess.run(['git','diff','--name-only','--diff-filter=AMR',base+'...HEAD'],"
-        "capture_output=True,text=True).stdout.split() if f.endswith('.py')]\n"
-        "files+=[f for f in subprocess.run(['git','ls-files','--others','--exclude-standard'],"
-        "capture_output=True,text=True).stdout.split() if f.endswith('.py')]\n"
-        "if not files:print('no python files changed');sys.exit(0)\n"
-        "argv=[sys.executable,'-m','ruff']+(['format','--check'] if mode=='format' else ['check'])+files\n"
-        "sys.exit(subprocess.run(argv).returncode)\n"
-    )
-    return [
-        Gate(
-            "pytest",
-            [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-x"],
-            env=env,
-            timeout=2400,
-        ),
-        Gate("ruff-format", [python, str(scoped), "format"], env=env, timeout=300),
-        Gate("ruff-check", [python, str(scoped), "check"], env=env, timeout=300),
-        Gate(
-            "no-home-paths",
-            # The operator's real home directory, read at runtime and never written down,
-            # checked only in the files this packet changed: history is not the packet's fault.
-            [
-                python,
-                "-c",
-                "import os,subprocess,sys;home=os.path.expanduser('~');base=sys.argv[1];files=subprocess.run(['git','diff','--name-only','--diff-filter=AMR',base+'...HEAD'],capture_output=True,text=True).stdout.split();out=subprocess.run(['git','grep','-n','-F',home,'HEAD','--',*files],capture_output=True,text=True).stdout if files else '';print(out or 'no home paths in changed files');sys.exit(1 if out else 0)",
-                base,
-            ],
-            timeout=60,
-        ),
-        Gate("commit", [python, str(commit_check)], timeout=60),
-    ]
 
 
 def record_external(
@@ -344,9 +281,7 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
     )
     if args.adapter == "cline":
         env["CLINE_API_KEY"] = cline_key
-    gates = gates_for(
-        args.python, f"origin/{args.base}", attempt_dir / "gate-scripts", trailer_for(args.model)
-    )
+    gates = gates_for(args.python, f"origin/{args.base}", trailer_for(args.model))
     print(f"[{args.lane}] {packet_id} → {branch} (attempt {attempt_dir})", flush=True)
     if resuming:
         (attempt_dir / "gates-0").mkdir(exist_ok=True)
