@@ -6,6 +6,8 @@ If you use several AI coding tools, one can run out of allowance while the other
 
 Inference Grid is being built to coordinate that work across projects. The aim is to assign suitable tasks to available providers, respect their limits, and keep a reliable record of what happened—so you spend less time moving work between tools and more time reviewing useful results.
 
+**Start here:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the pieces, the life of a task, the packet loop and the capacity pipeline as diagrams, and the five things you actually do with it.
+
 ## The problem in practice
 
 Imagine you have a feature to implement, tests to write and a code review waiting:
