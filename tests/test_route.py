@@ -119,7 +119,7 @@ class BudgetTests(unittest.TestCase):
                 {
                     "lane": "go",
                     "reason": "budget_unfit",
-                    "detail": "prompt ~16384 tokens exceeds max_tokens cap 10000",
+                    "detail": "output need ~12192 tokens (prompt/2 + 4000) exceeds max_tokens cap 10000",
                     "prompt": 16384,
                     "cap": 10000,
                 }
@@ -164,10 +164,10 @@ class BudgetTests(unittest.TestCase):
             [],
             [],
             0,
-            36001,  # ceil(36001 / 4) = 9001 tokens: one over the lane's 9000 cap
+            40008,  # ceil(40008 / 4) = 10002 tokens: need 10002 // 2 + 4000 = 9001, one over the cap
         )
         self.assertEqual((out["lane"], out["reason"]), (None, "budget_unfit"))
-        self.assertEqual(out["dropped"][0]["prompt"], 9001)
+        self.assertEqual(out["dropped"][0]["prompt"], 10002)
         self.assertEqual(out["dropped"][0]["cap"], 9000)
 
     def test_a_lane_view_max_tokens_figure_is_reported_on_the_candidate_row(self):
@@ -261,7 +261,9 @@ class BlendTests(unittest.TestCase):
 
 def test_the_tick_reports_dropped_lanes(request):
     w = request.getfixturevalue("world")
-    (w["project"] / "brief-big.txt").write_text("x" * BIG_PACKET + "\n")
+    # 16k tokens of prompt needs ~12.2k of output room; the unbudgeted policy's 16k cap
+    # holds that, so the packet must be bigger to miss it: 30k tokens -> need ~19k > 16k.
+    (w["project"] / "brief-big.txt").write_text("x" * (BIG_PACKET * 2) + "\n")
     (w["board"] / "copy-big.json").write_text(json.dumps(make_task("copy-big", "brief-big.txt")))
     plan = runner.tick(
         w["board"],
@@ -283,7 +285,7 @@ def test_the_tick_reports_dropped_lanes(request):
     assert entry["dropped"][0]["reason"] == "budget_unfit"
     # The refusal is explained in tokens, in the plan row itself. The packet estimate
     # covers the brief and every staged input (brief-big.txt plus mod.py, 65547 bytes).
-    assert entry["dropped"][0]["prompt"] == 16387
+    assert entry["dropped"][0]["prompt"] == 32771
     assert entry["dropped"][0]["cap"] == 16000
     # The dry run touched nothing: the lane was never recorded, so it stays stale.
     assert plan["readiness"]["go"]["state"] == "stale"

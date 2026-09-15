@@ -30,6 +30,28 @@ from .select import select_lane
 UNBUDGETED_MAX_TOKENS = 16000
 
 
+# Context windows by model id, for lane views that carry none (lane specs cannot). From the
+# providers' own catalogues on 2026-09-15; a model outside the table gets no context check.
+MODEL_CONTEXT = {
+    "kimi-k3": 1_048_576,
+    "glm-5.3-flash": 1_048_576,
+    "glm-5.3": 1_048_576,
+    "deepseek-v4.1-flash": 262_144,
+    "deepseek-v4-flash": 262_144,
+    "qwen3.8-max": 262_144,
+}
+
+
+def model_context(model):
+    """The catalogue context window for a model id (substring match), else None."""
+    if not model:
+        return None
+    for key, window in MODEL_CONTEXT.items():
+        if key in str(model):
+            return window
+    return None
+
+
 def max_tokens_cap(lane, thinking_tokens):
     """The lane's max_tokens cap: the lane view's own figure, else go.py's policy.
 
@@ -132,17 +154,22 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
             if cat in (lanes[lid].get("categories") or []) and not lanes[lid].get("explicit_only")
         ]
     prompt = ceil(inputs_bytes / 4)
+    # An output cap cannot bound a prompt. What it bounds is the reasoning the model spends
+    # on it, which on 2026-09-14's reviews ran about half the prompt (10 279 tokens on a
+    # 15 949-token packet overran a 10 000 cap); the prompt itself is bounded by the
+    # model's context window, from the lane view or the catalogue below.
+    need = prompt // 2 + CONTENT_ALLOWANCE
     dropped, kept = [], []
     for lid in candidates:
         lane = lanes[lid]
         cap = max_tokens_cap(lane, thinking)
-        context = lane.get("context")
-        if prompt > cap:
+        context = lane.get("context") or model_context(lane.get("model"))
+        if need > cap:
             dropped.append(
                 {
                     "lane": lid,
                     "reason": "budget_unfit",
-                    "detail": f"prompt ~{prompt} tokens exceeds max_tokens cap {cap}",
+                    "detail": f"output need ~{need} tokens (prompt/2 + {CONTENT_ALLOWANCE}) exceeds max_tokens cap {cap}",
                     "prompt": prompt,
                     "cap": cap,
                 }
