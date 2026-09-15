@@ -130,6 +130,18 @@ def commit_gate_script(base: str) -> str:
     )
 
 
+def base_worktree(repo: Path, base: str):
+    """The worktree that has `base` checked out, if any."""
+    out = git(repo, "worktree", "list", "--porcelain")
+    path = None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = Path(line.split(" ", 1)[1])
+        elif line == f"branch refs/heads/{base}":
+            return path
+    return None
+
+
 def gates_for(python: str, base: str, gate_dir: Path) -> list[Gate]:
     gate_dir.mkdir(parents=True, exist_ok=True)
     commit_check = gate_dir / "commit_gate.py"
@@ -271,18 +283,21 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
     passed = bool(verdict.get("gates_passed"))
     head = git(clone, "rev-parse", "--short", "HEAD")
     if passed:
-        # Bring the branch into the coordinator's repo and advance the base.
+        # Bring the branch into the coordinator's repo and advance the base — through the
+        # worktree that has it checked out when there is one (branch -f refuses otherwise).
         git(repo, "fetch", "-q", str(clone), f"{branch}:{branch}")
-        try:
-            git(repo, "merge-base", "--is-ancestor", args.base, branch)
-            git(repo, "branch", "-f", args.base, branch)
-            how = "fast-forwarded"
-        except RuntimeError:
+        wt = base_worktree(repo, args.base)
+        if wt is None:
             merge_wt = Path(args.packets_root).expanduser() / f"merge-{args.base.replace('/', '-')}"
             if not merge_wt.exists():
                 git(repo, "worktree", "add", "-q", str(merge_wt), args.base)
-            git(merge_wt, "checkout", "-q", args.base)
-            git(merge_wt, "merge", "--no-edit", branch)
+            wt = merge_wt
+        git(wt, "checkout", "-q", args.base)
+        try:
+            git(wt, "merge", "-q", "--ff-only", branch)
+            how = "fast-forwarded"
+        except RuntimeError:
+            git(wt, "merge", "--no-edit", branch)
             how = "merged"
         note = f"{packet_id} {title}: gates green in {len(verdict['rounds'])} round(s); {how} onto {args.base}"
     else:
