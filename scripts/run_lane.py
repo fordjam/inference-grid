@@ -281,6 +281,16 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
     sandbox.probe(profile, clone)
     if args.adapter == "cline":
         adapter = ClineAdapter(args.model, work=clone, data_dir=attempt_dir / "cline-state")
+        # An isolated --data-dir has no login; the key reaches only this process's
+        # environment, read here by the harness from a 0600 file (as lanes/cline.py does).
+        key_file = Path(args.cline_key_file).expanduser() if args.cline_key_file else None
+        if key_file is None or not key_file.is_file():
+            raise SystemExit(
+                "--cline-key-file (mode 0600, one line: the key) is required for --adapter cline"
+            )
+        if (key_file.stat().st_mode & 0o777) != 0o600:
+            raise SystemExit(f"{key_file} must be mode 0600")
+        cline_key = key_file.read_text().strip()
     else:
         (attempt_dir / "grid-effort.mjs").write_text(
             "export default function (cmd) { cmd.on('session_start', () => { cmd.setEffort('high'); }); }\n"
@@ -298,6 +308,8 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
         DO_NOT_TRACK="1",
         PYTHONPATH="src",
     )
+    if args.adapter == "cline":
+        env["CLINE_API_KEY"] = cline_key
     gates = gates_for(args.python, f"origin/{args.base}", attempt_dir / "gate-scripts")
     print(f"[{args.lane}] {packet_id} → {branch} (attempt {attempt_dir})", flush=True)
     if resuming:
