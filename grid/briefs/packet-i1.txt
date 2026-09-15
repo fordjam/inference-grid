@@ -1,0 +1,51 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### I1. Landing as a code node: `verify-merge` in front of `inbox-integrate` for packet branches
+When a `packet` task settles `passed`, its branch is at `packet/<task-id>` in the project
+repository and nothing happens next. Add `board/land.py` and CLI `inference-grid land --json
+{board_dir, project_root, task, base, gates, dry_run}`:
+- Runs `verify_merge` (B1) for `packet/<task-id>` against `base` with the task's declared
+  gates in a scratch worktree. On `mergeable` and gates green: merge into `base` with
+  `--no-ff` **in a scratch worktree of the base**, never the operator checkout; conflicts
+  confined to `docs/CONTRIBUTIONS.md` and `docs/LANES.md` are resolved by keeping both sides
+  (rows are independent), any other conflict aborts and blocks the task with the file list;
+  the suite runs once more on the merged tree before the merge commit is kept.
+- Serialized: one landing at a time per base, a lock directory under `packets_root`.
+- Writes `landed: {base_head, merge_commit, how: ff|merge|union}` onto the task, settles
+  it `landed` (a new terminal state after `passed`; `board/task.py` is provider-authored —
+  validate the transition in `land.py`), and records a ledger event.
+- `board-tick` calls it for every `passed` packet task when the board config carries
+  `"auto_land": true`; `--dry-run` reports what would land and why not.
+- Tests (`tests/test_land.py`): clean fast-forward; a merge with a CONTRIBUTIONS-only
+  conflict landed by union; a source conflict blocked with the file named; a gate failing
+  on the merged tree blocks and leaves the base untouched; the lock; dry run.
+- Size: medium–large. Why: six of seventeen landings tonight were hand-merged.

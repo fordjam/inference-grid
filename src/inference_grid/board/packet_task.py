@@ -171,10 +171,16 @@ def build_sandbox(kind, work, attempt_dir):
 
     home = Path.home()
     extra = home / (".commandcode" if kind == "goat_cli" else ".zcode")
+    # The agent writes only in its clone, its CLI's own state and a scratch tmp/ under the
+    # attempt; the attempt directory itself is the harness's (transcripts, gates), written
+    # from outside the sandbox. Granting all of it would put the clone's parent inside a
+    # writable root and defeat the isolation probe.
+    tmp = Path(attempt_dir) / "tmp"
+    tmp.mkdir(exist_ok=True)
     profile = sandbox.write_profile(
         work,
         Path(attempt_dir) / "packet.sb",
-        extra_write_roots=[extra, Path(attempt_dir)],
+        extra_write_roots=[extra, tmp],
         deny_read_roots=sandbox.deny_read_roots(),
     )
     sandbox.probe(profile, work)
@@ -280,7 +286,8 @@ def dispatch_packet(ledger, lanes, lane_id, task, project_root, packet_dir, acco
 
     attempt_dir = workspace / aid
     attempt_dir.mkdir(mode=0o700)
-    env = dict(os.environ, HOME=str(Path.home()), TMPDIR=str(attempt_dir), PYTHONPATH="src")
+    env = dict(os.environ, HOME=str(Path.home()), TMPDIR=str(attempt_dir / "tmp"), PYTHONPATH="src")
+    (attempt_dir / "tmp").mkdir(exist_ok=True)
     try:
         clone = attempt_dir / "work"
         _git(project_root, "clone", "-q", "--shared", str(project_root), str(clone))

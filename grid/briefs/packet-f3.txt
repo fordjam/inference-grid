@@ -1,0 +1,51 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### F3. A job file for the driver
+`scripts/run_lane.py --job lanes.json` replaces the flag soup:
+
+```json
+{"repo": ".", "brief": "docs/handoff-glm-15.md", "base": "glm/work", "python": ".venv/bin/python",
+ "packets_root": "~/.grid-workspaces/packets", "database": "sqlite:///...",
+ "lanes": [
+   {"name": "goat-glm", "clone": "~/.grid-workspaces/ig-lane-a", "adapter": "command_code",
+    "model": "z-ai/glm-5.3-flash", "packets": ["E1", "E2"]},
+   {"name": "cline-glm", "clone": "~/.grid-workspaces/ig-lane-c", "adapter": "cline",
+    "model": "z-ai/glm-5.3-flash", "key_file": "~/.config/inference-grid/cline-pass.key",
+    "packets": ["F1"]}]}
+```
+
+One process launches every lane as a subprocess, writes `lane-<name>.log` beside the packets,
+and prints a table when all are done. The existing flags keep working for one lane. This is the
+file D1's board integration reads too.
+- Tests: the job file validates (unknown keys refused, relative paths resolved against the
+  file's directory); one lane per entry launched through an injected spawn.
+- Size: small–medium.

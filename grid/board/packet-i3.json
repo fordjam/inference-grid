@@ -1,0 +1,87 @@
+{
+ "id": "packet-i3",
+ "category": "packet",
+ "brief": "grid/briefs/packet-i3.txt",
+ "inputs": [
+  "grid/briefs/packet-i3.txt"
+ ],
+ "tests": [],
+ "artifacts": [
+  "docs/reports/brief-16-i3.md"
+ ],
+ "lanes": [
+  "goat-deepseek"
+ ],
+ "author_family": null,
+ "budget": {
+  "wall_seconds": 3600,
+  "output_bytes": 10000000,
+  "thinking_tokens": 6000
+ },
+ "state": "blocked",
+ "blocked_reason": "attempt fc007efc-61a6-473e-963a-89ea2fcf96f9 held: held; resolve with evidence; branch left for the operator",
+ "spec": {
+  "brief": "grid/briefs/packet-i3.txt",
+  "packet_id": "I3",
+  "gates": [
+   {
+    "name": "pytest",
+    "argv": [
+     "/Users/fordjam/projects/inference-grid/.venv/bin/python",
+     "-m",
+     "inference_grid.lanes.gates",
+     "pytest",
+     "origin/glm/work",
+     "/Users/fordjam/.grid-workspaces/packets"
+    ],
+    "env": {
+     "PYTHONPATH": "src"
+    },
+    "timeout": 2400
+   },
+   {
+    "name": "ruff-format",
+    "argv": [
+     "/Users/fordjam/projects/inference-grid/.venv/bin/python",
+     "-m",
+     "inference_grid.lanes.gates",
+     "ruff",
+     "origin/glm/work",
+     "format"
+    ],
+    "env": {
+     "PYTHONPATH": "src"
+    }
+   },
+   {
+    "name": "ruff-check",
+    "argv": [
+     "/Users/fordjam/projects/inference-grid/.venv/bin/python",
+     "-m",
+     "inference_grid.lanes.gates",
+     "ruff",
+     "origin/glm/work",
+     "check"
+    ],
+    "env": {
+     "PYTHONPATH": "src"
+    }
+   },
+   {
+    "name": "home-paths",
+    "argv": [
+     "/Users/fordjam/projects/inference-grid/.venv/bin/python",
+     "-m",
+     "inference_grid.lanes.gates",
+     "home-paths",
+     "origin/glm/work"
+    ],
+    "env": {
+     "PYTHONPATH": "src"
+    }
+   }
+  ],
+  "base": "glm/work",
+  "max_rounds": 3
+ }
+}

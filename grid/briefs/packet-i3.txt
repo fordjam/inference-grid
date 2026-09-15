@@ -1,0 +1,50 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### I3. Calibration as a routine, not a one-off
+- `board/calibration.py` gains `calibration_task(board_dir, corpus_dir, lanes, run_id)`:
+  one board task of `category: "calibration_run"` that, when the runner dispatches it,
+  authors the per-case review tasks (existing `author_calibration`) and, when they have all
+  settled, scores them (existing `score_calibration` with `record=True`) and settles itself
+  `passed` with the per-lane recall/precision in its `result` — no lane runs the
+  calibration task itself; it is a code node the runner steps through across passes.
+- `tick-boards` config gains `calibration: {corpus_dir, lanes, every_days: 7}`; the versioned
+  `deployments/local/tick_boards.py` authors a run when the newest scored run for those
+  lanes is older than `every_days` (state in the ledger's outcomes, not a file).
+- The overlay's `accepted_work` gains a sibling `reviewer_recall`: `{run_id, lane, recall,
+  precision, scored_at}` for the newest run per lane, carried through `clean_snapshot` and
+  rendered in the dashboard's Evidence section beside accepted work.
+- Tests: the task's state machine across three ticks (authored → waiting → scored); the
+  weekly trigger with a fake clock; the overlay row and the cloud cleaner.
+- Size: medium. Why: recall is the number that says what an approval is worth; one
+  measurement is a snapshot.
+
+---
