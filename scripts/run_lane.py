@@ -186,7 +186,11 @@ def gates_for(python: str, base: str, gate_dir: Path) -> list[Gate]:
             [
                 python,
                 "-c",
-                "import subprocess,sys;out=subprocess.run(['git','grep','-n','/Users/','--','src','tests','docs/handoff-glm-14.md','deployments/local','scripts'],capture_output=True,text=True).stdout;print(out or 'no home paths');sys.exit(1 if out else 0)",
+                # The operator's actual home directory, read at runtime, never written down:
+                # the gate is that no packet bakes this machine's paths into the repository.
+                "import os,subprocess,sys;home=os.path.expanduser('~');"
+                "out=subprocess.run(['git','grep','-n','-F',home,'--','src','tests','docs','deployments','scripts','calibration'],capture_output=True,text=True).stdout;"
+                "print(out or 'no home paths');sys.exit(1 if out else 0)",
             ],
             timeout=60,
         ),
