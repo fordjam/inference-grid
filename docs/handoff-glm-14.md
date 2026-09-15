@@ -98,7 +98,8 @@ credentials and `client.json` deliberately absent). Produce the versioned layer:
   scheduler runs each job on its period with a fake clock and never lets one job's exception
   stop the others; `tick_boards` calls prepare before each board. Network calls are behind an
   injected `fetch`; no test opens a socket.
-- A gate for this packet: `git grep -n "/Users/" -- deployments/local` returns nothing.
+- A gate for this packet: the home-path grep over `deployments/local` (see `scripts/run_lane.py`)
+  returns nothing.
 - Size: medium–large.
 - Operator step: run `install.py`, bootstrap the plist, retire the three timer agents.
 

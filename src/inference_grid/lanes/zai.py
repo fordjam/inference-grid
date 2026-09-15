@@ -22,7 +22,6 @@ from pathlib import Path
 from ..receipts import safe_path
 from . import sandbox
 
-DEFAULT_CLAUDE = "/Users/fordjam/.local/bin/claude"
 DEFAULT_BASE_URL = "https://api.z.ai/api/anthropic"
 # First-party Max login: the CLI's own authentication, its native endpoint, its config.
 FIRST_PARTY_BASE_URL = "https://api.anthropic.com"
@@ -31,6 +30,7 @@ HAIKU_MODEL = "glm-5.3-flash"
 MAX_STDOUT = 4 * 1024 * 1024
 STRIPPED_ENV = (
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
@@ -149,7 +149,7 @@ def run(
     lane,
     attempt_dir,
     *,
-    claude=DEFAULT_CLAUDE,
+    claude=None,
     home=None,
     thinking_tokens=DEFAULT_THINKING_TOKENS,
     base_url=None,
@@ -162,6 +162,7 @@ def run(
     `~/.claude` writable, and the task's thinking budget mapped onto MAX_THINKING_TOKENS.
     """
     attempt_dir = Path(attempt_dir)
+    claude = Path(claude or Path.home() / ".local/bin/claude")
     first_party = lane.get("credential_path") is None
     requested_thinking = request.get("thinking_tokens")
     if type(requested_thinking) is int and requested_thinking > 0:
