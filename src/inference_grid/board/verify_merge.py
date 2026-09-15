@@ -36,8 +36,16 @@ def _git(repo, *args, check=True):
 
 
 def _gate_nodes(spec_gates):
+    # `env` is packet-gate-only (the verify_merge task spec refuses it) and passes through
+    # so packet gates that need PYTHONPATH behave identically here and in the packet loop.
     return [
-        Gate(g["name"], list(g["argv"]), cwd=g.get("cwd", "."), timeout=g.get("timeout", 1800))
+        Gate(
+            g["name"],
+            list(g["argv"]),
+            cwd=g.get("cwd", "."),
+            timeout=g.get("timeout", 1800),
+            env=dict(g.get("env") or {}),
+        )
         for g in spec_gates
     ]
 

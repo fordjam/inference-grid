@@ -16,7 +16,7 @@ Planned operating model for continuous Grid operation (agreed 2026-09-12). The G
 | `lanes` | Allowed lane ids; selection uses `inference_grid.lanes.select` over readiness and the scorecard |
 | `author_family` | Set for review tasks so the reviewer family differs |
 | `budget` | Wall seconds, output cap, thinking budget where the lane supports one |
-| `state` | `ready`, `dispatched`, `passed`, `review_pending`, `accepted`, `blocked` with a reason |
+| `state` | `ready`, `dispatched`, `passed`, `review_pending`, `accepted`, `blocked` with a reason; a packet task also settles `landed` (see Landing) |
 | `spec` | Packet tasks only (see Packet tasks below); absent on every other category |
 
 ## Runner tick
@@ -80,9 +80,31 @@ attempt completes with the verdict as its receipt (`verified_in_lane`, `repairs`
 rounds − 1, and an artifact digest pinning the exact head commit), and the task settles
 `passed` with no review task — the gates already ran as code inside the attempt. On any
 other outcome the attempt is held with the loop's reason and the branch is left inside the
-attempt directory for the operator. The base branch is never advanced by the runner;
-advancing it stays an operator/`inbox-integrate` step. `board-tick --dry-run` plans packet
-tasks like any other.
+attempt directory for the operator. The runner itself never advances the base; landing is
+the code node below. `board-tick --dry-run` plans packet tasks like any other.
+
+## Landing
+
+`inference-grid land --json {board_dir, project_root, task, base, gates, dry_run}`
+(`board/land.py`) settles a `passed` packet task: it runs `verify_merge` for
+`packet/<task-id>` against `base` with the task's declared gates in a scratch worktree, and
+on a clean merge with green gates merges the branch into `base` with `--no-ff` in a scratch
+worktree of the base — never the operator checkout. Conflicts confined to
+`docs/CONTRIBUTIONS.md` and `docs/LANES.md` are resolved by keeping both sides (git's union
+merge driver; rows there are independent); any other conflict, or a gate failing on the
+merged tree, blocks the task with the file list and leaves the base untouched. The suite
+runs once more on the real merged tree before the merge commit is kept. `how` records what
+the landing was: `ff` (the base head was an ancestor of the branch), `union` (conflicts
+resolved by keeping both sides) or `merge`. Landings serialize on a lock directory under
+`packets_root`, one per base. When the base is checked out at the project root itself it
+must have no tracked local changes — the landing moves that ref and syncs the checkout with
+`reset --hard`; a base held by any other worktree is refused. On success the task settles
+`landed` with `landed: {base_head, merge_commit, how}` (validated in
+`board/packet_task.py`, since the provider-authored `board/task.py` refuses both the state
+and the extra key) and a `packet_landed` ledger event is recorded; a refusal leaves the
+task `passed` for the next tick. `--dry-run` reports what would land and why not, touching
+nothing. A tick whose board config carries `"auto_land": true` lands every `passed` packet
+task after the dispatch pass.
 
 ## Authoring tools
 

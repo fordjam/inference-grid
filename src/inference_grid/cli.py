@@ -20,6 +20,7 @@ def board_tick(
     prepare_argv=None,
     dry_run=False,
     boards=None,
+    auto_land=False,
 ):
     from .board.runner import tick as board_run
     from .lanes.runner import load_lanes
@@ -43,6 +44,7 @@ def board_tick(
                             "lanes_path",
                             "accounts_by_lane",
                             "packets_root",
+                            "auto_land",
                         )
                         if key in config
                     },
@@ -61,6 +63,7 @@ def board_tick(
         packets_root,
         prepare_argv=prepare_argv,
         dry_run=dry_run,
+        auto_land=auto_land,
     )
 
 
@@ -156,6 +159,7 @@ def main():
             "tick",
             "watch",
             "verify-merge",
+            "land",
         ],
     )
     parser.add_argument("--json", help="JSON argument file; never store credentials here")
@@ -200,6 +204,7 @@ def main():
             "cooldown",
             "watch",
             "verify-merge",
+            "land",
         }
         and not args.json
     ):
@@ -263,14 +268,28 @@ def main():
         "inbox-integrate": lambda **kw: inbox_integrate(
             kw["project_root"], kw["task_id"], dry_run=kw.get("dry_run", True)
         ),
+        "land": lambda **kw: land_command(ledger, **kw),
     }
-    print(json.dumps(commands[args.command](**data), indent=2))
+    report = commands[args.command](**data)
+    if args.command == "land":
+        # A landing that refused or a dry run that would not land is worth a non-zero exit;
+        # a dry run that would land exits 0 without having touched anything.
+        ok = bool(report.get("landed") or report.get("would_land"))
+        print(json.dumps(report, indent=2))
+        raise SystemExit(0 if ok else 1)
+    print(json.dumps(report, indent=2))
 
 
 def inbox_integrate(project_root, task_id, dry_run=True):
     from .board.integrate import inbox_integrate as integrate
 
     return integrate(project_root, task_id, dry_run=dry_run)
+
+
+def land_command(ledger, **kw):
+    from .board.land import land
+
+    return land(ledger=ledger, **kw)
 
 
 def board_status(ledger, board_dir=None, suggest=False, boards=None):
