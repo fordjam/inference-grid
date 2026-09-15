@@ -1126,6 +1126,9 @@ def tick(
                 "category": task["category"],
                 "author_family": task["author_family"],
                 "lanes": list(task["lanes"]),
+                # The budget decides the cap route fits the packet against; without it
+                # every task was measured against the unbudgeted 16 000-token cap.
+                "budget": task.get("budget"),
             },
             lanes_view,
             task_readiness,

@@ -316,3 +316,29 @@ def test_the_plan_row_carries_the_cap_of_each_candidate(request):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_the_tick_fits_the_packet_against_the_task_budget(request):
+    """A budgeted task is measured against REASONING_HEADROOM * thinking + allowance,
+    not the unbudgeted 16k cap: the packet that misses the unbudgeted policy fits
+    once the task carries a 10k thinking budget (cap 34k)."""
+    w = request.getfixturevalue("world")
+    (w["project"] / "brief-big.txt").write_text("x" * (BIG_PACKET * 2) + "\n")
+    task = make_task("copy-budgeted", "brief-big.txt")
+    task["budget"]["thinking_tokens"] = 10000
+    (w["board"] / "copy-budgeted.json").write_text(json.dumps(task))
+    plan = runner.tick(
+        w["board"],
+        w["project"],
+        w["ledger"],
+        w["lanes"],
+        w["lanes_path"],
+        {"go": w["account"]},
+        w["packets"],
+        now=0,
+        dry_run=True,
+    )
+    entry = plan["plan"][0]
+    assert entry["task"] == "copy-budgeted"
+    assert entry["dropped"] == []
+    assert entry["candidates"] == [{"lane": "go", "cap": 34000}]

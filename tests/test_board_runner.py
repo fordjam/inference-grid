@@ -258,7 +258,7 @@ def test_tick_dispatches_tests_and_records(world):
             "lane": None,
             "attempt": None,
             "result": "no_independent_family",
-            "candidates": [{"lane": "go", "cap": 16000}],
+            "candidates": [{"lane": "go", "cap": 22000}],  # REVIEW_BUDGET: 3 * 6000 + 4000
             "dropped": [],
             "score": None,
         }
