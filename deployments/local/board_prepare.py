@@ -136,7 +136,9 @@ def _read_observation(config, key, default):
         return None
 
 
-def configure_observation(config, ledger, account, obs, window_units, valid, lanes_config, now):
+def configure_observation(
+    config, ledger, account, obs, window_units, valid, lanes_config, now, capacity=1
+):
     """One observation file -> configure_account plus a lane record per configured lane.
 
     A missing, non-ok or older-than-``valid`` observation leaves the account untouched and
@@ -159,7 +161,13 @@ def configure_observation(config, ledger, account, obs, window_units, valid, lan
         remaining = {w: window_units[w] * (100 - used[w]) / 100 for w in used}
         try:
             ledger.configure_account(
-                account, 1, remaining, observed + valid, models, lane_ids, observed_at=observed
+                account,
+                capacity,
+                remaining,
+                observed + valid,
+                models,
+                lane_ids,
+                observed_at=observed,
             )
         except Refused as exc:
             print(account, exc)
@@ -188,6 +196,8 @@ def configure_goat(config, ledger, now=None):
         GOAT_VALID,
         config.get("goat_lanes") or [],
         time.time() if now is None else now,
+        # concurrent attempts the subscription tolerates; the operator sets it from experience
+        capacity=int(config.get("goat_capacity", 1)),
     )
 
 
@@ -201,6 +211,8 @@ def configure_cline(config, ledger, now=None):
         CLINE_VALID,
         config.get("cline_lanes") or [],
         time.time() if now is None else now,
+        # concurrent attempts the subscription tolerates; the operator sets it from experience
+        capacity=int(config.get("cline_capacity", 1)),
     )
 
 
