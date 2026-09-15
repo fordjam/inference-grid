@@ -284,6 +284,38 @@ class Tests(Base):
         self.assertEqual(data["operator"], [row])
         self.assertEqual(data["accepted_work"], [work])
 
+    def test_reviewer_recall_upload_sanitized(self):
+        # The newest calibration run per lane rides beside accepted work: run, lane, the
+        # two rates and the scored instant; null rates stay null.
+        row = {
+            "run_id": "auto-20260915",
+            "lane": "go",
+            "recall": 0.75,
+            "precision": None,
+            "scored_at": "2026-09-15T00:00:00+00:00",
+        }
+        s = self.sample()
+        s["reviewer_recall"] = [row]
+        data, _ = clean_snapshot(s)
+        self.assertEqual(data["reviewer_recall"], [row])
+
+    def test_reviewer_recall_rejected(self):
+        s = self.sample()
+        for bad in [
+            "junk",
+            [{}] * 51,
+            [{"run_id": "r", "lane": "go", "recall": 0.5, "precision": 0.5}],
+            [{"run_id": "r", "lane": "go", "recall": 1.5, "precision": 0.5, "scored_at": "t"}],
+            [{"run_id": "r", "lane": "go", "recall": True, "precision": 0.5, "scored_at": "t"}],
+            [{"run_id": "", "lane": "go", "recall": 0.5, "precision": 0.5, "scored_at": "t"}],
+            [
+                {"run_id": "r", "lane": "go", "recall": 0.5, "precision": 0.5, "scored_at": "t"}
+                | {"x": 1}
+            ],
+        ]:
+            with self.assertRaises(ValueError):
+                clean_snapshot(s | {"reviewer_recall": bad})
+
     def test_operator_rows_rejected(self):
         s = self.sample()
         for bad in [

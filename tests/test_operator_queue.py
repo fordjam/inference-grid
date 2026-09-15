@@ -15,6 +15,7 @@ from inference_grid.operator_queue import (
     accepted_work,
     build_overlay,
     operator_rows,
+    reviewer_recall,
 )
 
 
@@ -294,6 +295,69 @@ def test_build_overlay_returns_both_lists(tmp_path):
     ]
 
 
+# --- reviewer_recall: the newest calibration run per lane ---
+
+
+def write_report(board, run_id, scored_at, lanes):
+    run_dir = board / "calibration" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "report.json").write_text(
+        json.dumps({"run_id": run_id, "scored_at": scored_at, "lanes": lanes})
+    )
+
+
+def test_reviewer_recall_keeps_the_newest_run_per_lane(tmp_path):
+    board = tmp_path / "board"
+    write_report(board, "run-old", "2026-09-01T00:00:00+00:00", {"go": {"recall": 0.4}})
+    write_report(board, "run-new", "2026-09-10T00:00:00+00:00", {"go": {"recall": 0.9}})
+    # A second lane keeps its own newest run untouched by the first lane's newer one.
+    write_report(board, "run-go", "2026-09-05T00:00:00+00:00", {"cline": {"recall": 0.25}})
+    rows = reviewer_recall([board])
+    assert rows == [
+        {
+            "run_id": "run-go",
+            "lane": "cline",
+            "recall": 0.25,
+            "precision": None,
+            "scored_at": "2026-09-05T00:00:00+00:00",
+        },
+        {
+            "run_id": "run-new",
+            "lane": "go",
+            "recall": 0.9,
+            "precision": None,
+            "scored_at": "2026-09-10T00:00:00+00:00",
+        },
+    ]
+    # A missing or unreadable board invents nothing.
+    assert reviewer_recall([tmp_path / "absent"]) == []
+    board2 = tmp_path / "board2"
+    (board2 / "calibration" / "broken").mkdir(parents=True)
+    (board2 / "calibration" / "broken" / "report.json").write_text("not json")
+    assert reviewer_recall([board2]) == []
+
+
+def test_build_overlay_carries_reviewer_recall(tmp_path):
+    ledger = make_ledger(tmp_path)
+    board = tmp_path / "board"
+    write_report(
+        board,
+        "run-1",
+        "2026-09-15T00:00:00+00:00",
+        {"go": {"recall": 1.0, "precision": 0.5}},
+    )
+    overlay = build_overlay(ledger, board_dirs=[board])
+    assert overlay["reviewer_recall"] == [
+        {
+            "run_id": "run-1",
+            "lane": "go",
+            "recall": 1.0,
+            "precision": 0.5,
+            "scored_at": "2026-09-15T00:00:00+00:00",
+        }
+    ]
+
+
 # --- the sanitizers capacity.project consumes ---
 
 
@@ -321,17 +385,36 @@ def test_clean_accepted_work_requires_strings_and_counts():
     assert clean_accepted_work([{"week": "w", "account": "a", "accepted": 0}]) == []
 
 
-def test_project_carries_both_lists_through_cleaning():
+def test_project_carries_all_lists_through_cleaning():
     operator = [{"kind": "held_attempt", "id": "a1", "reason": "r", "since": "s", "x": 1}]
     accepted = [{"week": "2026-W37", "account": "zai", "accepted": 1, "attempts": 2}]
-    out = project({}, {"operator": operator, "accepted_work": accepted})
+    recall = [
+        {
+            "run_id": "run-1",
+            "lane": "go",
+            "recall": 0.5,
+            "precision": None,
+            "scored_at": "2026-09-15T00:00:00+00:00",
+            "secret": "x",
+        }
+    ]
+    out = project({}, {"operator": operator, "accepted_work": accepted, "reviewer_recall": recall})
     assert out["operator"] == [{"kind": "held_attempt", "id": "a1", "reason": "r", "since": "s"}]
     assert out["accepted_work"] == accepted
+    assert out["reviewer_recall"] == [
+        {
+            "run_id": "run-1",
+            "lane": "go",
+            "recall": 0.5,
+            "precision": None,
+            "scored_at": "2026-09-15T00:00:00+00:00",
+        }
+    ]
     out = project({}, {})
-    assert out["operator"] == [] and out["accepted_work"] == []
+    assert out["operator"] == [] and out["accepted_work"] == [] and out["reviewer_recall"] == []
 
 
-def test_dashboards_reference_both_lists():
+def test_dashboards_reference_every_list():
     root = Path(__file__).resolve().parents[1]
     for rel in ("deployments/capacity/web", "src/inference_grid/capacity_web"):
         base = root / rel
@@ -339,11 +422,14 @@ def test_dashboards_reference_both_lists():
         html = (base / "index.html").read_text()
         assert "snapshot.operator" in js
         assert "snapshot.accepted_work" in js
+        assert "snapshot.reviewer_recall" in js
         for marker in (
             'id="needs"',
             'id="needsyou"',
             'id="acceptedwork"',
+            'id="reviewerrecall"',
             "Needs you",
             "Accepted work",
+            "Reviewer recall",
         ):
             assert marker in html, (rel, marker)

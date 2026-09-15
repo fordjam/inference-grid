@@ -11,6 +11,9 @@ Two lists for the capacity dashboard overlay:
 - `accepted_work` — per subscription per ISO week, from the ledger: attempts completed
   and accepted (including operator-recorded external work), and reviews whose rejected
   verdict named a real finding. Rows are `{week, account, accepted, attempts}`.
+- `reviewer_recall` — the newest scored calibration run per lane, from each board's
+  calibration reports: `{run_id, lane, recall, precision, scored_at}`. Recall is the
+  number that says what an approval is worth.
 
 Nothing here reads credentials, `lanes.json` or a home directory: every path is passed
 in by the caller (the overlay builder, or the local deployment once packet A2 lands).
@@ -236,9 +239,52 @@ def accepted_work(ledger, now=None):
     return [buckets[key] for key in sorted(buckets)]
 
 
+def reviewer_recall(board_dirs):
+    """The newest scored calibration run per lane, as `{run_id, lane, recall, precision, scored_at}`.
+
+    Each run's `score_calibration` report lands under `<board_dir>/calibration/<run_id>/report.json`
+    and carries `scored_at` plus the per-lane recall/precision. One row per lane, the newest
+    `scored_at` winning; a newer run of a lane supersedes the older one entirely, so a lane
+    never shows a mix of runs. Unknown or unreadable reports are skipped, never invented.
+    """
+    newest = {}
+    for board_dir in board_dirs:
+        reports = Path(board_dir) / "calibration"
+        for path in sorted(reports.glob("*/report.json")):
+            try:
+                report = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(report, dict):
+                continue
+            run_id = report.get("run_id") or path.parent.name
+            scored_at = report.get("scored_at") if isinstance(report.get("scored_at"), str) else ""
+            lanes = report.get("lanes")
+            if not isinstance(lanes, dict):
+                continue
+            for lane, entry in lanes.items():
+                if not isinstance(entry, dict):
+                    continue
+                row = {
+                    "run_id": run_id,
+                    "lane": lane,
+                    "recall": entry.get("recall"),
+                    "precision": entry.get("precision"),
+                    "scored_at": scored_at,
+                }
+                current = newest.get(lane)
+                if current is None or (row["scored_at"], str(row["run_id"])) > (
+                    current["scored_at"],
+                    str(current["run_id"]),
+                ):
+                    newest[lane] = row
+    return [newest[lane] for lane in sorted(newest)]
+
+
 def build_overlay(ledger, board_dirs=(), watch_state=None, owner_decisions=None, now=None):
     """The overlay lists the dashboard consumes, ready for the operator's overlay file."""
     return {
         "operator": operator_rows(ledger, board_dirs, watch_state, owner_decisions),
         "accepted_work": accepted_work(ledger, now),
+        "reviewer_recall": reviewer_recall(board_dirs),
     }

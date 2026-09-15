@@ -111,6 +111,38 @@ def clean_accepted_work(rows):
     return clean
 
 
+def clean_reviewer_recall(rows):
+    """Sanitize reviewer-recall rows to run, lane, the two rates and the scored instant.
+
+    Unknown keys are stripped; rows without a run and lane, or whose rates are not
+    fractions in 0..1, are dropped. Recall and precision keep the fixed row shape: a lane
+    with no scorable cases stays null rather than becoming 0.
+    """
+    if not isinstance(rows, list):
+        return []
+    clean = []
+    for row in rows[:50]:
+        if not isinstance(row, dict):
+            continue
+        entry = {}
+        for key in ("run_id", "lane", "scored_at"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip():
+                entry[key] = value[:200]
+        if "run_id" not in entry or "lane" not in entry:
+            continue
+        for key in ("recall", "precision"):
+            value = row.get(key)
+            if value is None:
+                entry[key] = None
+            elif type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1:
+                entry[key] = float(value)
+            else:
+                entry[key] = None
+        clean.append(entry)
+    return clean
+
+
 def timestamp(value):
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
@@ -129,6 +161,7 @@ def project(raw, overlays=()):
     overlay_scorecard = overlays.get("scorecard") if isinstance(overlays, dict) else None
     overlay_operator = overlays.get("operator") if isinstance(overlays, dict) else None
     overlay_accepted = overlays.get("accepted_work") if isinstance(overlays, dict) else None
+    overlay_recall = overlays.get("reviewer_recall") if isinstance(overlays, dict) else None
     accounts = {}
     for a in [*raw.get("accounts", []), *overlay_accounts]:
         if not isinstance(a, dict) or a.get("provider") not in PROVIDERS:
@@ -177,6 +210,7 @@ def project(raw, overlays=()):
         scorecard=clean_scorecard(overlay_scorecard),
         operator=clean_operator(overlay_operator),
         accepted_work=clean_accepted_work(overlay_accepted),
+        reviewer_recall=clean_reviewer_recall(overlay_recall),
         served_at=datetime.now(timezone.utc).isoformat(),
     )
 

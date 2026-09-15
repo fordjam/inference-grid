@@ -7,6 +7,7 @@ import hmac
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -14,7 +15,13 @@ import sqlite3
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
-from capacity import clean_accepted_work, clean_operator, clean_scorecard, project
+from capacity import (
+    clean_accepted_work,
+    clean_operator,
+    clean_reviewer_recall,
+    clean_scorecard,
+    project,
+)
 
 MAX_BODY = 128 * 1024
 COOKIE = "__Host-grid_session"
@@ -128,8 +135,33 @@ def clean_snapshot(raw, now=None):
             value = r[key]
             if type(value) is not int or isinstance(value, bool) or not 0 <= value <= 10**9:
                 raise ValueError("invalid accepted_work count")
+    # Reviewer recall rides beside accepted work: fixed shape, rates as fractions in 0..1
+    # or null, and nothing beyond a run, a lane and the scored instant.
+    reviewer_recall = raw.get("reviewer_recall", [])
+    if not isinstance(reviewer_recall, list) or len(reviewer_recall) > 50:
+        raise ValueError("invalid reviewer_recall")
+    for r in reviewer_recall:
+        if not isinstance(r, dict) or set(r) != set(
+            ("run_id", "lane", "recall", "precision", "scored_at")
+        ):
+            raise ValueError("invalid reviewer_recall row")
+        for key in ("run_id", "lane", "scored_at"):
+            if not isinstance(r[key], str) or not r[key] or len(r[key]) > 200:
+                raise ValueError("invalid reviewer_recall field")
+        for key in ("recall", "precision"):
+            value = r[key]
+            if value is None:
+                continue
+            if (
+                type(value) not in (int, float)
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or not 0 <= value <= 1
+            ):
+                raise ValueError("invalid reviewer_recall rate")
     result["operator"] = clean_operator(operator)
     result["accepted_work"] = clean_accepted_work(accepted_work)
+    result["reviewer_recall"] = clean_reviewer_recall(reviewer_recall)
     result["captured_at"] = captured
     return result, dt.timestamp()
 
@@ -209,6 +241,7 @@ class Store:
                 "scorecard": [],
                 "operator": [],
                 "accepted_work": [],
+                "reviewer_recall": [],
                 "captured_at": None,
             }
         )

@@ -601,6 +601,77 @@ class TickBoardsTests(unittest.TestCase):
         self.assertEqual(tick_boards.count_ready(None), 0)
 
 
+class CalibrationTriggerTests(unittest.TestCase):
+    def test_due_when_never_scored_or_past_the_window(self):
+        now = 1_700_000_000.0
+        self.assertTrue(tick_boards.calibration_due(None, 7, now))
+        self.assertFalse(tick_boards.calibration_due(now - 6 * 86400, 7, now))
+        self.assertTrue(tick_boards.calibration_due(now - 7 * 86400, 7, now))
+        self.assertTrue(tick_boards.calibration_due(now - 30 * 86400, 7, now))
+
+    def test_every_pass_runs_the_trigger_before_the_boards(self):
+        clock = FakeClock()
+        events = []
+        tick_boards.run(
+            ["a"],
+            deadline=7200,
+            prepare=lambda: events.append("prepare"),
+            tick=lambda board: (events.append("tick:" + board), 0)[1],
+            sleep=clock.sleep,
+            clock=clock.clock,
+            calibrate=lambda: events.append("calibrate"),
+        )
+        self.assertEqual(events.count("calibrate"), 4)
+        self.assertEqual(events[:3], ["calibrate", "prepare", "tick:a"])
+
+    def test_default_calibrate_reads_the_ledger_clock(self):
+        tmp = self.enterContext(_TmpDir())
+        from inference_grid.board.calibration import newest_calibration_at
+        from inference_grid.ledger import Ledger, attempts as attempts_t, tasks as tasks_t
+
+        url = "sqlite:///" + str(tmp.path / "l.sqlite")
+        ledger = Ledger(url)
+        ledger.initialize()
+        board = tmp.path / "project" / "grid" / "board"
+        corpus = tmp.path / "corpus"
+        corpus.mkdir(parents=True)
+        config = {
+            "database_url": url,
+            "calibration": {
+                "board_dir": str(board),
+                "corpus_dir": str(corpus),
+                "lanes": ["go"],
+                "every_days": 7,
+            },
+        }
+        # Nothing scored yet: the trigger authors a run onto the configured board.
+        first = tick_boards.default_calibrate(config, now=1_700_000_000.0)
+        self.assertTrue(first.startswith("calibration-auto-"))
+        self.assertTrue((board / (first + ".json")).is_file())
+        # A fresh calibration outcome (the ledger's own state) closes the window.
+        aid = "11111111-2222-3333-4444-777777777777"
+        with ledger.engine.begin() as con:
+            con.execute(tasks_t.insert().values(id="t1", project="p", spec={}))
+            con.execute(
+                attempts_t.insert().values(
+                    id=aid,
+                    task="t1",
+                    account="a",
+                    generation=1,
+                    state="completed",
+                    estimate={},
+                    workspace="/w",
+                    receipt={},
+                    updated=0.0,
+                )
+            )
+        ledger.record_outcome(aid, "calibration", True, note="calibration auto-1/c1: 1/1 recalled")
+        scored = newest_calibration_at(ledger)
+        self.assertIsNone(tick_boards.default_calibrate(config, now=scored + 1))
+        again = tick_boards.default_calibrate(config, now=scored + 8 * 86400)
+        self.assertTrue(again.startswith("calibration-auto-"))
+
+
 class UploadTests(unittest.TestCase):
     def config(self):
         return {
