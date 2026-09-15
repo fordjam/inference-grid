@@ -82,6 +82,7 @@ def board_new(
     include_docs=None,
     exclude_commits=None,
     qualify=None,
+    allowed_prefixes=None,
 ):
     from .board.new import new_task, retry_task
 
@@ -102,6 +103,7 @@ def board_new(
             split=split,
             include_docs=include_docs,
             exclude_commits=exclude_commits,
+            allowed_prefixes=allowed_prefixes,
         )
     if retry is not None:
         return retry_task(
