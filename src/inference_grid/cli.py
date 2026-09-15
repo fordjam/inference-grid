@@ -154,6 +154,7 @@ def main():
             "digest",
             "evaluation",
             "tick",
+            "watch",
         ],
     )
     parser.add_argument("--json", help="JSON argument file; never store credentials here")
@@ -190,6 +191,7 @@ def main():
             "calibration-score",
             "defer",
             "cooldown",
+            "watch",
         }
         and not args.json
     ):
@@ -242,6 +244,7 @@ def main():
         "board-init": lambda **kw: board_init(**kw),
         "tick-all": lambda **kw: tick_all(ledger, **kw),
         "digest": lambda **kw: digest(ledger, **kw),
+        "watch": lambda **kw: watch(kw),
         "inbox-integrate": lambda **kw: inbox_integrate(
             kw["project_root"], kw["task_id"], dry_run=kw.get("dry_run", True)
         ),
@@ -296,6 +299,12 @@ def digest(ledger, boards_dir, since=None):
     from .digest import digest as render
 
     return render(ledger, boards_dir, now=since)
+
+
+def watch(spec):
+    from .watch import watch as run_watch
+
+    return run_watch(spec)
 
 
 if __name__ == "__main__":
