@@ -42,19 +42,29 @@ def default_tick(board, config):
     with log_path.open("a") as log:
         stamp = time.strftime("%FT%TZ", time.gmtime())
         log.write(f"=== {stamp} tick {board}\n")
-        done = subprocess.run(
-            [config.get("inference_grid_bin", "inference-grid"), "board-tick", "--json", str(out)],
-            capture_output=True,
-            text=True,
-            timeout=3600,
-        )
-        log.write(done.stdout)
+        argv = [config.get("inference_grid_bin", "inference-grid")]
+        if config.get("database_url"):
+            argv += ["--database", config["database_url"]]
+        argv += ["board-tick", "--json", str(out)]
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=3600)
         log.write(done.stderr)
-    results = json.loads(out.read_text())
-    for r in results:
-        if r.get("lane"):
-            print(" ", r["task"], r["lane"], r["result"][:80])
-    return count_ready(results.get("board_dir") if isinstance(results, dict) else None)
+        # board-tick reads its configuration from the --json file and prints the pass's
+        # results to stdout: one row per ready task, with the lane and outcome when dispatched.
+        try:
+            results = json.loads(done.stdout)
+        except ValueError:
+            log.write("tick output unreadable\n" + done.stdout[-500:] + "\n")
+            results = []
+        for r in results if isinstance(results, list) else []:
+            if isinstance(r, dict) and r.get("lane"):
+                line = f"  {r['task']} {r['lane']} {str(r.get('result', ''))[:80]}\n"
+                log.write(line)
+                print(line, end="")
+    try:
+        board_dir = json.loads(out.read_text()).get("board_dir")
+    except (OSError, ValueError):
+        board_dir = None
+    return count_ready(board_dir)
 
 
 def count_ready(board_dir):
