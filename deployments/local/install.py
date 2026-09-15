@@ -1,9 +1,18 @@
-"""Render the launchd plist for the capacity loop.
+"""Render one launchd plist per local capacity runtime, all kept alive.
 
-Writes the plist for ``com.inference-grid.capacity-loop`` — the KeepAlive agent that runs
-capacity_loop.py, replacing the three timer agents — into a directory the operator names,
-and prints the ``launchctl bootstrap`` command. It never runs ``launchctl`` itself; loading
-the agent is an operator step.
+Four runtimes run the operator's capacity layer: ``capacity-loop`` (the KeepAlive
+scheduler), ``capacity-feed``, ``capacity-web`` (the dashboard server) and ``tick-boards``
+(the boards loop). Each gets its own plist in a directory the operator names, and the
+``launchctl bootstrap`` command for each is printed. It never runs ``launchctl`` itself;
+loading the agents is an operator step.
+
+Every plist is the same shape — ``KeepAlive`` and ``RunAtLoad`` true, ``ProcessType:
+Interactive`` — and never ``StartInterval``. launchd parks interval spawns for a GUI-session
+agent while the display is off ("pended nondemand spawn = interval"), which is exactly when
+the phone dashboard is the only view; a process that is already running is not held. So the
+runtimes are kept alive rather than scheduled, and they come back after a reboot: the
+2026-09-15 reboot killed the hand-started feed, dashboard server and boards loop while the one
+KeepAlive agent survived.
 
     python3 install.py --out-dir ~/Library/LaunchAgents \
         --python ~/.local/share/inference-grid/venv/bin/python \
@@ -16,7 +25,15 @@ import sys
 from pathlib import Path
 
 DEFAULT_DIR = Path.home() / ".local/share/inference-grid-capacity"
-LABEL = "com.inference-grid.capacity-loop"
+DOMAIN = "com.inference-grid"
+
+# One row per runtime: short name (also the label suffix), default script file, default log.
+RUNTIMES = (
+    ("capacity-loop", "capacity_loop.py", "capacity-loop.log"),
+    ("capacity-feed", "capacity_feed.py", "capacity-feed.log"),
+    ("capacity-web", "capacity_web.py", "capacity-web.log"),
+    ("tick-boards", "tick_boards.py", "tick-boards.log"),
+)
 
 PLIST_TEMPLATE = """\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -31,13 +48,11 @@ PLIST_TEMPLATE = """\
 \t<string>Interactive</string>
 \t<key>ProgramArguments</key>
 \t<array>
-\t\t<string>{python}</string>
-\t\t<string>{script}</string>
-\t</array>
+{arguments}\t</array>
 \t<key>RunAtLoad</key>
 \t<true/>
 \t<key>StandardErrorPath</key>
-\t<string>{error_log}</string>
+\t<string>{log}</string>
 \t<key>StandardOutPath</key>
 \t<string>{log}</string>
 </dict>
@@ -45,9 +60,14 @@ PLIST_TEMPLATE = """\
 """
 
 
+def _arguments(argv):
+    """The ProgramArguments array body: one indented <string> per argument."""
+    return "".join(f"\t\t<string>{arg}</string>\n" for arg in argv)
+
+
 def render(label, python, script, log):
-    """The plist for one capacity-loop agent: label, interpreter, script, log paths."""
-    return PLIST_TEMPLATE.format(label=label, python=python, script=script, log=log, error_log=log)
+    """The plist for one runtime: label, interpreter, script and log paths."""
+    return PLIST_TEMPLATE.format(label=label, arguments=_arguments([python, script]), log=log)
 
 
 def bootstrap_command(plist_path):
@@ -55,24 +75,33 @@ def bootstrap_command(plist_path):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Render the capacity-loop launchd plist.")
-    parser.add_argument("--out-dir", required=True, help="directory to write the plist into")
-    parser.add_argument("--label", default=LABEL)
-    parser.add_argument("--python", default=sys.executable, help="interpreter that runs the loop")
+    parser = argparse.ArgumentParser(description="Render the local capacity launchd plists.")
+    parser.add_argument("--out-dir", required=True, help="directory to write the plists into")
     parser.add_argument(
-        "--script", default=str(DEFAULT_DIR / "capacity_loop.py"), help="capacity_loop.py path"
+        "--python", default=sys.executable, help="interpreter that runs every runtime"
     )
-    parser.add_argument(
-        "--log", default=str(DEFAULT_DIR / "capacity-loop.log"), help="agent log path"
-    )
+    for name, script, log in RUNTIMES:
+        key = name.replace("-", "_")
+        script_flags = [f"--{name}-script"]
+        log_flags = [f"--{name}-log"]
+        if name == "capacity-loop":
+            script_flags.append("--script")
+            log_flags.append("--log")
+        parser.add_argument(*script_flags, dest=f"{key}_script", default=str(DEFAULT_DIR / script))
+        parser.add_argument(*log_flags, dest=f"{key}_log", default=str(DEFAULT_DIR / log))
     args = parser.parse_args(argv)
 
     out_dir = Path(args.out_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
-    plist_path = out_dir / (args.label + ".plist")
-    plist_path.write_text(render(args.label, args.python, args.script, args.log))
-    print(f"wrote {plist_path}")
-    print(bootstrap_command(plist_path))
+    for name, _script, _log in RUNTIMES:
+        key = name.replace("-", "_")
+        label = f"{DOMAIN}.{name}"
+        plist_path = out_dir / (label + ".plist")
+        plist_path.write_text(
+            render(label, args.python, getattr(args, f"{key}_script"), getattr(args, f"{key}_log"))
+        )
+        print(f"wrote {plist_path}")
+        print(bootstrap_command(plist_path))
 
 
 if __name__ == "__main__":
