@@ -18,6 +18,7 @@ run the loop with plain subprocesses and fake agents.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -313,6 +314,82 @@ def _first_match(path: Path, pattern: str) -> Optional[str]:
     return None
 
 
+def _git(work: Path, argv: Sequence[str]) -> Optional[bytes]:
+    """stdout of one git query in `work`, or None when it is not a worktree we can read."""
+    try:
+        proc = subprocess.run(
+            ["git", *argv], cwd=work, capture_output=True, timeout=60, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def worktree_fingerprint(work: Path) -> Optional[str]:
+    """A digest of HEAD, the tracked diff and every untracked file's bytes.
+
+    Early-stop detection asks whether a round moved the worktree at all, so the
+    fingerprint sees commits (`rev-parse`), uncommitted edits (`diff HEAD`, `status`)
+    and untracked files with their contents (`ls-files --others`). A directory that is
+    not a git worktree, or a git command that fails, has no answer: None. The caller
+    must not read None as "unchanged" — an unreadable worktree is not evidence that
+    the agent did nothing."""
+    digest = hashlib.sha256()
+    for argv in (["rev-parse", "HEAD"], ["diff", "HEAD"], ["status", "--porcelain"]):
+        chunk = _git(work, argv)
+        if chunk is None:
+            return None
+        digest.update(chunk)
+        digest.update(b"\0")
+    listing = _git(work, ["ls-files", "--others", "--exclude-standard", "-z"])
+    if listing is None:
+        return None
+    for name in sorted(filter(None, listing.split(b"\0"))):
+        digest.update(name)
+        digest.update(b"\0")
+        try:
+            digest.update((work / name.decode("utf-8", "surrogateescape")).read_bytes())
+        except OSError:
+            return None
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def terminal_corroboration(native: Path) -> Optional[Dict]:
+    """What the CLI said about its own ending, for the record — never the decision.
+
+    Cline's JSON mode ends with a `run_result` line carrying `finishReason`; `cmd
+    --print --output-format json` ends with a `result` document carrying `subtype` and
+    `stopReason`. The last such line wins. An unknown or unreadable stream returns
+    None, so the round still carries whatever the exit code and the worktree proved."""
+    found = None
+    try:
+        with native.open("rb") as handle:
+            for raw in handle:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if row.get("type") == "run_result":
+                    found = {"kind": "cline", "finish_reason": row.get("finishReason")}
+                elif row.get("type") == "result":
+                    found = {
+                        "kind": "command_code",
+                        "subtype": row.get("subtype"),
+                        "stop_reason": row.get("stopReason"),
+                    }
+    except OSError:
+        return None
+    return found
+
+
 def run_gate(work: Path, gate: Gate, env: Dict[str, str], log_dir: Path) -> GateResult:
     """Run one gate as code and keep its whole output on disk; return the tail."""
     log = log_dir / f"gate-{_slug(gate.name)}.log"
@@ -345,13 +422,45 @@ def run_gates(
     return [run_gate(work, gate, env, log_dir) for gate in gates]
 
 
-def fix_prompt(results: Sequence[GateResult], round_no: int, max_rounds: int) -> str:
+def _gate_mark(result: GateResult) -> tuple:
+    """The part of a gate result that must be identical for two rounds to look alike."""
+    return (result.name, result.ok, result.reason, result.returncode)
+
+
+def _gates_unchanged(
+    previous: Optional[Sequence[GateResult]], results: Sequence[GateResult]
+) -> bool:
+    """True when this round's gates ended exactly as the previous round's did.
+
+    With no previous round there is nothing that can have changed, which is what lets
+    a first round that does nothing be named an early stop."""
+    if previous is None:
+        return True
+    return [_gate_mark(r) for r in previous] == [_gate_mark(r) for r in results]
+
+
+def fix_prompt(
+    results: Sequence[GateResult],
+    round_no: int,
+    max_rounds: int,
+    stopped_early: bool = False,
+) -> str:
     """Deterministic text: which gates failed, their tails, and the rules of the round.
 
     The rules repeat what the brief already said because the model is being
-    re-entered mid-session and a short, exact instruction beats a reference."""
+    re-entered mid-session and a short, exact instruction beats a reference. When the
+    previous round moved nothing, that is the first line: a session that answered
+    without working has to be told plainly that the answer was not the work."""
     failed = [r for r in results if not r.ok]
-    lines = [
+    lines = []
+    if stopped_early:
+        lines += [
+            "your previous session ended without changing anything: the worktree and every "
+            "gate result are identical to the round before, so that round was not the work. "
+            "Make the change now, in this session, and leave it on the branch.",
+            "",
+        ]
+    lines += [
         f"The harness ran the gates after your last turn (round {round_no} of {max_rounds}). "
         f"{len(failed)} failed. Fix them on the branch you are on, with a NEW commit "
         "(never amend, rebase or squash), same trailer as before. Do not weaken, skip or "
@@ -399,11 +508,21 @@ def build_loop(
         if round_no > 1 and remaining < min_seconds_for_round:
             reason = "wall_deadline_before_round"
             break
-        text = prompt if round_no == 1 else fix_prompt(rounds[-1]["results"], round_no, max_rounds)
+        if round_no == 1:
+            text = prompt
+        else:
+            previous = rounds[-1]
+            text = fix_prompt(
+                previous["results"],
+                round_no,
+                max_rounds,
+                stopped_early=previous["agent_reason"] == "agent_stopped_early",
+            )
         argv = adapter.first(text) if round_no == 1 else adapter.resume(session, text)
         native = attempt_dir / f"native-{round_no}.jsonl"
         stderr = attempt_dir / f"native-{round_no}.stderr"
         (attempt_dir / f"prompt-{round_no}.txt").write_text(text)
+        before = worktree_fingerprint(work)
         run_started = clock.monotonic()
         with native.open("xb") as out, stderr.open("xb") as err:
             proc = subprocess.Popen(
@@ -422,17 +541,30 @@ def build_loop(
                 _kill(proc)
                 code = proc.wait()
                 agent_reason = "wall_deadline"
+        after = worktree_fingerprint(work)
         if session is None:
             session = adapter.session_id(native)
         gate_dir = attempt_dir / f"gates-{round_no}"
         gate_dir.mkdir(exist_ok=True)
         results = run_gates(work, gates, env, gate_dir)
+        previous_results = rounds[-1]["results"] if rounds else None
+        stopped_early = (
+            code == 0
+            and agent_reason == "process_exited"
+            and before is not None
+            and after is not None
+            and after == before
+            and _gates_unchanged(previous_results, results)
+        )
+        if stopped_early:
+            agent_reason = "agent_stopped_early"
         rounds.append(
             {
                 "round": round_no,
                 "agent_returncode": code,
                 "agent_reason": agent_reason,
                 "agent_elapsed_s": round(clock.monotonic() - run_started),
+                "agent_terminal": terminal_corroboration(native),
                 "results": results,
             }
         )
@@ -445,7 +577,7 @@ def build_loop(
         if session is None:
             reason = "no_session_to_resume"
             break
-        reason = "rounds_exhausted"
+        reason = "agent_stopped_early" if stopped_early else "rounds_exhausted"
     final = rounds[-1]["results"] if rounds else []
     verdict = {
         "adapter": adapter.name,

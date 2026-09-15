@@ -37,14 +37,16 @@ BRIEF_DOC = """# Test brief
 Write `docs/reports/<task-id>.md`.
 """
 
-# The fake agent: report written, one trailered commit (only when something is staged,
-# so a re-entry round commits nothing new), session id on stdout.
+# The fake agent: one more line in the report and one trailered commit per round, session
+# id on stdout. A re-entry round changes the worktree, so a failing gate still exhausts the
+# rounds rather than reading as the agent having stopped early.
 FAKE_AGENT = """
 import json, subprocess, sys
 from pathlib import Path
 report = Path(sys.argv[1])
 report.parent.mkdir(parents=True, exist_ok=True)
-report.write_text("report for the packet\\n")
+prior = report.read_text() if report.exists() else ""
+report.write_text(prior + "report for the packet\\n")
 subprocess.run(["git", "add", "-A"], check=True)
 staged = subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode != 0
 if staged:
