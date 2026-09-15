@@ -48,6 +48,13 @@ Run only after the weekly reset (the account exhausts quickly); never give Cline
 hints — a passing artifact was once deleted to chase a line count. The ledger seeds a
 `cline` alias placeholder on `init`; `configure_account` fills it in.
 
+macOS 27 note: the package's `bin/.cline` launcher is rewritten by Cline's own
+postinstall, which breaks its code signature — the kernel then SIGKILLs the binary and
+every launch dies before it prints anything (`--version` names the signal). Point
+`CLINE_BIN_PATH` at the platform package's real binary instead of `bin/.cline`: the
+launcher honours that variable first, and `doctor` runs `--version` so a broken launcher
+is a named `lane_binary_unavailable` finding rather than a silent failure.
+
 ## Codex (OpenAI) — `codex_cli`, pending operator confirmation
 
 ```json

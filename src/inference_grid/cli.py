@@ -163,7 +163,13 @@ def main():
 
         extra = json.load(open(args.json)) if args.json else {}
         boards = extra.get("boards") if isinstance(extra, dict) else None
-        report = diagnose(args.database, boards=boards)
+        lanes_path = extra.get("lanes_path") if isinstance(extra, dict) else None
+        lane_specs = None
+        if lanes_path:
+            from .lanes.runner import load_lanes
+
+            lane_specs = load_lanes(lanes_path)
+        report = diagnose(args.database, boards=boards, lane_specs=lane_specs)
         print(json.dumps(report, indent=2))
         raise SystemExit(0 if report["status"] == "checks_passed" else 1)
     if (
