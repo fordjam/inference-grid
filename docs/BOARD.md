@@ -8,7 +8,7 @@ Planned operating model for continuous Grid operation (agreed 2026-09-12). The G
 
 | Field | Meaning |
 | --- | --- |
-| `id`, `category` | Stable id; category from the scorecard vocabulary (`pure_function`, `tests_multi_file`, `fixtures_multi_file`, `independent_review`, `canary`, `packet`) |
+| `id`, `category` | Stable id; category from the scorecard vocabulary (`pure_function`, `tests_multi_file`, `fixtures_multi_file`, `independent_review`, `canary`, `packet`, `plan`) |
 | `brief` | Path to the exact text sent to the provider, format rule restated last |
 | `inputs` | Files staged read-only for the attempt (manifest hashed by the ledger) |
 | `tests` | Coordinator-written tests run against the artifact before any acceptance |
@@ -17,7 +17,7 @@ Planned operating model for continuous Grid operation (agreed 2026-09-12). The G
 | `author_family` | Set for review tasks so the reviewer family differs |
 | `budget` | Wall seconds, output cap, thinking budget where the lane supports one |
 | `state` | `ready`, `dispatched`, `passed`, `review_pending`, `accepted`, `blocked` with a reason; a packet task also settles `landed` (see Landing) |
-| `spec` | Packet tasks only (see Packet tasks below); absent on every other category |
+| `spec` | Packet tasks (see Packet tasks below) and plan tasks (see Plan node) only; absent on every other category |
 
 ## Runner tick
 
@@ -82,6 +82,32 @@ rounds − 1, and an artifact digest pinning the exact head commit), and the tas
 other outcome the attempt is held with the loop's reason and the branch is left inside the
 attempt directory for the operator. The runner itself never advances the base; landing is
 the code node below. `board-tick --dry-run` plans packet tasks like any other.
+
+## Plan node
+
+Briefs were the last thing only the coordinator produced. A ticket names the work; the
+facts a brief opens with are queries against git and the tree, so `board-new --json
+{ticket: {title, body, repo, paths?}, lane, board_dir}` runs the scout
+(`lanes/scout.py::orient`) over the ticket's `paths` — or paths guessed from its body by
+plain grep of the identifiers — and authors one task of category `plan` whose brief
+carries the hard rules, the ticket and the orientation. The plan lane's only artifact is
+`packet.md`: a packet section in the brief format (`#### <id>. <title>`, location,
+acceptance tests, size, operator step) plus a fenced JSON block naming the packet's
+`gates` and `tests`.
+
+The runner dispatches the plan task on the lane the operator marked `tier: plan` (J2);
+planning on any other tier is refused with `plan_requires_tier_plan`. When it settles,
+`board/plan_task.py::settle_plan` validates the block through the same
+`validate_packet_task` a hand-written packet passes, writes the packet's brief (the plan
+lane's hard rules, then the drafted section) and a `packet` task file in state `ready`
+whose `lanes` come from `route`'s defaulting for the packet's category, and settles the
+plan task `passed` with a `plan` outcome. A malformed heading or block blocks the plan
+task with the validation error; no packet task is written.
+
+That task is a **draft, not a build**: its id is recorded in the board's `drafts.json`,
+and the tick reports `draft` and dispatches nothing until the operator releases it
+(removing the id) or the board config carries `"auto_dispatch": true`. The default is to
+draft, not to build.
 
 ## Landing
 
