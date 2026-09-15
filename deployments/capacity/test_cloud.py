@@ -267,6 +267,51 @@ class Tests(Base):
         self.assertNotIn("private task", stored)
         self.assertNotIn("notes", stored)
 
+    def test_operator_and_accepted_work_upload_sanitized(self):
+        # Needs-you rows and the weekly metric: fixed shapes, unknown keys rejected at the
+        # cloud boundary (the overlay-side cleaner strips instead; here nothing slips in).
+        row = {
+            "kind": "blocked_task",
+            "id": "t1",
+            "reason": "operator decision",
+            "since": "2026-09-15T00:00:00+00:00",
+        }
+        work = {"week": "2026-W37", "account": "zai", "accepted": 1, "attempts": 2}
+        s = self.sample()
+        s["operator"] = [row]
+        s["accepted_work"] = [work]
+        data, _ = clean_snapshot(s)
+        self.assertEqual(data["operator"], [row])
+        self.assertEqual(data["accepted_work"], [work])
+
+    def test_operator_rows_rejected(self):
+        s = self.sample()
+        for bad in [
+            "not-a-list",
+            [{}] * 51,
+            [{"kind": "blocked_task", "id": "t1", "reason": "r", "since": "x", "extra": 1}],
+            [{"kind": " ", "id": "t1", "reason": "r", "since": "x"}],
+            [{"kind": "blocked_task", "id": "", "reason": "r", "since": "x"}],
+            [{"kind": "blocked_task", "id": "t1", "reason": "r" * 201, "since": "x"}],
+            [{"kind": "blocked_task", "id": "t1"}],
+        ]:
+            with self.assertRaises(ValueError):
+                clean_snapshot(s | {"operator": bad})
+
+    def test_accepted_work_rejected(self):
+        s = self.sample()
+        for bad in [
+            "junk",
+            [{}] * 51,
+            [{"week": "2026-W37", "account": "zai", "accepted": True, "attempts": 2}],
+            [{"week": "2026-W37", "account": "zai", "accepted": -1, "attempts": 2}],
+            [{"week": "2026-W37", "account": "zai", "accepted": 1, "attempts": 2, "extra": "x"}],
+            [{"week": "2026-W37", "account": "zai", "accepted": 1}],
+            [{"week": 5, "account": "zai", "accepted": 1, "attempts": 2}],
+        ]:
+            with self.assertRaises(ValueError):
+                clean_snapshot(s | {"accepted_work": bad})
+
     # --- Observable refresh requests (CLOUD-03) ---
     def session(self):
         return {

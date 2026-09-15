@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
-from capacity import clean_scorecard, project
+from capacity import clean_accepted_work, clean_operator, clean_scorecard, project
 
 MAX_BODY = 128 * 1024
 COOKIE = "__Host-grid_session"
@@ -101,6 +101,35 @@ def clean_snapshot(raw, now=None):
         raise ValueError("invalid scorecard")
     # Routing evidence only: clean_scorecard strips every unknown key from each row.
     result["scorecard"] = clean_scorecard(scorecard)
+    # Needs-you rows and the weekly accepted-work metric arrive as fixed-shape lists and
+    # reject unknown keys outright: attention routing and counts, never task names,
+    # prompts or anything identifying. Strings are bounded like the other list fields.
+    operator = raw.get("operator", [])
+    if not isinstance(operator, list) or len(operator) > 50:
+        raise ValueError("invalid operator")
+    for o in operator:
+        if not isinstance(o, dict) or set(o) != set(("kind", "id", "reason", "since")):
+            raise ValueError("invalid operator row")
+        for key in ("kind", "id", "reason", "since"):
+            if not isinstance(o.get(key), str) or len(o[key]) > 200:
+                raise ValueError("invalid operator field")
+        if not o["kind"].strip() or not o["id"].strip():
+            raise ValueError("invalid operator row")
+    accepted_work = raw.get("accepted_work", [])
+    if not isinstance(accepted_work, list) or len(accepted_work) > 50:
+        raise ValueError("invalid accepted_work")
+    for r in accepted_work:
+        if not isinstance(r, dict) or set(r) != set(("week", "account", "accepted", "attempts")):
+            raise ValueError("invalid accepted_work row")
+        for key in ("week", "account"):
+            if not isinstance(r[key], str) or not r[key] or len(r[key]) > 200:
+                raise ValueError("invalid accepted_work field")
+        for key in ("accepted", "attempts"):
+            value = r[key]
+            if type(value) is not int or isinstance(value, bool) or not 0 <= value <= 10**9:
+                raise ValueError("invalid accepted_work count")
+    result["operator"] = clean_operator(operator)
+    result["accepted_work"] = clean_accepted_work(accepted_work)
     result["captured_at"] = captured
     return result, dt.timestamp()
 
@@ -174,7 +203,14 @@ class Store:
         return (
             json.loads(row[0])
             if row
-            else {"accounts": [], "attempts": [], "scorecard": [], "captured_at": None}
+            else {
+                "accounts": [],
+                "attempts": [],
+                "scorecard": [],
+                "operator": [],
+                "accepted_work": [],
+                "captured_at": None,
+            }
         )
 
     # Refresh requests: queued -> collecting -> completed | cooldown | failed.
@@ -333,6 +369,7 @@ def handler(config, store):
                 return self.reply(
                     200, json.dumps({"ok": True, "commit": commit}).encode(), "application/json"
                 )
+                return self.reply(200, b"ok")
             if not self.host_ok():
                 return self.reply(403, b"Forbidden")
             if path == "/login":
