@@ -177,7 +177,7 @@ the base and an `external` record. Two drivers on two clones run two packets con
 
 ```sh
 inference-grid calibrate --json '{"board_dir": "grid/board", "project_root": ".",
-  "corpus_dir": "calibration/corpus-v1", "lanes": ["go-kimi"], "run_id": "kimi-20260914"}'
+  "corpus_dir": "calibration/example", "lanes": ["go-kimi"], "run_id": "kimi-20260914"}'
 # ...after the board settles them:
 inference-grid calibration-score --json '{"board_dir": "grid/board", "run_id": "kimi-20260914",
   "packets_root": "~/.grid-workspaces/packets", "record": true}'

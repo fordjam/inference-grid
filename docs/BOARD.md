@@ -61,10 +61,12 @@ The `go_http` request shapes reasoning explicitly, since kimi-k3 thought its who
 
 The board routes reviews by an acceptance rate that measures whether a reviewer produced
 a well-formed verdict, not whether the verdict was right. Calibration measures the
-difference with a corpus whose defects are known: `calibration/corpus-v1/` in this
-repository is the seed — five review packets (four with one planted defect each, one
-clean case to catch false positives), each holding a `diff.patch`, the changed files and
-a brief, plus an `answer.json` that is never staged. `inference-grid calibrate --json
+difference with a corpus whose defects are known. `calibration/example/` in this
+repository shows the format — one clean case to catch false positives and one with a
+planted defect — each holding a `diff.patch`, the changed files and a brief, plus an
+`answer.json` that is never staged. A real corpus is built from the defect classes an
+operator's own gates have caught; it lives outside the repository (pass its path as
+`corpus_dir`) because it is a record of that operator's projects. `inference-grid calibrate --json
 {board_dir, project_root, corpus_dir, lanes, run_id}` authors one independent_review task
 per case (`calib-<run_id>-<case>`, `author_family: "calibration"` — a sentinel no lane
 declares, so every listed lane stays eligible) and writes the answer keys plus a manifest

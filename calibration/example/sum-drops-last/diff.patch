@@ -1,0 +1,25 @@
+diff --git a/src/metering/totals.py b/src/metering/totals.py
+new file mode 100644
+--- /dev/null
++++ b/src/metering/totals.py
+@@ -0,0 +1,9 @@
++"""Statement totals over metering rows."""
++
++
++def total_units(rows):
++    """Sum of the `units` field over every row."""
++    total = 0
++    for i in range(len(rows) - 1):
++        total += rows[i]["units"]
++    return total
+diff --git a/tests/test_totals.py b/tests/test_totals.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_totals.py
+@@ -0,0 +1,6 @@
++from metering.totals import total_units
++
++
++def test_total_units_of_three_rows():
++    rows = [{"units": 2}, {"units": 3}, {"units": 5}]
++    assert total_units(rows) == 5 + 5

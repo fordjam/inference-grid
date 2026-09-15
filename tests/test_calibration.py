@@ -38,7 +38,13 @@ def write_case(root, name, files, diff, brief, answer):
 
 
 def defect(id, file, must_mention, severity="high", note="the defect"):
-    return {"id": id, "file": file, "must_mention": must_mention, "severity": severity, "note": note}
+    return {
+        "id": id,
+        "file": file,
+        "must_mention": must_mention,
+        "severity": severity,
+        "note": note,
+    }
 
 
 SPEC_DIFF = diff_block(
@@ -47,13 +53,13 @@ SPEC_DIFF = diff_block(
     'test("rename keeps the view", async ({ page }) => {\n'
     '  await page.route("/api/views", (route) => route.fulfill({ body: "[]" }));\n'
     '  await page.goto("/views");\n'
-    "  await expect(page.getByRole(\"heading\")).toBeVisible();\n"
+    '  await expect(page.getByRole("heading")).toBeVisible();\n'
     "});\n",
 )
 CLIENT_DIFF = diff_block(
     "web/src/api/views.ts",
     "export async function renameView(name: string, next: string) {\n"
-    "  return fetch(`/api/views/${name}`, { method: \"PUT\", body: next });\n"
+    '  return fetch(`/api/views/${name}`, { method: "PUT", body: next });\n'
     "}\n",
 )
 
@@ -133,7 +139,9 @@ def test_the_guard_refuses_credential_looking_case_files(tmp_path):
 def test_a_clean_case_may_not_carry_defects_and_ids_must_be_distinct(tmp_path):
     seed_case(tmp_path, "tidy", clean=True)
     path = tmp_path / "tidy" / "answer.json"
-    path.write_text(json.dumps({"defects": [defect("x", "web/e2e/views.spec.ts", ["m"])], "clean": True}))
+    path.write_text(
+        json.dumps({"defects": [defect("x", "web/e2e/views.spec.ts", ["m"])], "clean": True})
+    )
     with pytest.raises(ValueError, match="clean case"):
         load_corpus(tmp_path)
     seed_case(tmp_path, "dupe")
@@ -196,7 +204,7 @@ def test_authoring_writes_validated_tasks_briefs_and_answer_keys(tmp_path):
         assert task["artifacts"] == ["reply.txt"]
         brief = (project / task["brief"]).read_text()
         assert "Review the views rename flow" in brief
-        assert 'OUTPUT FORMAT, mandatory' in brief
+        assert "OUTPUT FORMAT, mandatory" in brief
         for relative in ("web/e2e/views.spec.ts",):
             assert any(relative in p for p in task["inputs"])
     answer_key = board / "calibration" / "seed-v1" / "mock-path.answer.json"
@@ -291,7 +299,10 @@ def scoring_board(tmp_path):
         {"web/e2e/views.spec.ts": "spec\n"},
         diff_block("web/e2e/views.spec.ts", "spec\n"),
         "brief\n",
-        {"defects": [defect("d1", "web/e2e/views.spec.ts", ["put"], severity="high")], "clean": False},
+        {
+            "defects": [defect("d1", "web/e2e/views.spec.ts", ["put"], severity="high")],
+            "clean": False,
+        },
     )
     write_case(
         corpus,
@@ -299,16 +310,41 @@ def scoring_board(tmp_path):
         {"src/api/routes/views.py": "route\n"},
         diff_block("src/api/routes/views.py", "route\n"),
         "brief\n",
-        {"defects": [defect("d2", "src/api/routes/views.py", ["delete"], severity="low")], "clean": False},
+        {
+            "defects": [defect("d2", "src/api/routes/views.py", ["delete"], severity="low")],
+            "clean": False,
+        },
     )
-    write_case(corpus, "clean-pass", {"docs/note.md": "note\n"}, diff_block("docs/note.md", "note\n"), "brief\n", {"defects": [], "clean": True})
-    write_case(corpus, "clean-spurious", {"docs/other.md": "note\n"}, diff_block("docs/other.md", "note\n"), "brief\n", {"defects": [], "clean": True})
+    write_case(
+        corpus,
+        "clean-pass",
+        {"docs/note.md": "note\n"},
+        diff_block("docs/note.md", "note\n"),
+        "brief\n",
+        {"defects": [], "clean": True},
+    )
+    write_case(
+        corpus,
+        "clean-spurious",
+        {"docs/other.md": "note\n"},
+        diff_block("docs/other.md", "note\n"),
+        "brief\n",
+        {"defects": [], "clean": True},
+    )
     calibration.author_calibration(board, project, corpus, ["go"], "run1")
     packets = tmp_path / "packets"
     write_packet(
         packets,
         "calib-run1-full-recall",
-        reply("rejected", [finding("web/e2e/views.spec.ts (spec)", "the mock intercepts /api/views but the client sends PUT /api/views/<name>")]),
+        reply(
+            "rejected",
+            [
+                finding(
+                    "web/e2e/views.spec.ts (spec)",
+                    "the mock intercepts /api/views but the client sends PUT /api/views/<name>",
+                )
+            ],
+        ),
         aid=AID,
     )
     write_packet(
@@ -323,7 +359,11 @@ def scoring_board(tmp_path):
         ),
     )
     write_packet(packets, "calib-run1-clean-pass", reply("approved", []))
-    write_packet(packets, "calib-run1-clean-spurious", reply("rejected", [finding("docs/other.md", "a made-up problem")]))
+    write_packet(
+        packets,
+        "calib-run1-clean-spurious",
+        reply("rejected", [finding("docs/other.md", "a made-up problem")]),
+    )
     return board, packets
 
 
@@ -340,7 +380,10 @@ def test_scoring_reports_recall_false_positives_and_precision(tmp_path, capsys):
     assert detail["a-miss"]["missed"] == ["d2"] and not detail["a-miss"]["accepted"]
     assert detail["a-miss"]["false_positives"] == 2
     assert detail["clean-pass"]["accepted"] and detail["clean-pass"]["false_positives"] == 0
-    assert not detail["clean-spurious"]["accepted"] and detail["clean-spurious"]["false_positives"] == 1
+    assert (
+        not detail["clean-spurious"]["accepted"]
+        and detail["clean-spurious"]["false_positives"] == 1
+    )
     # Weighted recall: high (3) recalled, low (1) missed.
     assert lane["weighted_recall"] == 0.75
     assert (board / "calibration" / "run1" / "report.json").is_file()
@@ -391,7 +434,14 @@ def test_a_basename_location_still_recalls_and_clean_cases_score(tmp_path):
         "brief\n",
         {"defects": [defect("d", "src/deep/views.py", ["nested"])], "clean": False},
     )
-    write_case(corpus, "tidy", {"docs/n.md": "n\n"}, diff_block("docs/n.md", "n\n"), "brief\n", {"defects": [], "clean": True})
+    write_case(
+        corpus,
+        "tidy",
+        {"docs/n.md": "n\n"},
+        diff_block("docs/n.md", "n\n"),
+        "brief\n",
+        {"defects": [], "clean": True},
+    )
     calibration.author_calibration(board, project, corpus, ["go"], "run1")
     packets = tmp_path / "packets"
     write_packet(
@@ -413,7 +463,9 @@ def test_scoring_without_record_writes_no_ledger_rows(tmp_path):
     ledger = Ledger("sqlite:///" + str(tmp_path / "l.sqlite"))
     ledger.initialize()
     report = calibration.score_calibration(board, "run1", packets, record=False, ledger=ledger)
-    assert not any("record_error" in r for lane in report["lanes"].values() for r in lane["cases_detail"])
+    assert not any(
+        "record_error" in r for lane in report["lanes"].values() for r in lane["cases_detail"]
+    )
     assert ledger.scorecard() == []
 
 
@@ -426,7 +478,11 @@ def test_record_true_records_calibration_outcomes(tmp_path):
     ledger = Ledger("sqlite:///" + str(tmp_path / "l.sqlite"))
     ledger.initialize()
     with ledger.engine.begin() as con:
-        con.execute(tasks_t.insert().values(id="calib-run1-full-recall-20260914T120000-abc123", project="p", spec={}))
+        con.execute(
+            tasks_t.insert().values(
+                id="calib-run1-full-recall-20260914T120000-abc123", project="p", spec={}
+            )
+        )
         con.execute(
             attempts_t.insert().values(
                 id=AID,
@@ -462,28 +518,18 @@ def test_record_true_without_a_ledger_refuses(tmp_path):
 # --- seed corpus and CLI (K4) ---
 
 
-CORPUS_V1 = Path(__file__).resolve().parents[1] / "calibration" / "corpus-v1"
+CORPUS_V1 = Path(__file__).resolve().parents[1] / "calibration" / "example"
 
 
-def test_the_seed_corpus_loads_and_authors_five_tasks(tmp_path):
+def test_the_example_corpus_loads_and_authors_its_tasks(tmp_path):
     from inference_grid.board.task import validate_task
 
+    # The shipped corpus is a two-case example (one clean, one planted defect); the
+    # operator's own corpus lives outside the repository and is not published.
     cases = load_corpus(CORPUS_V1)
-    assert [c["case"] for c in cases] == [
-        "abatement-base-includes-grant",
-        "clean-normalize",
-        "delete-nested-under-list",
-        "mock-path-mismatch",
-        "report-count-sum",
-    ]
+    assert [c["case"] for c in cases] == ["clean-normalize", "sum-drops-last"]
     clean = {c["case"]: c["answer"]["clean"] for c in cases}
-    assert clean == {
-        "abatement-base-includes-grant": False,
-        "clean-normalize": True,
-        "delete-nested-under-list": False,
-        "mock-path-mismatch": False,
-        "report-count-sum": False,
-    }
+    assert clean == {"clean-normalize": True, "sum-drops-last": False}
     board, project = board_and_project(tmp_path)
     created = calibration.author_calibration(board, project, CORPUS_V1, ["go"], "seed-v1")
     assert [t["id"] for t in created["tasks"]] == [f"calib-seed-v1-{c['case']}" for c in cases]
@@ -501,7 +547,9 @@ def run_cli(monkeypatch, tmp_path, name, payload, database):
 
     argfile = tmp_path / (name + ".json")
     argfile.write_text(json.dumps(payload))
-    monkeypatch.setattr(sys, "argv", ["inference-grid", "--database", database, name, "--json", str(argfile)])
+    monkeypatch.setattr(
+        sys, "argv", ["inference-grid", "--database", database, name, "--json", str(argfile)]
+    )
     buffer = io.StringIO()
     real = sys.stdout
     sys.stdout = buffer
@@ -529,13 +577,7 @@ def test_calibrate_round_trips_through_main(tmp_path, monkeypatch):
     )
     payload = json.loads(out)
     assert [t["id"] for t in payload["tasks"]] == [
-        f"calib-cli-v1-{c}" for c in (
-            "abatement-base-includes-grant",
-            "clean-normalize",
-            "delete-nested-under-list",
-            "mock-path-mismatch",
-            "report-count-sum",
-        )
+        f"calib-cli-v1-{c}" for c in ("clean-normalize", "sum-drops-last")
     ]
     assert (board / "calibration" / "cli-v1" / "manifest.json").is_file()
 
@@ -555,7 +597,7 @@ def test_calibration_score_round_trips_through_main(tmp_path, monkeypatch):
         "sqlite:///" + str(tmp_path / "score.sqlite"),
     )
     assert "| lane |" in out and "| go |" in out
-    payload = json.loads(out[out.index('{\n  "run_id"'):])
+    payload = json.loads(out[out.index('{\n  "run_id"') :])
     lane = payload["lanes"]["go"]
     assert lane["cases"] == 4 and lane["defects"] == 2 and lane["recalled"] == 1
     assert (board / "calibration" / "run1" / "report.json").is_file()

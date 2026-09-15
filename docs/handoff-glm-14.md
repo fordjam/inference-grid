@@ -134,7 +134,7 @@ New `src/inference_grid/board/verify_merge.py` and CLI `inference-grid verify-me
   branch-vs-target diff (the staging already exists for per-commit diffs; stage the merged tree's
   diff instead), authored only when a `verify_merge` task for the same branch is `passed`. Its
   brief asks for findings against the *target's* current tree, not the branch's history.
-- Two new calibration cases in `calibration/corpus-v1/`, from tonight: `dangling-pin` (a script
+- Two new calibration cases in `calibration/example/` (the coordinator moves them to the private corpus on landing), from tonight: `dangling-pin` (a script
   pins a commit hash as its data source; the answer key names the line and expects the finding to
   say the ref is not reachable from the branch) and `mutant-classified-invalid` (a **clean** case:
   a mutation harness whose classification rules look like they would misclassify a `KeyError`

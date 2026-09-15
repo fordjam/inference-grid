@@ -1,0 +1,2 @@
+Add `total_units(rows)` to the metering helpers: the sum of the `units` field over every
+row, used by the monthly statement. The statement's own test fixture has four rows.

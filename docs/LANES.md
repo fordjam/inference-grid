@@ -126,7 +126,7 @@ weigh operator-provenance rows against grid-dispatched ones.
 Acceptance rate alone cannot say how good a *reviewer* lane is: approving a malformed
 verdict counts, finding a real defect does not. Reviewer calibration (docs/BOARD.md,
 "Reviewer calibration") closes that with packets whose defects are known — the seed
-corpus `calibration/corpus-v1/` replants the defect classes the operator's own gates
+corpus (`calibration/example/` in this repository; the operator's own corpus lives outside it) replants the defect classes the operator's own gates
 caught after approvals (a Playwright mock matching the wrong request path, a DELETE
 branch nested under a list-path condition, a count that does not sum, an abatement base
 that includes the grant) plus a clean case for false positives — and scores each lane's

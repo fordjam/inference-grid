@@ -1,0 +1,12 @@
+{
+ "defects": [
+  {
+   "id": "last-row-dropped",
+   "file": "src/metering/totals.py",
+   "must_mention": ["range", "last"],
+   "severity": "high",
+   "note": "range(len(rows) - 1) skips the final row, so the statement total omits it; the test's expected value was written to match the bug (2 + 3 = 5, not 10)"
+  }
+ ],
+ "clean": false
+}
