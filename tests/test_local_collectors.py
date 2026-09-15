@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import plistlib
 import tempfile
 import unittest
 import urllib.error
@@ -745,6 +746,41 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(plist.exists())
         self.assertIn(f"launchctl bootstrap gui/{os.getuid()} {plist}", out.getvalue())
         self.assertIn("<string>/x/capacity_loop.py</string>", plist.read_text())
+
+    def test_main_renders_a_kept_alive_plist_per_runtime_naming_the_operator_paths(self):
+        runtimes = ("capacity-loop", "capacity-feed", "capacity-web", "tick-boards")
+        self.assertEqual([name for name, _s, _l in installer.RUNTIMES], list(runtimes))
+        tmp = self.enterContext(_TmpDir())
+        flags = []
+        for name in runtimes:
+            flags += [
+                f"--{name}-script",
+                f"/operator/{name}.py",
+                f"--{name}-log",
+                f"/operator/{name}.log",
+            ]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            installer.main(["--out-dir", str(tmp.path), "--python", "/usr/bin/python3", *flags])
+        for name in runtimes:
+            plist = tmp.path / f"com.inference-grid.{name}.plist"
+            data = plistlib.loads(plist.read_bytes())
+            self.assertEqual(data["Label"], f"com.inference-grid.{name}")
+            self.assertEqual(data["ProgramArguments"], ["/usr/bin/python3", f"/operator/{name}.py"])
+            self.assertEqual(data["StandardOutPath"], f"/operator/{name}.log")
+            self.assertEqual(data["StandardErrorPath"], f"/operator/{name}.log")
+            self.assertIs(data["KeepAlive"], True)
+            self.assertIs(data["RunAtLoad"], True)
+            self.assertEqual(data["ProcessType"], "Interactive")
+            self.assertIn(f"launchctl bootstrap gui/{os.getuid()} {plist}", out.getvalue())
+
+    def test_no_rendered_plist_carries_a_start_interval(self):
+        tmp = self.enterContext(_TmpDir())
+        installer.main(["--out-dir", str(tmp.path), "--python", "/usr/bin/python3"])
+        for name, _script, _log in installer.RUNTIMES:
+            plist = tmp.path / f"com.inference-grid.{name}.plist"
+            self.assertNotIn("StartInterval", plistlib.loads(plist.read_bytes()))
+            self.assertNotIn("StartInterval", plist.read_text())
 
 
 if __name__ == "__main__":
