@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import time
 
@@ -25,6 +26,12 @@ from .ledger import (
 )
 
 MAX_BOARD_DIRS = 8
+# The versions a lane's binary reports when it can be run at all; the handoff's 20 s
+# budget for a `--version` probe.
+LANE_VERSION_TIMEOUT = 20
+# The one packaged kind that speaks HTTP instead of launching a process; every other
+# kind is a CLI whose binary the operator names in lanes.json.
+HTTP_KINDS = frozenset({"go_http"})
 
 
 def board_counts(board_dir):
@@ -67,15 +74,71 @@ def executable_state(spec):
     return "present" if shutil.which(command) is not None else "missing"
 
 
-def _launchctl_list():
-    """`launchctl list` output through a seam callers may fake; None when unavailable."""
+def run_command(argv, timeout):
+    """Run one local command through the seam callers may fake.
+
+    Both the launchd check and the lane-binary probe go through here, so a test can
+    replace the runner once instead of monkeypatching `subprocess`.
+    """
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def _launchctl_list(run=None):
+    """`launchctl list` output through the run seam; None when unavailable."""
     try:
-        done = subprocess.run(
-            ["/bin/launchctl", "list"], capture_output=True, text=True, timeout=30
-        )
+        done = (run or run_command)(["/bin/launchctl", "list"], 30)
     except OSError:
         return None
     return done.stdout if done.returncode == 0 else None
+
+
+def version_probe(executable, run=None, timeout=LANE_VERSION_TIMEOUT):
+    """`<executable> --version` classified as available or a named unavailability.
+
+    Run through the same seam the launchd check uses, so a fake executable exercises
+    every outcome without a network call. A signal is named (`SIGKILL` is what macOS 27
+    does to a binary whose signature a postinstall rewrote).
+    """
+    if not isinstance(executable, str) or not executable or not Path(executable).is_file():
+        return {"status": "unavailable", "reason": "missing"}
+    try:
+        done = (run or run_command)([executable, "--version"], timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"status": "unavailable", "reason": "timeout"}
+    except OSError:
+        # A path that exists but cannot be executed (permissions, broken interpreter).
+        return {"status": "unavailable", "reason": "missing"}
+    if done.returncode < 0:
+        try:
+            reason = signal.Signals(-done.returncode).name
+        except ValueError:
+            reason = "signal " + str(-done.returncode)
+        return {"status": "unavailable", "reason": reason}
+    if done.returncode != 0:
+        return {"status": "unavailable", "reason": "exit " + str(done.returncode)}
+    text = (done.stdout or "").strip() or (done.stderr or "").strip()
+    version = text.splitlines()[0].strip() if text else ""
+    return {"status": "available", "version": version}
+
+
+def lane_binaries(lane_specs, run=None, timeout=LANE_VERSION_TIMEOUT):
+    """Probe every configured lane: CLI kinds run `--version`, HTTP kinds are `n/a`."""
+    probed = []
+    for lane_id in sorted(lane_specs):
+        spec = lane_specs[lane_id]
+        kind = spec.get("kind") if isinstance(spec, dict) else None
+        if kind in HTTP_KINDS:
+            probed.append({"lane": lane_id, "kind": kind, "status": "n/a"})
+            continue
+        executable = spec.get("executable") if isinstance(spec, dict) else None
+        probed.append(
+            {
+                "lane": lane_id,
+                "kind": kind,
+                **version_probe(executable, run=run, timeout=timeout),
+            }
+        )
+    return probed
 
 
 def board_config_findings(boards_dir):
@@ -100,8 +163,7 @@ def board_config_findings(boards_dir):
         if not Path(str(config.get("lanes_path", ""))).is_file():
             findings.append(f"lanes.json missing: {config_path.name}")
         if any(
-            isinstance(value, str) and value.startswith("<operator")
-            for value in config.values()
+            isinstance(value, str) and value.startswith("<operator") for value in config.values()
         ):
             findings.append(f"board config unfinished: {config_path.name}")
     return findings, configs
@@ -132,6 +194,8 @@ def diagnose(
     packets_root=None,
     launchd_label=None,
     launchctl_list=None,
+    lane_specs=None,
+    run=None,
 ):
     now = time.time() if now is None else now
     result = {
@@ -269,11 +333,20 @@ def diagnose(
         }
         result["findings"].extend(config_findings)
         if launchd_label:
-            loaded = launchctl_list if launchctl_list is not None else _launchctl_list()
-            loaded_labels = [line.split()[-1] for line in (loaded or "").splitlines() if line.strip()]
+            loaded = launchctl_list if launchctl_list is not None else _launchctl_list(run)
+            loaded_labels = [
+                line.split()[-1] for line in (loaded or "").splitlines() if line.strip()
+            ]
             result["launchd"] = {"label": launchd_label, "loaded": launchd_label in loaded_labels}
             if launchd_label not in loaded_labels:
                 result["findings"].append("scheduler_not_loaded")
+        # Every configured CLI lane's binary is asked for its version through the run
+        # seam; HTTP lanes have nothing to probe and are named n/a, never silently absent.
+        if isinstance(lane_specs, dict) and lane_specs:
+            result["lane_binaries"] = lane_binaries(lane_specs, run=run)
+            for probed in result["lane_binaries"]:
+                if probed["status"] == "unavailable":
+                    result["findings"].append("lane_binary_unavailable: " + probed["lane"])
         total, biggest, packets_finding = packet_store(
             packets_root, [h["workspace"] for h in held_rows]
         )

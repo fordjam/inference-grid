@@ -240,6 +240,96 @@ def test_superseded_predecessors_are_counted_closed_not_blocked(tmp_path):
     assert board_counts(board) == {"superseded": 1, "blocked": 1, "ready": 1}
 
 
+def _fake_executable(tmp_path, name, body):
+    path = tmp_path / name
+    path.write_text("#!/bin/sh\n" + body + "\n")
+    path.chmod(0o700)
+    return str(path)
+
+
+def test_lane_version_probe_names_each_outcome(tmp_path):
+    from inference_grid.doctor import version_probe
+
+    assert version_probe(_fake_executable(tmp_path, "ok", 'echo "fake-cli 1.2.3"')) == {
+        "status": "available",
+        "version": "fake-cli 1.2.3",
+    }
+    # A non-zero exit is named by its code.
+    assert version_probe(_fake_executable(tmp_path, "fail", "exit 3")) == {
+        "status": "unavailable",
+        "reason": "exit 3",
+    }
+    # A signal is named: macOS 27 SIGKILLs a binary whose signature postinstall rewrote.
+    assert version_probe(_fake_executable(tmp_path, "killed", "kill -9 $$")) == {
+        "status": "unavailable",
+        "reason": "SIGKILL",
+    }
+    slow = _fake_executable(tmp_path, "slow", "sleep 5")
+    assert version_probe(slow, timeout=0.2) == {"status": "unavailable", "reason": "timeout"}
+    assert version_probe(str(tmp_path / "absent")) == {
+        "status": "unavailable",
+        "reason": "missing",
+    }
+
+
+def test_lane_binaries_probe_cli_kinds_and_skip_http(tmp_path):
+    from inference_grid.doctor import lane_binaries
+
+    ok = _fake_executable(tmp_path, "ok", 'echo "fake 9.0"')
+    lanes = {
+        "go": {"kind": "go_http", "executable": None},
+        "goat-glm": {"kind": "goat_cli", "executable": ok},
+        "cline": {"kind": "cline_cli", "executable": str(tmp_path / "gone")},
+    }
+    assert lane_binaries(lanes) == [
+        {"lane": "cline", "kind": "cline_cli", "status": "unavailable", "reason": "missing"},
+        {"lane": "go", "kind": "go_http", "status": "n/a"},
+        {"lane": "goat-glm", "kind": "goat_cli", "status": "available", "version": "fake 9.0"},
+    ]
+
+
+def test_doctor_probes_cli_lane_binaries_and_names_unavailable(tmp_path):
+    url = "sqlite:///" + str(tmp_path / "ledger.sqlite")
+    ledger = Ledger(url)
+    ledger.initialize()
+    ledger.configure_account("a", 1, {"weekly": 10}, time.time() + 60, ["m"])
+    now = time.time()
+    for provider in ("go", "goat", "cline", "zai", "zcode", "codex", "opencode"):
+        ledger.record_lane(
+            provider,
+            {
+                "provider": provider,
+                "auth": "ok",
+                "quota_observed_at": now - 5,
+                "quota_freshness_seconds": 900,
+                "used_percent_max": 1.0,
+                "admission_limit_percent": 80,
+                "cooldown_until": None,
+                "qualification": "qualified",
+                "blocked_until": None,
+                "blocker": None,
+            },
+        )
+    ok = _fake_executable(tmp_path, "ok", 'echo "fake 9.0"')
+    healthy = {
+        "go": {"kind": "go_http", "executable": None},
+        "goat-glm": {"kind": "goat_cli", "executable": ok},
+    }
+    report = diagnose(url, lane_specs=healthy)
+    assert report["status"] == "checks_passed"
+    assert report["lane_binaries"] == [
+        {"lane": "go", "kind": "go_http", "status": "n/a"},
+        {"lane": "goat-glm", "kind": "goat_cli", "status": "available", "version": "fake 9.0"},
+    ]
+    # A modified-signature or deleted binary is a named finding, not silence.
+    broken = dict(
+        healthy, **{"goat-glm": {"kind": "goat_cli", "executable": str(tmp_path / "gone")}}
+    )
+    report = diagnose(url, lane_specs=broken)
+    assert report["status"] == "attention"
+    assert "lane_binary_unavailable: goat-glm" in report["findings"]
+
+
 def test_doctor_reports_boards_launchd_and_packets_end_to_end(tmp_path):
     # O1: one call names every gap — an unfinished board config, a scheduler that is not
     # loaded, and the packet store under a root the operator passes (never the home).
