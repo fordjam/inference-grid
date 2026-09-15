@@ -170,6 +170,7 @@ def main():
             "calibration-score",
             "tick-all",
             "digest",
+            "boards",
             "evaluation",
             "tick",
             "watch",
@@ -220,6 +221,7 @@ def main():
             "watch",
             "verify-merge",
             "land",
+            "boards",
         }
         and not args.json
     ):
@@ -279,6 +281,7 @@ def main():
         "board-init": lambda **kw: board_init(**kw),
         "tick-all": lambda **kw: tick_all(ledger, **kw),
         "digest": lambda **kw: digest(ledger, **kw),
+        "boards": lambda **kw: boards_command(ledger, **kw),
         "watch": lambda **kw: watch(kw),
         "inbox-integrate": lambda **kw: inbox_integrate(
             kw["project_root"], kw["task_id"], dry_run=kw.get("dry_run", True)
@@ -348,6 +351,21 @@ def digest(ledger, boards_dir, since=None):
     from .digest import digest as render
 
     return render(ledger, boards_dir, now=since)
+
+
+def boards_command(
+    ledger, boards_dir=None, boards=None, database=None, packets_root=None, now=None
+):
+    from .boards import boards as render
+
+    return render(
+        ledger,
+        boards_dir=boards_dir,
+        boards=boards,
+        database=database,
+        packets_root=packets_root,
+        now=now,
+    )
 
 
 def watch(spec):
