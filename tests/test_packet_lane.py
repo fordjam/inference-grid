@@ -136,6 +136,35 @@ class EditingAgent(packet.Adapter):
         return packet._first_match(native_jsonl, r'"sessionId":"([^"]+)"')
 
 
+class StreamingAgent(packet.Adapter):
+    """A fake CLI that streams per-token delta lines the way a JSON transcript does."""
+
+    name = "streaming"
+
+    def __init__(self, work, deltas=10000):
+        self.work, self.deltas, self.calls = Path(work), deltas, []
+
+    def _argv(self, prompt, session):
+        self.calls.append((session, prompt))
+        code = (
+            "import sys\n"
+            'lines = [\'{"type":"run_start","sessionId":"sess-stream"}\']\n'
+            f'lines += [\'{{"type":"thinking_delta","d":"x"}}\'] * {self.deltas}\n'
+            'lines += [\'{"type":"tool_start"}\', \'{"type":"tool_completed"}\']\n'
+            "sys.stdout.write('\\n'.join(lines) + '\\n')\n"
+        )
+        return [PY, "-c", code]
+
+    def first(self, prompt):
+        return self._argv(prompt, None)
+
+    def resume(self, session_id, prompt):
+        return self._argv(prompt, session_id)
+
+    def session_id(self, native_jsonl):
+        return packet._first_match(native_jsonl, r'"sessionId":"([^"]+)"')
+
+
 def test_gates_run_as_code_and_keep_their_output(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
@@ -459,3 +488,70 @@ def test_terminal_corroboration_reads_both_clis_terminal_events(tmp_path):
     native.write_text("not a json document\n")
     assert packet.terminal_corroboration(native) is None
     assert packet.terminal_corroboration(tmp_path / "absent.jsonl") is None
+
+
+def test_streaming_transcript_leaves_the_file_free_of_delta_events(tmp_path):
+    """10 000 delta lines plus 3 events: the transcript holds the 3, the count the rest."""
+    work = tmp_path / "work"
+    work.mkdir()
+    agent = StreamingAgent(work)
+    build_loop(
+        agent,
+        plain,
+        work,
+        dict(os.environ),
+        "brief",
+        [],
+        tmp_path / "attempt",
+        wall_seconds=3600,
+        max_rounds=1,
+    )
+    attempt = tmp_path / "attempt"
+    text = (attempt / "native-1.jsonl").read_text()
+    assert text.count("\n") == 3 and "delta" not in text
+    assert json.loads((attempt / "native-1.compacted.json").read_text()) == {
+        "dropped_delta_events": 10000
+    }
+
+
+def test_the_disk_guard_refuses_a_round_below_the_threshold(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    agent = ScriptedAgent(work, pass_on_round=1)
+    verdict = build_loop(
+        agent,
+        plain,
+        work,
+        dict(os.environ),
+        "brief",
+        [marker_gate(work)],
+        tmp_path / "attempt",
+        wall_seconds=3600,
+        min_free_bytes=5_000_000_000,
+        free_bytes=lambda path: 4_999_999_999,
+    )
+    assert verdict["reason"] == "disk_low"
+    assert verdict["rounds"] == [] and agent.calls == []
+    assert verdict["disk_free_bytes"] == 4_999_999_999
+    assert verdict["min_free_bytes"] == 5_000_000_000
+    assert not (tmp_path / "attempt" / "native-1.jsonl").exists()
+
+
+def test_the_verdict_records_the_free_space_the_guard_measured(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    agent = ScriptedAgent(work, pass_on_round=1)
+    verdict = build_loop(
+        agent,
+        plain,
+        work,
+        dict(os.environ),
+        "brief",
+        [marker_gate(work)],
+        tmp_path / "attempt",
+        wall_seconds=3600,
+        min_free_bytes=1,
+        free_bytes=lambda path: 6_000_000_000,
+    )
+    assert verdict["reason"] == "gates_passed"
+    assert verdict["disk_free_bytes"] == 6_000_000_000

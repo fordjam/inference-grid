@@ -22,13 +22,16 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 TAIL_CHARS = 6000
+DEFAULT_MIN_FREE_BYTES = 5 * 1024**3
 
 
 @dataclass(frozen=True)
@@ -278,18 +281,24 @@ class ClineAdapter(Adapter):
 DELTA_EVENTS = ("thinking_delta", "text_delta", "content_delta")
 
 
+def _is_delta_line(raw: bytes) -> bool:
+    """True when one streamed transcript line carries a per-token delta event."""
+    return any(f'"{kind}"'.encode() in raw for kind in DELTA_EVENTS)
+
+
 def compact_transcripts(attempt_dir: Path) -> Dict[str, int]:
     """Drop per-token delta events from native-*.jsonl in place; keep every other line.
 
     A streamed JSON transcript is one line per token, so a long session runs to gigabytes
     of `thinking_delta`. The session id, tool calls and terminal events survive; a count of
-    what was dropped is written beside each file."""
+    what was dropped is written beside each file. Kept for attempts written before the
+    loop streamed its transcript through `stream_transcript`."""
     dropped = {}
     for native in sorted(Path(attempt_dir).glob("native-*.jsonl")):
         keep, gone = [], 0
         with native.open("rb") as fh:
             for raw in fh:
-                if any(f'"{kind}"'.encode() in raw for kind in DELTA_EVENTS):
+                if _is_delta_line(raw):
                     gone += 1
                     continue
                 keep.append(raw)
@@ -300,6 +309,30 @@ def compact_transcripts(attempt_dir: Path) -> Dict[str, int]:
             )
         dropped[native.name] = gone
     return dropped
+
+
+def stream_transcript(stream, native: Path) -> int:
+    """Copy the agent's stdout into `native`, dropping DELTA_EVENTS as they arrive.
+
+    The filter runs while the agent is still writing (the loop reads the pipe on a
+    thread), so `native-<n>.jsonl` never holds a per-token delta line. The running count
+    is kept beside the transcript in `native-<n>.compacted.json`, the same file and shape
+    `compact_transcripts` writes for an attempt compacted after the fact. Returns the
+    number of lines dropped."""
+    gone = 0
+    with native.open("xb") as out:
+        for raw in stream:
+            if _is_delta_line(raw):
+                gone += 1
+                continue
+            out.write(raw)
+    (native.with_suffix(".compacted.json")).write_text(json.dumps({"dropped_delta_events": gone}))
+    return gone
+
+
+def free_disk_bytes(path: Path) -> int:
+    """Free bytes on the volume holding `path` (the packets root's own filesystem)."""
+    return shutil.disk_usage(path).free
 
 
 def _first_match(path: Path, pattern: str) -> Optional[str]:
@@ -490,20 +523,31 @@ def build_loop(
     max_rounds: int = 3,
     operator_gates: Sequence[str] = (),
     min_seconds_for_round: int = 600,
+    min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
+    free_bytes: Callable[[Path], int] = free_disk_bytes,
     clock=time,
 ) -> Dict:
     """Agent → gates → (fix prompt into the same session) …, bounded.
 
     Returns the verdict dict. `rounds` holds one entry per agent run with its
     gate results; `verified_in_lane` is True only when every declared gate ran
-    and passed in the final round and no operator gate was declared."""
+    and passed in the final round and no operator gate was declared. The agent's
+    stdout is filtered as it arrives (`stream_transcript`), so the native
+    transcript never holds a per-token delta line. No round starts while the
+    packets root's filesystem is short of `min_free_bytes`: that verdict is
+    `disk_low`, and the free space the guard measured rides in the verdict."""
     attempt_dir.mkdir(parents=True, exist_ok=True)
     deadline = clock.monotonic() + wall_seconds
     rounds: List[Dict] = []
     session: Optional[str] = None
     reason = "gates_passed"
     started_all = clock.monotonic()
+    disk_free: Optional[int] = None
     for round_no in range(1, max_rounds + 1):
+        disk_free = free_bytes(attempt_dir)
+        if disk_free < min_free_bytes:
+            reason = "disk_low"
+            break
         remaining = deadline - clock.monotonic()
         if round_no > 1 and remaining < min_seconds_for_round:
             reason = "wall_deadline_before_round"
@@ -524,16 +568,20 @@ def build_loop(
         (attempt_dir / f"prompt-{round_no}.txt").write_text(text)
         before = worktree_fingerprint(work)
         run_started = clock.monotonic()
-        with native.open("xb") as out, stderr.open("xb") as err:
+        with stderr.open("xb") as err:
             proc = subprocess.Popen(
                 sandbox_command(list(argv)),
                 cwd=work,
                 env=env,
                 stdin=subprocess.DEVNULL,
-                stdout=out,
+                stdout=subprocess.PIPE,
                 stderr=err,
                 start_new_session=True,
             )
+            reader = threading.Thread(
+                target=stream_transcript, args=(proc.stdout, native), daemon=True
+            )
+            reader.start()
             try:
                 code = proc.wait(timeout=max(1, int(remaining)))
                 agent_reason = "process_exited"
@@ -541,6 +589,7 @@ def build_loop(
                 _kill(proc)
                 code = proc.wait()
                 agent_reason = "wall_deadline"
+            reader.join(timeout=30)
         after = worktree_fingerprint(work)
         if session is None:
             session = adapter.session_id(native)
@@ -589,6 +638,8 @@ def build_loop(
         "operator_gates": list(operator_gates),
         "gates_passed": bool(final) and all(r.ok for r in final),
         "verified_in_lane": bool(final) and all(r.ok for r in final) and not operator_gates,
+        "min_free_bytes": min_free_bytes,
+        "disk_free_bytes": disk_free,
     }
     (attempt_dir / "verdict.json").write_text(json.dumps(verdict, indent=2))
     return verdict
