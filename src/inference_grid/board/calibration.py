@@ -89,7 +89,9 @@ def load_corpus(corpus_dir):
     if not corpus_dir.is_dir():
         raise ValueError(f"calibration corpus is not a directory: {corpus_dir}")
     cases = []
-    for case_dir in sorted(p for p in corpus_dir.iterdir() if p.is_dir() and not p.name.startswith(".")):
+    for case_dir in sorted(
+        p for p in corpus_dir.iterdir() if p.is_dir() and not p.name.startswith(".")
+    ):
         name = case_dir.name
         if not NAME.fullmatch(name):
             raise ValueError(f"{name}: case names must match [a-z0-9-]")
@@ -160,6 +162,7 @@ def author_calibration(board_dir, project_root, corpus_dir, lanes, run_id):
         task_id = f"calib-{run_id}-{case['case']}"
         if len(task_id) > 60:
             raise ValueError(f"task id would exceed 60 chars: {task_id}")
+        staged_bytes = sum(len(data) for _, data in case["files"]) + len(case["diff"].encode())
         files, summary = _plan_task(
             board_dir,
             project_root,
@@ -170,6 +173,7 @@ def author_calibration(board_dir, project_root, corpus_dir, lanes, run_id):
             case["brief"].strip(),
             case["files"],
             case["diff"],
+            staged_bytes,
         )
         plans.append(files)
         summaries.append(dict(summary, case=case["case"]))
@@ -374,15 +378,30 @@ def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None
             ]
         )
     report["table"] = _markdown_table(
-        ["lane", "cases", "defects", "recalled", "recall", "false positives", "precision",
-         "weighted recall"],
+        [
+            "lane",
+            "cases",
+            "defects",
+            "recalled",
+            "recall",
+            "false positives",
+            "precision",
+            "weighted recall",
+        ],
         printed,
     )
     report["cases"] = _markdown_table(
         ["lane", "case", "verdict", "defects", "recalled", "false positives", "accepted"],
         [
-            [r["lane"], r["case"], r["verdict"], r["defects"], r["recalled"],
-             r["false_positives"], r["accepted"]]
+            [
+                r["lane"],
+                r["case"],
+                r["verdict"],
+                r["defects"],
+                r["recalled"],
+                r["false_positives"],
+                r["accepted"],
+            ]
             for r in rows
         ],
     )

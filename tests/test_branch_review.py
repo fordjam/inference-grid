@@ -202,6 +202,62 @@ def test_review_branch_overrides_lanes_and_budget(tmp_path):
     task = json.loads(Path(created["task"]).read_text())
     assert task["lanes"] == ["go-kimi", "go-deepseek"]
     assert task["budget"]["thinking_tokens"] == 12000
+    # An explicit budget wins over the sized default, and the summary records what was chosen.
+    assert created["budget"] == task["budget"]
+    assert created["staged_bytes"] > 0
+
+
+def test_sized_thinking_tokens_tracks_the_packet():
+    assert branch_review.sized_thinking_tokens(16_000) == 6000  # small packet: the floor
+    assert branch_review.sized_thinking_tokens(60_000) == 15000  # cap 49 000 on the go lane
+    assert branch_review.sized_thinking_tokens(120_000) == 24000  # the proven ceiling
+
+
+def test_three_packet_sizes_ask_for_three_budgets(tmp_path):
+    """The default thinking budget follows the staged bytes, not a constant: the go lane
+    derives max_tokens from thinking_tokens (three times it plus its content allowance),
+    so the fixed 6 000 once capped every request at 22 000 whatever the packet weighed —
+    the 46 KB vix-rs packet needed three attempts on that cap."""
+    budgets = []
+    # Files over the 16 KB per-file cap ride in the patch alone, so the large case uses
+    # five smaller files: staged ~50 KB plus the ~50 KB patch, under the 120 KB budget.
+    for index, files_per_group, size in ((0, 2, 100), (1, 2, 9_000), (2, 5, 10_000)):
+        repo, base, tip, _ = layered_repo(
+            tmp_path / f"run{index}", groups=1, files_per_group=files_per_group, size=size
+        )
+        board, project = board_and_project(tmp_path / f"run{index}")
+        created = branch_review.review_branch(
+            board, project, {"repo": str(repo), "base": base, "tip": tip}
+        )
+        task = json.loads(Path(created["task"]).read_text())
+        assert created["staged_bytes"] > 0
+        assert created["budget"] == task["budget"]
+        assert task["budget"]["thinking_tokens"] == branch_review.sized_thinking_tokens(
+            created["staged_bytes"]
+        )
+        budgets.append(task["budget"]["thinking_tokens"])
+    assert budgets[0] == branch_review.MIN_THINKING_TOKENS
+    assert budgets[-1] == branch_review.MAX_THINKING_TOKENS
+    assert budgets == sorted(set(budgets))  # three distinct, rising with the packet
+
+
+def test_a_split_sizes_each_packet_on_its_own_bytes(tmp_path):
+    repo, base, tip, hashes = layered_repo(tmp_path, groups=2, files_per_group=1, size=15_000)
+    board, project = board_and_project(tmp_path)
+    created = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip}, split="commit"
+    )
+    assert len(created["tasks"]) == 2
+    for entry in created["tasks"]:
+        task = json.loads(Path(entry["task"]).read_text())
+        assert task["budget"]["thinking_tokens"] == branch_review.sized_thinking_tokens(
+            entry["staged_bytes"]
+        )
+    # Sized per packet, not per range: the whole range's bytes would ask for more.
+    whole = sum(entry["staged_bytes"] for entry in created["tasks"])
+    assert created["tasks"][0]["budget"]["thinking_tokens"] < branch_review.sized_thinking_tokens(
+        whole
+    )
 
 
 def layered_repo(tmp_path, groups=3, files_per_group=2, size=300):

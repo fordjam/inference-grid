@@ -1,8 +1,9 @@
 import copy
 import json
+import time
 import unittest
 
-from test_board_runner import make_task, world  # noqa: F401 -- binds the world fixture here
+from test_board_runner import make_task, ready_record, world  # noqa: F401 -- binds the world fixture here
 
 from inference_grid.board import runner
 from inference_grid.lanes.route import blended_row, max_tokens_cap, route
@@ -56,26 +57,40 @@ class DefaultingTests(unittest.TestCase):
             if lanes_key is not None:
                 raw["lanes"] = lanes_key
             out = route(raw, LANES, READY, [], [], 0, 0)
-            # Both category lanes tie at 1/2; lane id breaks the tie.
-            self.assertEqual((out["lane"], out["candidates"]), ("go", ["go", "zcode"]))
+            # Both category lanes tie at 1/2; lane id breaks the tie. Each candidate
+            # row carries the cap the lane would run under (unbudgeted go policy: 16k).
+            self.assertEqual(
+                (out["lane"], out["candidates"]),
+                ("go", [{"lane": "go", "cap": 16000}, {"lane": "zcode", "cap": 16000}]),
+            )
             self.assertEqual((out["score"], out["reason"], out["dropped"]), (0.5, "selected", []))
 
     def test_an_explicit_list_still_restricts(self):
         out = route(task(lanes=["zcode"]), LANES, READY, [], [], 0, 0)
-        self.assertEqual((out["lane"], out["candidates"], out["score"]), ("zcode", ["zcode"], 0.5))
+        self.assertEqual(
+            (out["lane"], out["candidates"], out["score"]),
+            ("zcode", [{"lane": "zcode", "cap": 16000}], 0.5),
+        )
         # A listed lane that does not declare the category is simply not offered,
         # but it still counts as a candidate: select_lane drops it, not route.
         out = route(task(lanes=["zcode", "kimi"]), LANES, READY, [], [], 0, 0)
-        self.assertEqual((out["lane"], out["candidates"]), ("zcode", ["kimi", "zcode"]))
+        self.assertEqual(
+            (out["lane"], out["candidates"]),
+            ("zcode", [{"lane": "kimi", "cap": 16000}, {"lane": "zcode", "cap": 16000}]),
+        )
 
     def test_explicit_only_lanes_are_never_defaulted_in(self):
         out = route(task(category="independent_review"), LANES, READY, [], [], 0, 0)
-        self.assertEqual((out["lane"], out["candidates"]), ("kimi", ["kimi"]))
+        self.assertEqual(
+            (out["lane"], out["candidates"]), ("kimi", [{"lane": "kimi", "cap": 16000}])
+        )
         # ... but an author naming one takes it anyway.
         out = route(
             task(category="independent_review", lanes=["claude"]), LANES, READY, [], [], 0, 0
         )
-        self.assertEqual((out["lane"], out["candidates"]), ("claude", ["claude"]))
+        self.assertEqual(
+            (out["lane"], out["candidates"]), ("claude", [{"lane": "claude", "cap": 16000}])
+        )
 
     def test_inputs_are_not_mutated(self):
         frozen = (task(lanes=["go"]), LANES, READY, [{"attempts": 8, "accepted": 7}], [])
@@ -97,6 +112,7 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(
             (out["lane"], out["reason"], out["candidates"]), (None, "budget_unfit", [])
         )
+        # The refusal is explained in tokens: the prompt estimate and the cap it missed.
         self.assertEqual(
             out["dropped"],
             [
@@ -104,6 +120,8 @@ class BudgetTests(unittest.TestCase):
                     "lane": "go",
                     "reason": "budget_unfit",
                     "detail": "prompt ~16384 tokens exceeds max_tokens cap 10000",
+                    "prompt": 16384,
+                    "cap": 10000,
                 }
             ],
         )
@@ -128,10 +146,34 @@ class BudgetTests(unittest.TestCase):
         lanes = dict(LANES, go=dict(LANES["go"], max_tokens=22000, context=8000))
         out = route(task(lanes=["go"]), lanes, READY, [], [], 0, BIG_PACKET)
         self.assertEqual(out["dropped"][0]["detail"], "prompt ~16384 tokens exceeds context 8000")
+        # The row names the limit that actually refused: the context window here.
+        self.assertEqual((out["dropped"][0]["prompt"], out["dropped"][0]["cap"]), (16384, 8000))
         lanes = dict(LANES, go=dict(LANES["go"], max_tokens=22000, context=16384))
         self.assertEqual(
             route(task(lanes=["go"]), lanes, READY, [], [], 0, BIG_PACKET)["lane"], "go"
         )
+
+    def test_a_lane_whose_cap_is_below_the_packet_need_is_refused_with_both_numbers(self):
+        # The lane view's own figure is the cap; the row carries it beside the prompt
+        # estimate, so a dry run can explain the refusal without reading the lane file.
+        lanes = dict(LANES, kimi=dict(LANES["kimi"], max_tokens=9000))
+        out = route(
+            task(category="independent_review"),
+            lanes,
+            READY,
+            [],
+            [],
+            0,
+            36001,  # ceil(36001 / 4) = 9001 tokens: one over the lane's 9000 cap
+        )
+        self.assertEqual((out["lane"], out["reason"]), (None, "budget_unfit"))
+        self.assertEqual(out["dropped"][0]["prompt"], 9001)
+        self.assertEqual(out["dropped"][0]["cap"], 9000)
+
+    def test_a_lane_view_max_tokens_figure_is_reported_on_the_candidate_row(self):
+        lanes = dict(LANES, kimi=dict(LANES["kimi"], max_tokens=31000))
+        out = route(task(category="independent_review"), lanes, READY, [], [], 0, 0)
+        self.assertEqual(out["candidates"], [{"lane": "kimi", "cap": 31000}])
 
     def test_readiness_and_family_reasons_survive_the_pass_through(self):
         cold = {k: {"state": "stale"} for k in LANES}
@@ -239,8 +281,35 @@ def test_the_tick_reports_dropped_lanes(request):
     assert (entry["lane"], entry["reason"], entry["candidates"]) == (None, "budget_unfit", [])
     assert entry["dropped"][0]["lane"] == "go"
     assert entry["dropped"][0]["reason"] == "budget_unfit"
+    # The refusal is explained in tokens, in the plan row itself. The packet estimate
+    # covers the brief and every staged input (brief-big.txt plus mod.py, 65547 bytes).
+    assert entry["dropped"][0]["prompt"] == 16387
+    assert entry["dropped"][0]["cap"] == 16000
     # The dry run touched nothing: the lane was never recorded, so it stays stale.
     assert plan["readiness"]["go"]["state"] == "stale"
+
+
+def test_the_plan_row_carries_the_cap_of_each_candidate(request):
+    w = request.getfixturevalue("world")
+    (w["board"] / "copy-ok.json").write_text(json.dumps(make_task("copy-ok", "brief.txt")))
+    now = time.time()
+    w["ledger"].record_lane("go", ready_record(now))
+    plan = runner.tick(
+        w["board"],
+        w["project"],
+        w["ledger"],
+        w["lanes"],
+        w["lanes_path"],
+        {"go": w["account"]},
+        w["packets"],
+        now=now,
+        dry_run=True,
+    )
+    entry = plan["plan"][0]
+    assert (entry["task"], entry["lane"], entry["reason"]) == ("copy-ok", "go", "selected")
+    # The offered candidate carries the cap it would run under — the dry run shows the
+    # request size the lane will be asked for before anything is dispatched.
+    assert entry["candidates"] == [{"lane": "go", "cap": 16000}]
 
 
 if __name__ == "__main__":

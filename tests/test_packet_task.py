@@ -375,7 +375,7 @@ def test_dry_run_plans_the_packet_task(world):
         "lane": "packet-cli",
         "reason": "selected",
     }
-    assert row["candidates"] == ["packet-cli"] and row["dropped"] == []
+    assert row["candidates"] == [{"lane": "packet-cli", "cap": 16000}] and row["dropped"] == []
     task = json.loads((world["board"] / "d1-packet.json").read_text())
     assert task["state"] == "ready"
     assert world["ledger"].status() == [] or all(
