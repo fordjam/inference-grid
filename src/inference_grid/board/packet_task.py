@@ -30,19 +30,16 @@ from ..lanes.brief import (
     mentioned_paths,
     packet_text,
 )
-from ..lanes.packet import CommandCodeAdapter, Gate, ZcodeAdapter, build_loop
+from ..lanes.packet import ClineAdapter, CommandCodeAdapter, Gate, ZcodeAdapter, build_loop
 from ..lanes.scout import orient
 from .task import validate_task
 
-# Lane kinds whose adapter can re-enter a session, and the kinds that cannot.
-PACKET_KINDS = ("goat_cli", "zcode_cli")
-UNSUPPORTED_ADAPTERS = {
-    "cline_cli": (
-        "the ClinePass CLI's packaged invocation (lanes/cline.py) has no session-resume "
-        "flag: per-run state lives under a --data-dir and no event names a session a "
-        "later run could re-enter, so build_loop cannot repair in-session"
-    ),
-}
+# Lane kinds a packet task can run. Command Code and ZCode re-enter the same session on a
+# fix round; the ClinePass CLI cannot (`--id` refuses a prompt in JSON mode), so its rounds
+# are fresh sessions on the fix prompt — the branch and the gate output carry the context,
+# exactly as the operator's driver does it. Kinds outside this set are refused with a reason.
+PACKET_KINDS = ("goat_cli", "zcode_cli", "cline_cli")
+UNSUPPORTED_ADAPTERS = {}
 
 PACKET_ID = re.compile(r"[A-Z]\d{1,3}")
 BASE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@+-]*")
@@ -184,6 +181,15 @@ def packet_adapter(kind, lane, work, attempt_dir, session_name):
         )
     if kind == "zcode_cli":
         return ZcodeAdapter(work=work, wrapper=lane["executable"])
+    if kind == "cline_cli":
+        # The CLI's login lives in its data directory; the pass entitlement follows it, so
+        # the packet runs on the operator's own Cline state (readable, digested like GOAT's).
+        return ClineAdapter(
+            lane["model"],
+            work=work,
+            data_dir=Path.home() / ".cline" / "data",
+            binary=lane["executable"],
+        )
     raise Refused("lane kind " + kind + " does not run packet tasks")
 
 
@@ -192,7 +198,7 @@ def build_sandbox(kind, work, attempt_dir):
     from ..lanes import sandbox
 
     home = Path.home()
-    extra = home / (".commandcode" if kind == "goat_cli" else ".zcode")
+    extra = home / {"goat_cli": ".commandcode", "cline_cli": ".cline"}.get(kind, ".zcode")
     # The agent writes only in its clone, its CLI's own state and a scratch tmp/ under the
     # attempt; the attempt directory itself is the harness's (transcripts, gates), written
     # from outside the sandbox. Granting all of it would put the clone's parent inside a

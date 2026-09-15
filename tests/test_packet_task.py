@@ -18,7 +18,7 @@ import pytest
 
 from inference_grid.board import packet_task, runner
 from inference_grid.lanes import packet
-from inference_grid.ledger import Ledger, Refused
+from inference_grid.ledger import Ledger
 
 TRAILER = "Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>"
 
@@ -150,12 +150,15 @@ def test_validation_rejects_bad_packet_specs():
             packet_task.validate_board_task(task)
 
 
-def test_cline_cli_is_registered_unsupported():
-    assert "cline_cli" in packet_task.UNSUPPORTED_ADAPTERS
-    reason = packet_task.UNSUPPORTED_ADAPTERS["cline_cli"]
-    assert "resume" in reason
-    with pytest.raises(Refused, match="cline_cli"):
-        packet_task.packet_adapter("cline_cli", {}, Path("."), Path("."), "s")
+def test_cline_cli_runs_packets_as_fresh_sessions(tmp_path):
+    from inference_grid.lanes.packet import ClineAdapter
+
+    assert "cline_cli" in packet_task.PACKET_KINDS and not packet_task.UNSUPPORTED_ADAPTERS
+    lane = {"model": "cline-pass/deepseek-v4.1-flash", "executable": "/x/cline"}
+    adapter = packet_task.packet_adapter("cline_cli", lane, tmp_path, tmp_path, "s")
+    assert isinstance(adapter, ClineAdapter)
+    # no --id: a later round is a fresh session on the fix prompt
+    assert adapter.resume("s1", "fix")[:2] == ["/x/cline", "fix"]
 
 
 @pytest.fixture
@@ -351,14 +354,15 @@ def test_an_unresolvable_base_refuses_before_any_attempt(world):
 
 
 def test_an_unsupported_lane_kind_refuses_and_touches_nothing(world):
-    world["lanes"]["cline-lane"] = dict(world["lanes"]["packet-cli"], kind="cline_cli")
+    # go_http is a one-request kind with no agent to re-enter; it never runs packets.
+    world["lanes"]["cline-lane"] = dict(world["lanes"]["packet-cli"], kind="go_http")
     world["ledger"].record_lane("cline-lane", ready_record(time.time(), provider="cline-lane"))
     task_path = world["board"] / "d1-packet.json"
     raw = json.loads(task_path.read_text())
     raw["lanes"] = ["cline-lane"]
     task_path.write_text(json.dumps(raw, indent=1) + "\n")
     results = tick(world)
-    assert "cline_cli" in results[0]["result"] and "unsupported" in results[0]["result"]
+    assert "go_http" in results[0]["result"] and "does not run packet" in results[0]["result"]
     task = json.loads(task_path.read_text())
     assert task["state"] == "ready"
     assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
