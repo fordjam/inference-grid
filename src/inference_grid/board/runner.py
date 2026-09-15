@@ -29,6 +29,7 @@ from ..ledger import aliases as alias_records, attempts as attempt_records
 from ..ledger import events as ledger_events, tasks as task_records
 from ..worker import execute
 from .guard import check_input
+from .land import land
 from .packet_task import dispatch_packet, validate_board_task
 from .policy import record_waiver, review_needed
 from .task import validate_task
@@ -958,6 +959,7 @@ def tick(
     now=None,
     prepare_argv=None,
     dry_run=False,
+    auto_land=False,
 ):
     """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records.
 
@@ -967,7 +969,10 @@ def tick(
     `candidates`, `dropped` (lanes filtered out with reasons, budget_unfit foremost) and
     `score`.
 
-    With dry_run the tick stops at route for every ready task — readiness view,
+    With auto_land the pass ends by landing every `passed` packet task through
+    board.land (one landing at a time per base, a lock under packets_root); the pass's
+    own `passed` settlements included, since the board is re-read afterwards. With
+    dry_run the tick stops at route for every ready task — readiness view,
     campaign windows, busy accounts, family exclusion, unsupported_until, budget fit —
     and returns {"readiness": view, "plan": [...]} instead: the plan a real tick would
     follow, without creating an attempt, writing a task file or touching a packet
@@ -1304,6 +1309,31 @@ def tick(
                 "score": choice["score"],
             }
         )
+    if auto_land and not dry_run:
+        # The board is re-read so the pass's own `passed` settlements land in this pass.
+        for task_id, (path, task) in load_board(board_dir).items():
+            if task["category"] != "packet" or task["state"] != "passed":
+                continue
+            try:
+                report = land(
+                    board_dir, project_root, task_id, packets_root=packets_root, ledger=ledger
+                )
+            except Exception as exc:
+                save_task(path, task, state="blocked", blocked_reason=("land: " + str(exc))[:300])
+                results.append(
+                    {"task": task_id, "lane": None, "attempt": None, "result": "land_error"}
+                )
+                continue
+            results.append(
+                {
+                    "task": task_id,
+                    "lane": None,
+                    "attempt": None,
+                    "result": "landed"
+                    if report["landed"]
+                    else ("land_refused: " + report["reason"])[:120],
+                }
+            )
     if dry_run:
         return {
             "readiness": readiness,

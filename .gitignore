@@ -10,3 +10,6 @@ dist/
 build/
 
 .ruff_cache/
+
+# The agent CLI's own state in a packet clone (session settings), never project content.
+.commandcode/

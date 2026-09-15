@@ -46,6 +46,7 @@ UNSUPPORTED_ADAPTERS = {
 
 PACKET_ID = re.compile(r"[A-Z]\d{1,3}")
 BASE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@+-]*")
+SHA = re.compile(r"[0-9a-f]{40}")
 EFFORT_MODULE_NAME = "grid-effort.mjs"
 # Packets are whole-feature builds, not one-shot lane tasks: the effort module forces
 # high, unlike the one-shot goat lane's low.
@@ -72,6 +73,11 @@ def validate_packet_task(raw):
     board/task.py is provider-authored (integrated unmodified), so the shared key
     checks are reused by validating a copy whose category is one it accepts; everything
     packet-specific is checked here. Defaults are applied at dispatch, not here.
+
+    A packet that landed carries one extra key, `landed`, and settles `landed` — a
+    terminal state after `passed` that the provider-authored state list refuses, so
+    board/land.py's transition is validated here: the record ({base_head, merge_commit,
+    how}) and the state come together or not at all.
     """
 
     def err(k, m):
@@ -83,9 +89,23 @@ def validate_packet_task(raw):
         err("category", "expected packet")
     if "spec" not in raw:
         err("task", "missing spec key")
-    core = {k: v for k, v in raw.items() if k != "spec"}
+    landed = raw.get("landed")
+    core = {k: v for k, v in raw.items() if k not in ("spec", "landed")}
     core["category"] = "pure_function"
+    if core.get("state") == "landed":
+        # The shared check's nearest terminal state; the real state is restored below.
+        core["state"] = "accepted"
     validate_task(core)
+    if ("landed" in raw) != (raw.get("state") == "landed"):
+        err("landed", "the landed record and the landed state come together or not at all")
+    if landed is not None:
+        if not isinstance(landed, dict) or set(landed) != {"base_head", "merge_commit", "how"}:
+            err("landed", "must be a dict with exactly base_head, merge_commit, how")
+        for key in ("base_head", "merge_commit"):
+            if not isinstance(landed[key], str) or not SHA.fullmatch(landed[key]):
+                err("landed", key + " must be a 40-hex commit sha")
+        if landed["how"] not in ("ff", "merge", "union"):
+            err("landed", "how must be one of ff, merge, union")
     spec = raw["spec"]
     if not isinstance(spec, dict):
         err("spec", "expected a dict")
@@ -136,7 +156,7 @@ def validate_packet_task(raw):
     out = {
         k: (dict(v) if k == "budget" else list(v) if isinstance(v, list) else v)
         for k, v in raw.items()
-        if k != "spec"
+        if k not in ("spec", "landed")
     }
     out["spec"] = {
         "brief": spec["brief"],
@@ -145,6 +165,8 @@ def validate_packet_task(raw):
         "base": base,
         "max_rounds": rounds,
     }
+    if landed is not None:
+        out["landed"] = dict(landed)
     return out
 
 
