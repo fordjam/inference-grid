@@ -55,9 +55,14 @@ EFFORT_MODULE_TEXT = (
 
 
 def validate_board_task(raw):
-    """The load/save entry the runner uses: packet tasks validate here, the rest unchanged."""
+    """The load/save entry the runner uses: packet and verify_merge tasks validate here,
+    the rest unchanged."""
     if isinstance(raw, dict) and raw.get("category") == "packet":
         return validate_packet_task(raw)
+    if isinstance(raw, dict) and raw.get("category") == "verify_merge":
+        from .verify_merge import validate_verify_merge_task
+
+        return validate_verify_merge_task(raw)
     return validate_task(raw)
 
 

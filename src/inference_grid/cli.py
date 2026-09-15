@@ -155,6 +155,7 @@ def main():
             "evaluation",
             "tick",
             "watch",
+            "verify-merge",
         ],
     )
     parser.add_argument("--json", help="JSON argument file; never store credentials here")
@@ -198,10 +199,18 @@ def main():
             "defer",
             "cooldown",
             "watch",
+            "verify-merge",
         }
         and not args.json
     ):
         parser.error("this command requires --json")
+    if args.command == "verify-merge":
+        # No ledger, no database, no quota: a code node over a git worktree.
+        from .board.verify_merge import verify_merge_cli
+
+        report = verify_merge_cli(json.load(open(args.json)))
+        print(json.dumps(report, indent=2))
+        raise SystemExit(0 if report["mergeable"] and all(g["ok"] for g in report["gates"]) else 1)
     ledger = Ledger(args.database)
     data = json.load(open(args.json)) if args.json else {}
     if args.command == "evaluation":

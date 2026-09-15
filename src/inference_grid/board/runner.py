@@ -31,6 +31,7 @@ from ..worker import execute
 from .guard import check_input
 from .packet_task import dispatch_packet, validate_board_task
 from .task import validate_task
+from .verify_merge import verify_merge
 from ..lanes.route import route
 
 RUNNER = [sys.executable, "-m", "inference_grid.lanes.runner"]
@@ -883,6 +884,60 @@ def accept_reviewed(board_dir, project_root, ledger, lanes, review_lane, review_
     return result + "; accepted; " + note
 
 
+def settle_verify_merge(path, task, project_root, packets_root):
+    """Run the verify_merge code node and settle the task passed or blocked.
+
+    No lane, no ledger attempt, no quota. A conflict or a failing gate blocks
+    with the conflicting paths, or the first failing gate's tail, as the reason;
+    a node that cannot run at all (bad ref, git failure) blocks without
+    stopping the tick.
+    """
+    spec = task["spec"]
+    try:
+        report = verify_merge(
+            project_root,
+            spec["branch"],
+            spec["target"],
+            spec["gates"],
+            work_dir=Path(packets_root) / task["id"] / "verify",
+        )
+    except Exception as exc:
+        save_task(path, task, state="blocked", blocked_reason=("verify_merge: " + str(exc))[:300])
+        return {"task": task["id"], "lane": None, "attempt": None, "result": "blocked"}
+    if not report["mergeable"]:
+        passed, reason = (
+            False,
+            (
+                "merge conflicts: " + ", ".join(report["conflicts"])
+                if report["conflicts"]
+                else "merge did not complete"
+            ),
+        )
+    else:
+        failed = [g for g in report["gates"] if not g["ok"]]
+        passed = not failed
+        reason = (
+            (
+                f"gate {failed[0]['name']} failed (exit {failed[0]['returncode']}): "
+                + failed[0]["tail"].strip()
+            )[:300]
+            if failed
+            else ""
+        )
+    save_task(
+        path,
+        task,
+        state="passed" if passed else "blocked",
+        blocked_reason=None if passed else reason[:300],
+    )
+    return {
+        "task": task["id"],
+        "lane": None,
+        "attempt": None,
+        "result": "passed" if passed else "blocked",
+    }
+
+
 def tick(
     board_dir,
     project_root,
@@ -918,6 +973,16 @@ def tick(
     board = load_board(board_dir)
     for task_id, (path, task) in board.items():
         if task["state"] != "ready":
+            continue
+        if task["category"] == "verify_merge":
+            # The merge proof is a code node in a scratch worktree: no lane, no
+            # ledger attempt, no quota. It settles by itself.
+            if dry_run:
+                results.append(
+                    {"task": task_id, "lane": None, "attempt": None, "result": "verify_merge"}
+                )
+                continue
+            results.append(settle_verify_merge(path, task, project_root, packets_root))
             continue
         clash = shadowing_names(task)
         if clash:
