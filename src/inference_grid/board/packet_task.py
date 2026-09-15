@@ -64,6 +64,10 @@ def validate_board_task(raw):
         from .verify_merge import validate_verify_merge_task
 
         return validate_verify_merge_task(raw)
+    if isinstance(raw, dict) and raw.get("category") == "calibration_run":
+        from .calibration import validate_calibration_run_task
+
+        return validate_calibration_run_task(raw)
     return validate_task(raw)
 
 

@@ -515,6 +515,170 @@ def test_record_true_without_a_ledger_refuses(tmp_path):
         calibration.score_calibration(board, "run1", packets, record=True)
 
 
+# --- the run as a code node (I3) ---
+
+
+def test_authoring_a_run_task_writes_a_validated_code_node(tmp_path):
+    from inference_grid.board.packet_task import validate_board_task
+
+    board, _project = board_and_project(tmp_path)
+    created = calibration.calibration_task(board, "/corpus", ["go"], "run-a")
+    assert created["existing"] is False
+    task = validate_board_task(json.loads(Path(created["task"]).read_text()))
+    assert task["category"] == "calibration_run"
+    assert task["state"] == "ready" and task["blocked_reason"] is None
+    assert task["spec"] == {"corpus_dir": "/corpus", "lanes": ["go"], "run_id": "run-a"}
+    # A code node stages nothing and produces no artifacts.
+    assert task["inputs"] == [] and task["artifacts"] == []
+    # Re-authoring the same run returns the existing file rather than refusing: the
+    # weekly trigger may fire again before the run has been scored.
+    again = calibration.calibration_task(board, "/corpus", ["go"], "run-a")
+    assert again["existing"] is True and again["task"] == created["task"]
+
+
+def test_the_run_task_validator_refuses_bad_shapes(tmp_path):
+    board, _project = board_and_project(tmp_path)
+    raw = json.loads(
+        Path(calibration.calibration_task(board, "/corpus", ["go"], "run-a")["task"]).read_text()
+    )
+    good = calibration.validate_calibration_run_task(raw)
+    assert good["spec"]["run_id"] == "run-a"
+    with pytest.raises(ValueError, match="missing keys"):
+        calibration.validate_calibration_run_task(
+            dict(raw, spec={"corpus_dir": "/c", "lanes": ["go"]})
+        )
+    with pytest.raises(ValueError, match="unknown keys"):
+        calibration.validate_calibration_run_task(dict(raw, spec=dict(raw["spec"], extra=1)))
+    with pytest.raises(ValueError, match="run_id"):
+        calibration.validate_calibration_run_task(dict(raw, spec=dict(raw["spec"], run_id="Run A")))
+    with pytest.raises(ValueError, match="lanes"):
+        calibration.validate_calibration_run_task(dict(raw, spec=dict(raw["spec"], lanes=[])))
+    with pytest.raises(ValueError, match="corpus_dir"):
+        calibration.validate_calibration_run_task(dict(raw, spec=dict(raw["spec"], corpus_dir="")))
+
+
+def test_authoring_a_run_refuses_bad_arguments(tmp_path):
+    board, _project = board_and_project(tmp_path)
+    with pytest.raises(ValueError, match="run_id"):
+        calibration.calibration_task(board, "/c", ["go"], "Run A")
+    with pytest.raises(ValueError, match="lanes"):
+        calibration.calibration_task(board, "/c", [], "run-a")
+    with pytest.raises(ValueError, match="corpus_dir"):
+        calibration.calibration_task(board, "", ["go"], "run-a")
+
+
+def test_the_run_walks_authored_waiting_scored_across_three_ticks(tmp_path):
+    from inference_grid.board import runner
+    from inference_grid.ledger import Ledger
+
+    board, project = board_and_project(tmp_path)
+    corpus = corpus_of(tmp_path)
+    ledger = Ledger("sqlite:///" + str(tmp_path / "l.sqlite"))
+    ledger.initialize()
+    packets = tmp_path / "packets"
+    calibration.calibration_task(board, str(corpus), ["go"], "auto-v1")
+
+    def tick():
+        return runner.tick(board, project, ledger, {}, board / "lanes.json", {}, packets)
+
+    def run_row(results):
+        return next(r for r in results if r["task"] == "calibration-auto-v1")
+
+    def run_state():
+        return json.loads((board / "calibration-auto-v1.json").read_text())["state"]
+
+    # Tick 1: the run authors one review task per case and settles into review_pending.
+    first = run_row(tick())
+    assert first["result"] == "authored" and first["lane"] is None
+    assert run_state() == "review_pending"
+    assert (board / "calib-auto-v1-mock-path.json").is_file()
+
+    # Tick 2: the case has not settled, so the run waits — and re-authors nothing.
+    second = run_row(tick())
+    assert second["result"] == "waiting on 1 case(s)"
+    assert run_state() == "review_pending"
+    assert sorted(p.stem for p in board.glob("calib-auto-v1-*.json")) == ["calib-auto-v1-mock-path"]
+
+    # The case settles: a terminal task state and the reply the scorer reads.
+    write_packet(
+        packets,
+        "calib-auto-v1-mock-path",
+        reply(
+            "rejected",
+            [
+                finding(
+                    "web/e2e/views.spec.ts",
+                    "the mock matches /api/views exactly, so the PUT to /api/views/<name>"
+                    " is never intercepted",
+                )
+            ],
+        ),
+    )
+    case_task = json.loads((board / "calib-auto-v1-mock-path.json").read_text())
+    (board / "calib-auto-v1-mock-path.json").write_text(json.dumps(dict(case_task, state="passed")))
+
+    # Tick 3: the settled case is scored (record=True) and the run settles passed.
+    third = run_row(tick())
+    assert third["result"] == "passed"
+    assert third["reviewer_recall"] == {"go": {"recall": 1.0, "precision": 1.0, "cases": 1}}
+    assert run_state() == "passed"
+    assert (board / "calibration" / "auto-v1" / "report.json").is_file()
+    # No lane ran the calibration node itself: the ledger has no attempt from the tick.
+    assert ledger.status() == []
+
+
+def test_newest_calibration_at_reads_only_calibration_outcomes(tmp_path):
+    from inference_grid.ledger import Ledger, attempts as attempts_t, tasks as tasks_t
+
+    ledger = Ledger("sqlite:///" + str(tmp_path / "l.sqlite"))
+    ledger.initialize()
+    assert calibration.newest_calibration_at(ledger) is None
+
+    def attempt(aid):
+        with ledger.engine.begin() as con:
+            con.execute(tasks_t.insert().values(id="t-" + aid, project="p", spec={}))
+            con.execute(
+                attempts_t.insert().values(
+                    id=aid,
+                    task="t-" + aid,
+                    account="a",
+                    generation=1,
+                    state="completed",
+                    estimate={},
+                    workspace="/w",
+                    receipt={},
+                    updated=0.0,
+                )
+            )
+
+    attempt(AID)
+    ledger.record_outcome(AID, "pure_function", True, note="not a calibration")
+    assert calibration.newest_calibration_at(ledger) is None
+    other = "11111111-2222-3333-4444-666666666666"
+    attempt(other)
+    ledger.record_outcome(
+        other, "calibration", False, note="calibration auto-v1/mock-path: 0/1 recalled"
+    )
+    newest = calibration.newest_calibration_at(ledger)
+    assert isinstance(newest, float) and newest > 0
+
+
+def test_calibration_settled_waits_while_a_case_is_open(tmp_path):
+    board, _project = board_and_project(tmp_path)
+    calibration.calibration_task(board, "/corpus", ["go"], "run-a")
+    # No manifest yet: never "settled" — the run waits rather than scoring what it cannot enumerate.
+    assert calibration.calibration_settled(board, "run-a") == (False, ["run-a"])
+    manifest = board / "calibration" / "run-a"
+    manifest.mkdir(parents=True)
+    (manifest / "manifest.json").write_text(
+        json.dumps({"tasks": ["calib-run-a-one", "calib-run-a-two"]})
+    )
+    (board / "calib-run-a-one.json").write_text(json.dumps({"state": "passed"}))
+    assert calibration.calibration_settled(board, "run-a") == (False, ["calib-run-a-two"])
+    (board / "calib-run-a-two.json").write_text(json.dumps({"state": "blocked"}))
+    assert calibration.calibration_settled(board, "run-a") == (True, [])
+
+
 # --- seed corpus and CLI (K4) ---
 
 

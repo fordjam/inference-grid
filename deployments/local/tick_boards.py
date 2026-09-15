@@ -6,6 +6,11 @@ a board with several serial reviews outlasts the 15-minute validity of the Go re
 stale accounts refuse the rest of the pass. After each pass the loop logs the ready count
 across boards and sleeps the idle interval when nothing is ready, the busy one otherwise.
 Same ledger as the monarch loop; Kimi is serialised by it.
+
+A ``calibration`` block in the config (``corpus_dir``, ``lanes``, ``every_days``) makes the
+loop author a calibration run once the newest scored run is older than ``every_days``: the
+ledger's own calibration outcomes are the clock, so a run in flight does not stop it. The
+run is a board task the board-tick steps through; no lane runs the calibration itself.
 """
 
 import json
@@ -18,6 +23,7 @@ DEFAULT_CONFIG = Path.home() / ".local/share/inference-grid-capacity/config.json
 DEFAULT_DIR = Path.home() / ".local/share/inference-grid-capacity"
 IDLE_SECONDS = 1800
 BUSY_SECONDS = 300
+CALIBRATION_EVERY_DAYS = 7
 
 
 def default_prepare(config):
@@ -77,12 +83,83 @@ def count_ready(board_dir):
     )
 
 
+def calibration_due(newest_at, every_days, now):
+    """True when no calibration has been scored, or the newest one is older than every_days.
+
+    `newest_at` is the newest recorded calibration outcome instant from the ledger (None
+    when nothing has been scored); the decision never reads a file, so a run whose tasks
+    exist but have not been scored does not stop the clock.
+    """
+    if newest_at is None:
+        return True
+    return now - newest_at >= every_days * 86400
+
+
+def _calibration_board(config, calibration):
+    """The board to author the run onto: the calibration block's, else the first named one."""
+    if calibration.get("board_dir"):
+        return calibration["board_dir"]
+    if config.get("board_dir"):
+        return config["board_dir"]
+    for board in config.get("boards") or []:
+        if isinstance(board, dict) and board.get("board_dir"):
+            return board["board_dir"]
+    return None
+
+
+def default_calibrate(config, now=None):
+    """Author a calibration_run task when the newest scored run is older than every_days.
+
+    The config's ``calibration`` block names ``corpus_dir``, ``lanes`` and ``every_days``
+    (and, when the tick loop does not name boards as objects, ``board_dir``). The ledger's
+    own calibration outcomes are the only clock; the run itself is a board task the next
+    board-tick steps through. Returns the authored (or existing) task id, or None.
+    """
+    calibration = config.get("calibration") or {}
+    if not calibration.get("corpus_dir") or not calibration.get("lanes"):
+        return None
+    if not config.get("database_url"):
+        return None
+    board_dir = _calibration_board(config, calibration)
+    if not board_dir:
+        return None
+    if config.get("package_src"):
+        sys.path.insert(0, str(config["package_src"]))
+    from inference_grid.board.calibration import calibration_task, newest_calibration_at
+    from inference_grid.ledger import Ledger
+
+    now = time.time() if now is None else now
+    ledger = Ledger(config["database_url"])
+    every_days = calibration.get("every_days", CALIBRATION_EVERY_DAYS)
+    if not calibration_due(newest_calibration_at(ledger), every_days, now):
+        return None
+    run_id = "auto-" + time.strftime("%Y%m%d", time.gmtime(now))
+    created = calibration_task(
+        board_dir, calibration["corpus_dir"], list(calibration["lanes"]), run_id
+    )
+    return created["id"]
+
+
 def run(
-    boards, deadline, prepare, tick, sleep, clock=time.time, idle=IDLE_SECONDS, busy=BUSY_SECONDS
+    boards,
+    deadline,
+    prepare,
+    tick,
+    sleep,
+    clock=time.time,
+    idle=IDLE_SECONDS,
+    busy=BUSY_SECONDS,
+    calibrate=None,
 ):
-    """Prepare before every board; the ready count decides the sleep. Returns the last count."""
+    """Prepare before every board; the ready count decides the sleep. Returns the last count.
+
+    ``calibrate`` (optional) runs once per pass before the boards: the weekly calibration
+    author is idempotent per run, so a pass that finds a run in flight authors nothing.
+    """
     ready = 0
     while clock() < deadline:
+        if calibrate:
+            calibrate()
         ready = 0
         for board in boards:
             prepare()
@@ -107,6 +184,7 @@ def main(argv=None):
         lambda: default_prepare(config),
         lambda board: default_tick(board, config),
         time.sleep,
+        calibrate=lambda: default_calibrate(config),
     )
 
 
