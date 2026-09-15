@@ -101,6 +101,28 @@ directory holds duplicates — fix that while here: one entry per board name). A
   refuses it; a static check that `app.js` references `/api/boards`.
 - Size: medium.
 
+#### J6. Concurrent dispatch within a tick
+`board-tick` dispatches the ready tasks of a board one after another and returns when the
+last settles, and `tick_boards.py` waits for it before the next board: one 30-minute packet
+stops every other board and every idle lane. Accounts now carry a `capacity` (3 on GOAT, 2 on
+Cline) that this serialization makes meaningless.
+- In `board/runner.py::tick`, run admitted attempts concurrently — a worker per attempt,
+  bounded by each account's free capacity as the ledger reports it at admission time — and
+  settle each as it finishes; the plan, admission and settlement stay exactly as they are
+  (the ledger already serializes reservations). `board-tick` returns when every attempt it
+  started has settled; its stdout rows are unchanged.
+- `tick_boards.py` moves on to the next board as soon as a board's tick has *dispatched*
+  (not settled): run each board's tick in its own thread, joined at the end of the pass, so
+  a long packet on one board never delays reviews on another. The ready count is summed
+  after the joins.
+- Landing (I1) and any base-branch write stay under the existing lock; the packet loop's
+  attempt directories are already per attempt, so nothing else is shared.
+- Tests: two ready tasks on one board with capacity 2 run overlapped (fake adapters that
+  sleep; wall time < the sum); capacity 1 keeps them serial; two boards tick concurrently;
+  a failure in one attempt settles it without affecting the other; the stdout rows and
+  ledger events are identical to the serial run's.
+- Size: medium. Why: seven packets are queued behind one.
+
 ---
 
 ## Definition of done, per packet
