@@ -77,6 +77,10 @@ class ClineLaneTests(unittest.TestCase):
         self.tmp = temp_root()
         root = Path(self.tmp.name)
         self.saved_home = os.environ.get("HOME")
+        # The driver's gate env injects CLINE_API_KEY for cline-adapter lanes
+        # (scripts/run_lane.py); whatever this process started with is what the run
+        # must leave behind.
+        self.saved_cline_key = os.environ.get("CLINE_API_KEY")
         self.key = "sk-cline-test-0000000000000000"
         self.saved_home = os.environ.get("HOME")
         # The gate shell exports a real CLINE_API_KEY for live rounds; the lane must
@@ -206,7 +210,10 @@ class ClineLaneTests(unittest.TestCase):
         for path in attempt.rglob("*"):
             if path.is_file():
                 self.assertNotIn(needle, path.read_bytes(), str(path))
-        self.assertNotIn("CLINE_API_KEY", os.environ)
+        # Never weaken the leak check: a run that left its own key where none existed
+        # still fails (None != "sk-…"), and a run under a caller whose environment
+        # already carries CLINE_API_KEY must leave that value byte-identical.
+        self.assertEqual(os.environ.get("CLINE_API_KEY"), self.saved_cline_key)
         self.assertEqual(os.environ.get("HOME"), self.saved_home)
 
     def test_unsafe_artifact_names_refused(self):
