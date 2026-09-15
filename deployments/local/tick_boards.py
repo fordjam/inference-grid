@@ -87,9 +87,13 @@ def main(argv=None):
     config_path = Path(args[0]) if args else DEFAULT_CONFIG
     config = json.loads(config_path.read_text())
     config["_config_path"] = str(config_path)
+    # Boards may be names or {"name": ...} rows; a KeepAlive agent gives no deadline, so the
+    # loop runs a day and lets launchd start it again.
+    boards = [b["name"] if isinstance(b, dict) else b for b in config["boards"]]
+    deadline = config.get("deadline") or time.time() + 86400
     run(
-        config["boards"],
-        config["deadline"],
+        boards,
+        deadline,
         lambda: default_prepare(config),
         lambda board: default_tick(board, config),
         time.sleep,

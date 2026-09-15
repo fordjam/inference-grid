@@ -7,7 +7,9 @@ scheduler), ``capacity-feed``, ``capacity-web`` (the dashboard server) and ``tic
 loading the agents is an operator step.
 
 Every plist is the same shape — ``KeepAlive`` and ``RunAtLoad`` true, ``ProcessType:
-Interactive`` — and never ``StartInterval``. launchd parks interval spawns for a GUI-session
+Interactive``, a PATH that includes ``/opt/homebrew/bin`` (the CLIs the lanes spawn are
+``#!/usr/bin/env node`` scripts, and launchd's default PATH cannot find node) — and never
+``StartInterval``. launchd parks interval spawns for a GUI-session
 agent while the display is off ("pended nondemand spawn = interval"), which is exactly when
 the phone dashboard is the only view; a process that is already running is not held. So the
 runtimes are kept alive rather than scheduled, and they come back after a reboot: the
@@ -42,6 +44,11 @@ PLIST_TEMPLATE = """\
 <dict>
 \t<key>KeepAlive</key>
 \t<true/>
+\t<key>EnvironmentVariables</key>
+\t<dict>
+\t\t<key>PATH</key>
+\t\t<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+\t</dict>
 \t<key>Label</key>
 \t<string>{label}</string>
 \t<key>ProcessType</key>

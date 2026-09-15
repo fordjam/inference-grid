@@ -46,6 +46,18 @@ def default_jobs(config):
             "log": str(out_dir / "upload.log"),
             "error_log": str(out_dir / "upload-error.log"),
         },
+        {
+            # watch: stall and staleness alarms, edge-triggered, notifier from the spec
+            "period": 60,
+            "argv": [
+                config.get("inference_grid_bin", "inference-grid"),
+                "watch",
+                "--json",
+                str(config.get("watch_spec", out_dir / "watch-spec.json")),
+            ],
+            "log": str(out_dir / "watch.log"),
+            "error_log": str(out_dir / "watch-error.log"),
+        },
     ]
 
 

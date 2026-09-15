@@ -1,7 +1,8 @@
 """ClinePass quota reading from api.cline.bot usage-limits; writes cline-observation.json.
 
-The key is read from the env file named in the config (``cline_credential_path``), by looking
-for its ``CLINE_API_KEY=`` line; the key itself is never logged and never appears in this file.
+The key is read from the file named in the config (``cline_credential_path``): the grid's
+``{"api_key": ...}`` JSON, or an env file's ``CLINE_API_KEY=`` line; the key itself is never
+logged and never appears in this file.
 """
 
 import json
@@ -16,15 +17,22 @@ DEFAULT_CONFIG = Path.home() / ".local/share/inference-grid-capacity/config.json
 DEFAULT_DIR = Path.home() / ".local/share/inference-grid-capacity"
 
 
-def read_key(env_path):
-    """The CLINE_API_KEY line of the configured env file, or None when absent."""
+def read_key(credential_path):
+    """The Cline key from the configured file: the grid's ``{"api_key": ...}`` JSON, or an env
+    file's ``CLINE_API_KEY=`` line. None when absent; the key itself is never logged."""
     try:
-        lines = Path(env_path).read_text().splitlines()
+        text = Path(credential_path).read_text()
     except OSError:
         return None
-    for line in lines:
+    try:
+        document = json.loads(text)
+        key = document.get("api_key") if isinstance(document, dict) else None
+        return key or None
+    except ValueError:
+        pass
+    for line in text.splitlines():
         if line.startswith("CLINE_API_KEY="):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
+            return line.split("=", 1)[1].strip().strip('"').strip("'") or None
     return None
 
 

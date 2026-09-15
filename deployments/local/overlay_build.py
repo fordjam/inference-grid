@@ -292,10 +292,34 @@ def build(config):
             accounts = replace_account(accounts, obs)
         except (OSError, ValueError):
             pass
-    return {
+    overlay = {
         "accounts": accounts,
         "attempts": attempts(config.get("board_db", BOARD_DB))[:60],
     }
+    overlay.update(operator_lists(config))
+    return overlay
+
+
+def operator_lists(config):
+    """The needs-you rows and the weekly accepted-work metric (brief 14 C2), from the ledger,
+    the boards' blocked tasks, watch's state file and an optional owner-decisions file.
+    Empty lists when the package or the ledger is unavailable: the dashboard renders without."""
+    try:
+        if config.get("package_src"):
+            sys.path.insert(0, str(config["package_src"]))
+        from inference_grid.ledger import Ledger
+        from inference_grid.operator_queue import build_overlay
+
+        ledger = Ledger(config.get("database_url", "sqlite:///" + str(BOARD_DB)))
+        board_dirs = [b["board_dir"] for b in config.get("boards", []) if isinstance(b, dict)]
+        return build_overlay(
+            ledger,
+            board_dirs=board_dirs,
+            watch_state=config.get("watch_state"),
+            owner_decisions=config.get("owner_decisions"),
+        )
+    except Exception as exc:  # noqa: BLE001 — the overlay must still be written
+        return {"operator": [], "accepted_work": [], "operator_error": type(exc).__name__}
 
 
 def write(overlay, config):
