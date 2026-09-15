@@ -15,6 +15,7 @@ way: `inference-grid lane-init --json {"lane_id": …, "board_dir": …}`, then 
 | `claude_headless` | `zai` | claude | Anthropic-compatible base URL, `MAX_THINKING_TOKENS` from the task budget |
 | `zcode_cli` | `zcode` | glm | Bundled ZCode CLI, session-DB evidence |
 | `codex_cli` | `codex` | openai | Codex CLI headless (`codex exec`); `classify_codex` — see below |
+| `opencode_cli` | `opencode` | glm | `opencode run --format json` as an agent with tools; event-stream evidence, config/auth digest guard, `classify_opencode` — see below. `lanes.json` cannot name the kind until `lanes/config.py`'s accepted set grows by one entry (provider-authored; patch in the D2 report) |
 
 ## Command Code GOAT
 
@@ -97,6 +98,38 @@ say so (`reasoning_effort: unsupported`).
 | `go-qwen` | `qwen3.8-max` | qwen | Third family candidate; canary before use |
 | `go-minimax` | `minimax-m3` | minimax | Unqualified; canary before use |
 | `go-grok` | `grok-4.6` | grok | Refuses the OpenAI-compatible endpoint (protocol fact); re-probe only after the endpoint changes |
+
+## Go subscription as an agent — `opencode_cli`
+
+```json
+"go-agent": {
+  "provider": "opencode", "family": "glm", "model": "opencode/glm-5.3-flash",
+  "kind": "opencode_cli", "credential_path": null,
+  "executable": "/path/from/operator/opencode", "plan_units": {"five_hour": 1},
+  "window": null, "max_concurrency": 1, "wall_seconds": 900,
+  "categories": ["pure_function", "tests_multi_file"]
+}
+```
+
+The same Go subscription `go_http` spends on single calls, run through the `opencode`
+CLI as an agent with tools (`opencode run --model <model> --format json --dir <worktree>`
+with the brief as the prompt). Evidence is the CLI's own NDJSON event stream, qualified
+by `classify_opencode`: every line must parse, exactly one terminal `step_finish` must
+echo the asked model, and the last assistant `text` part is the terminal text (event
+shapes documented in `opencode_outcomes.py`; worth re-checking against a real capture
+before the first dispatch). Digests of the CLI's config (`~/.config/opencode/
+opencode.json`) and auth (`~/.local/share/opencode/auth.json`) files are taken before
+and after the run, as in the goat lane.
+
+**Policy gate, the operator's decision, not the code's:** the deny-read list currently
+names the opencode auth file, and the lane refuses to start on that fact alone — verdict
+`credential_denied_by_policy`, nothing spawned, nothing digested. Removing the entry
+exposes the key to the model's own shell: the sandbox in this package bounds writes,
+not reads, so a workload could read the auth file into its context or a transcript, and
+the before/after digest check would still pass — it proves only that the key was not
+modified, never that it was not read. The digest discipline exists to detect a tampered
+login once the operator decides to allow the read; allowing it is worth one deliberate
+edit to `deny-read.json`, made with that sentence in mind.
 
 ## Work run outside the grid — `external`
 

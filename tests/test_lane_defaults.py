@@ -41,5 +41,13 @@ def test_doctor_names_packaged_modules_without_records(tmp_path):
     ledger = Ledger(url)
     ledger.initialize()
     report = diagnose(url)
-    assert report["modules_without_lane"] == ["cline", "codex", "go", "goat", "zai", "zcode"]
+    assert report["modules_without_lane"] == [
+        "cline",
+        "codex",
+        "go",
+        "goat",
+        "opencode",
+        "zai",
+        "zcode",
+    ]
     assert "lane_modules_without_records" in report["findings"]
