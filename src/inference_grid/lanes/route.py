@@ -19,6 +19,12 @@ inputs and carries its answer back with the drop report:
   and scores each lane with the Laplace (accepted + 1) / (attempts + 2). route hands it
   reshaped rows whose Laplace score equals the packet's blend — see blended_row — so
   calibration evidence steers selection without touching the provider-authored module.
+- Tier: the lane record's `tier` (plan | build | review) is the operator's statement of
+  what a lane is for — SOTA for planning and review, workhorses for building (docs/LANES.md,
+  "Model tiers"). Among the lanes that fit the packet, route offers only the lanes whose
+  tier the task's category asks for and reports the others in `dropped` with reason
+  `tier_mismatch`. The filter never empties the offer: with no lane of the task's tier
+  offered, every lane stays, so a board whose records predate the key routes as it did.
 """
 
 from math import ceil, gcd
@@ -28,6 +34,41 @@ from .select import select_lane
 
 # go.run's request cap when a task carries no thinking budget.
 UNBUDGETED_MAX_TOKENS = 16000
+
+# The tier a task's category asks for: planning and review take the SOTA lanes the
+# operator marked, everything else the build workhorses. A lane record that carries no
+# tier (or a non-string one) is a workhorse — the same read runner.lane_view does.
+TIER_BY_CATEGORY = {"plan": "plan", "independent_review": "review"}
+DEFAULT_TIER = "build"
+
+
+def lane_tier(lane):
+    """The lane view's tier: the declared string, else `build`.
+
+    `lanes.json` is validated by provider-authored `lanes/config.py`, whose fixed key set
+    has no `tier`, so in practice the key arrives from a lane view a caller assembled (the
+    runner's `lane_view` reads it the same way). Anything that is not a string is the
+    absent case. A string outside plan/build/review is carried through: it matches no
+    category's tier, so a typo shows up as a `tier_mismatch` drop row instead of silently
+    demoting a SOTA lane to a workhorse.
+    """
+    tier = lane.get("tier") if isinstance(lane, dict) else None
+    return tier if isinstance(tier, str) else DEFAULT_TIER
+
+
+def wanted_tier(category):
+    """The tier the task's category routes to: plan → plan, independent_review → review,
+    everything else (packet, pure_function, multi-file, canary) → build."""
+    return TIER_BY_CATEGORY.get(category, DEFAULT_TIER)
+
+
+def tier_mismatch_row(lane_id, lane, tier):
+    """The `dropped` row for a lane that declares another tier than the task's."""
+    return {
+        "lane": lane_id,
+        "reason": "tier_mismatch",
+        "detail": f"lane tier {lane_tier(lane)}, task wants {tier}",
+    }
 
 
 # Context windows by model id, for lane views that carry none (lane specs cannot). From the
@@ -153,12 +194,21 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
     filter empties the candidate set the answer is lane None, reason `budget_unfit` —
     readiness and family exclusion never get a say on a lane that cannot hold the
     packet.
+
+    The tier filter runs on the lanes that fit: the task's category asks for a tier
+    (wanted_tier) and, while at least one offered lane declares it, the other lanes are
+    dropped with reason `tier_mismatch`. `tier` in the answer is the tier the task asked
+    for, so a caller can explain a refusal that has no drop rows. The filter never
+    empties the offer — a task whose lanes all declare another tier is routed by readiness
+    and score exactly as it was before the key existed — so the budget decides fit and the
+    tier decides choice among the lanes that fit.
     """
     cat = task.get("category") if isinstance(task, dict) else None
     budget = task.get("budget") if isinstance(task, dict) else None
     thinking = budget.get("thinking_tokens") if isinstance(budget, dict) else None
     explicit = task.get("lanes") if isinstance(task, dict) else None
     explicit = explicit if isinstance(explicit, list) else []
+    tier = wanted_tier(cat)
     if explicit:
         candidates = [lid for lid in lanes if lid in explicit]
     else:
@@ -203,7 +253,18 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
             "reason": "budget_unfit",
             "candidates": [],
             "dropped": dropped,
+            "tier": tier,
         }
+    matching = [row for row in kept if lane_tier(lanes[row["lane"]]) == tier]
+    if matching and len(matching) < len(kept):
+        # A lane of the task's tier is in play: the other lanes are not offered for this
+        # task, and the drop report says which tier each declares.
+        dropped.extend(
+            tier_mismatch_row(row["lane"], lanes[row["lane"]], tier)
+            for row in kept
+            if lane_tier(lanes[row["lane"]]) != tier
+        )
+        kept = matching
     rows = []
     for lid in sorted(row["lane"] for row in kept):
         row = blended_row(lanes[lid], cat, scorecard, calibration)
@@ -222,4 +283,5 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
         "reason": choice["reason"],
         "candidates": sorted(kept, key=lambda row: row["lane"]),
         "dropped": dropped,
+        "tier": tier,
     }

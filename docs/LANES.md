@@ -5,6 +5,33 @@ Documentation only: the private `lanes.json` stays the operator's (validated by
 live only in the operator's `lanes.json`, mode 0600. Every lane earns its rows the same
 way: `inference-grid lane-init --json {"lane_id": …, "board_dir": …}`, then one tick.
 
+## Model tiers
+
+Every lane record carries `tier: plan | build | review` — the operator's written-down statement of
+what a lane is for. The policy is one sentence: SOTA models for plan and review, workhorses for
+build. Planning a packet and reviewing one are judgement calls on a whole document, so they get the
+lanes the operator has marked for thinking; building is bounded work against a packet, so it gets
+the workhorses, and the expensive lane stays out of mechanical work. `route` reads the key —
+`lanes/config.py` is provider-authored, so the read lives in `lanes/route.py` — and asks for the
+tier the task's category implies: `plan` → plan, `independent_review` → review, everything else
+(`packet`, `pure_function`, the multi-file categories, `canary`) → build. Among the lanes that fit
+the packet, a lane declaring another tier is not offered and appears in the plan's `dropped` rows as
+`tier_mismatch`, naming the tier it declares, so `board-tick --dry-run` says why a SOTA lane sat
+out. With no lane of the asked tier offered, every fitting lane stays in play — which is how a
+board whose records predate the key routes as it always did — and an absent key is `build`.
+
+The key is what a lane view carries; the packaged `lanes.json` key set cannot hold it yet
+(`lanes/config.py` accepts exactly its own field list), so the operator cannot declare a tier until
+that set grows by one entry — the one-line coordinator edit, patch in the J2 report. The runner's
+`lane_view` fills `build` for any lane that does not declare one, so a plan task has no lane to run
+on in the meantime (`plan_requires_tier_plan`).
+
+```json
+"go":        { "model": "glm-5.3-flash", "tier": "build" },
+"go-kimi":   { "model": "kimi-k3",       "tier": "review" },
+"plan-lane": { "model": "glm-5.3-flash", "tier": "plan" }
+```
+
 ## Packaged kinds
 
 | Kind | Module | Family | Contract |
@@ -118,14 +145,19 @@ costs nothing (`lane-init` + one tick) until the canary passes. `REASONING_EFFOR
 each model's documented schema honours; models absent from it send no effort field and
 say so (`reasoning_effort: unsupported`).
 
-| Lane id | Model | Family | Note |
-| --- | --- | --- | --- |
-| `go` | `glm-5.3-flash` | glm | The proven route for tightly specified pure functions |
-| `go-kimi` | `kimi-k3` | kimi | The proven reviewer; needs `reasoning_effort` (default `max` thinks its output away) |
-| `go-deepseek` | `deepseek-v4-flash` | deepseek | Needs "Enable models hosted in China" in the Go console first; then canary |
-| `go-qwen` | `qwen3.8-max` | qwen | Third family candidate; canary before use |
-| `go-minimax` | `minimax-m3` | minimax | Unqualified; canary before use |
-| `go-grok` | `grok-4.6` | grok | Refuses the OpenAI-compatible endpoint (protocol fact); re-probe only after the endpoint changes |
+| Lane id | Model | Family | Tier | Note |
+| --- | --- | --- | --- | --- |
+| `go` | `glm-5.3-flash` | glm | build | The proven route for tightly specified pure functions |
+| `go-kimi` | `kimi-k3` | kimi | review | The proven reviewer; needs `reasoning_effort` (default `max` thinks its output away) |
+| `go-deepseek` | `deepseek-v4-flash` | deepseek | build | Needs "Enable models hosted in China" in the Go console first; then canary |
+| `go-qwen` | `qwen3.8-max` | qwen | build | Third family candidate; canary before use |
+| `go-minimax` | `minimax-m3` | minimax | build | Unqualified; canary before use |
+| `go-grok` | `grok-4.6` | grok | build | Refuses the OpenAI-compatible endpoint (protocol fact); re-probe only after the endpoint changes |
+
+The tier column is the operator's intent, not evidence: a lane earns its rows by canary and work the
+same way whatever tier it carries, and the SOTA lanes above predate the key — the column records
+what the routing already wanted. Declaring a tier is only possible once the config key set carries
+the key (see Model tiers).
 
 ## Cline subscription over HTTP — `cline-http`
 
