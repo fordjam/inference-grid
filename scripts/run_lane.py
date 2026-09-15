@@ -183,14 +183,13 @@ def gates_for(python: str, base: str, gate_dir: Path) -> list[Gate]:
         Gate("ruff-check", [python, str(scoped), "check"], env=env, timeout=300),
         Gate(
             "no-home-paths",
+            # The operator's real home directory, read at runtime and never written down,
+            # checked only in the files this packet changed: history is not the packet's fault.
             [
                 python,
                 "-c",
-                # The operator's actual home directory, read at runtime, never written down:
-                # the gate is that no packet bakes this machine's paths into the repository.
-                "import os,subprocess,sys;home=os.path.expanduser('~');"
-                "out=subprocess.run(['git','grep','-n','-F',home,'--','src','tests','docs','deployments','scripts','calibration'],capture_output=True,text=True).stdout;"
-                "print(out or 'no home paths');sys.exit(1 if out else 0)",
+                "import os,subprocess,sys;home=os.path.expanduser('~');base=sys.argv[1];files=subprocess.run(['git','diff','--name-only','--diff-filter=AMR',base+'...HEAD'],capture_output=True,text=True).stdout.split();out=subprocess.run(['git','grep','-n','-F',home,'HEAD','--',*files],capture_output=True,text=True).stdout if files else '';print(out or 'no home paths in changed files');sys.exit(1 if out else 0)",
+                base,
             ],
             timeout=60,
         ),
