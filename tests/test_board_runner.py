@@ -1826,3 +1826,32 @@ def test_a_lane_without_canary_evidence_is_unqualified_until_its_canary_passes(w
         now=now,
     )
     assert results[0]["result"] in ("passed", "failed_tests")
+
+
+def test_category_qualification_carries_across_provider_prefixes(world):
+    """`cline-pass/kimi-k3` is `kimi-k3` behind another provider: the reviews the fixture
+    seeded for `kimi-k3` qualify the prefixed lane. The canary stays per lane model id
+    (it proves the harness, not the model), so the prefixed lane still needs its own."""
+    now = time.time()
+    lanes = dict(world["lanes"], cline=dict(world["lanes"]["go"], model="cline-pass/kimi-k3"))
+    world["ledger"].record_lane("go", ready_record(now))
+    world["ledger"].record_lane("cline", dict(ready_record(now), provider="cline"))
+    accounts = {"go": world["account"], "cline": world["account"]}
+    view = runner.readiness_view(
+        world["ledger"], lanes, now + 1, accounts, world["ledger"].scorecard()
+    )
+    assert "independent_review" in view["cline"]["qualified_for"]
+    assert view["cline"]["state"] == "unqualified"  # no canary row for the prefixed id
+    world["ledger"].configure_account(
+        "canary-evidence",
+        8,
+        {"five_hour": 100, "weekly": 200},
+        time.time() + 600,
+        ["glm-5.3-flash", "kimi-k3", "cline-pass/kimi-k3"],
+    )
+    seed_accepted_row(world, model="cline-pass/kimi-k3", category="canary", alias="canary-evidence")
+    view = runner.readiness_view(
+        world["ledger"], lanes, now + 2, accounts, world["ledger"].scorecard()
+    )
+    assert view["cline"]["state"] == "ready"
+    assert "independent_review" in view["cline"]["qualified_for"]

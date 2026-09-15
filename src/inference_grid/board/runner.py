@@ -199,6 +199,11 @@ def lane_view(lanes, now):
 
 # Accepted canary/qualification rows per category a lane's model needs before the
 # category is qualified for it (Q1).
+def bare_model(model):
+    """The model id without its provider prefix: `cline-pass/kimi-k3` -> `kimi-k3`."""
+    return str(model).rsplit("/", 1)[-1] if model else model
+
+
 CATEGORY_QUALIFICATION = {
     "independent_review": 3,
     "pure_function": 2,
@@ -219,6 +224,9 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None, scorecard=None):
 
     With the scorecard supplied, a lane whose model has no accepted `canary` row is
     unqualified: registering a model costs nothing until a canary earns it evidence.
+    The canary is per lane model id as written (it proves the harness); category
+    qualification is per bare model — `cline-pass/kimi-k3` and `kimi-k3` are one model
+    behind two providers, and the reviews one earned qualify the other.
     """
     with ledger.engine.connect() as con:
         records = {r["provider"]: r["record"] for r in con.execute(select(lane_records)).mappings()}
@@ -233,14 +241,14 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None, scorecard=None):
         for row in scorecard:
             # The scorecard already aggregates accepted attempts per (model, category).
             if row.get("accepted"):
-                key = (row.get("model"), row.get("category"))
+                key = (bare_model(row.get("model")), row.get("category"))
                 accepted_by_model[key] = accepted_by_model.get(key, 0) + row["accepted"]
 
     def qualified_for(model):
         return sorted(
             category
             for category, needed in CATEGORY_QUALIFICATION.items()
-            if accepted_by_model.get((model, category), 0) >= needed
+            if accepted_by_model.get((bare_model(model), category), 0) >= needed
         )
 
     canaried = (
