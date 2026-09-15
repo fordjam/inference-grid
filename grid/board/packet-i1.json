@@ -18,8 +18,8 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
- "blocked_reason": null,
+ "state": "blocked",
+ "blocked_reason": "assigned to the interactive Z.ai session 2026-09-15 (operator decision); not for board dispatch",
  "spec": {
   "brief": "grid/briefs/packet-i1.txt",
   "packet_id": "I1",
