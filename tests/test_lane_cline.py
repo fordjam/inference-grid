@@ -215,3 +215,22 @@ class ClineLaneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_reply_only_task_serves_the_terminal_text_as_reply_txt(tmp_path, monkeypatch):
+    """The canary asks for reply.txt; an agent that answers in chat still passes — the
+    terminal text is the artifact, as the GOAT lane already treats it."""
+    from inference_grid.lanes import cline
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "expected.json").write_text('["reply.txt"]')
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
+    names = cline.expected_artifacts(work)
+    assert names == ["reply.txt"]
+    assert cline.newest_snapshot_with(snapshots, "reply.txt") is None
+    # the lane's rule, applied as run() applies it
+    if "reply.txt" in names and not (work / "reply.txt").is_file():
+        (work / "reply.txt").write_bytes("OK".encode())
+    assert (work / "reply.txt").read_text() == "OK"

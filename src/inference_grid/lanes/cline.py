@@ -261,6 +261,12 @@ def run(
                     shutil.copy2(complete / n, work / n)
             restored_from = snapshot_iteration(complete)
     verdict["restored_from_snapshot"] = restored_from
+    # A task may ask for the response itself under its conventional name (the canary does):
+    # the terminal text is that artifact when the agent answered in chat rather than to a
+    # file — the same rule the GOAT lane applies.
+    if "reply.txt" in names and not (work / "reply.txt").is_file():
+        if newest_snapshot_with(snapshots, "reply.txt") is None:
+            (work / "reply.txt").write_bytes(classifier["receipt"]["text"].strip().encode())
     # An artifact still in the workspace comes from there; otherwise the newest snapshot
     # that still holds it serves, and the verdict records which place served each name.
     sources = {}
