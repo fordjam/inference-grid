@@ -8,9 +8,11 @@ review staging. Packets are budgeted (the working reviewer takes ~24k tokens pro
 91-file / 976 KB packet is refused, not dispatched): generated and locked content is
 never staged, files over the per-file cap are represented by their hunks in the patch
 alone, and a range over budget is split into one task per commit — each packet measured
-before anything is written. author_family comes from the commits' Co-Authored-By trailers
-(one mapping constant): mixed families refuse, no trailer means claude. Everything here
-is read-only over the reviewed repository.
+before anything is written. Without an explicit budget the packet's thinking budget is
+sized from its staged bytes (sized_thinking_tokens), so the request cap the go lane
+derives from it grows with the packet. author_family comes from the commits'
+Co-Authored-By trailers (one mapping constant): mixed families refuse, no trailer means
+claude. Everything here is read-only over the reviewed repository.
 """
 
 import fnmatch
@@ -55,12 +57,30 @@ TRAILER_FAMILIES = {
 # The packet budget: staged bytes (files under the per-file cap plus the diff), sized to
 # roughly 30k tokens — about what the only proven reviewer (kimi-k3 at high) can take.
 MAX_INPUT_BYTES = 120_000
+# The default thinking budget follows the packet, not a constant: route estimates the
+# prompt at staged_bytes / 4 tokens and the go lane derives max_tokens from
+# thinking_tokens (three times it plus its content allowance), so the fixed 6 000 once
+# capped every request at 22 000 whatever the packet weighed — a 46 KB packet needed
+# three attempts on that cap. The floor keeps the small-packet budget, the ceiling is
+# the working reviewer's proven figure.
+MIN_THINKING_TOKENS = 6_000
+MAX_THINKING_TOKENS = 24_000
 # A changed file above this is represented by its hunks in the patch alone.
 MAX_FILE_BYTES = 16_000
 # Generated or locked content is never staged; the brief names what was omitted.
 EXCLUDED_NAMES = ("package-lock.json", "uv.lock")
 EXCLUDED_PARTS = ("fixtures", "dist")
 EXCLUDED_GLOBS = ("*.min.*",)
+
+
+def sized_thinking_tokens(staged_bytes):
+    """The default thinking budget for a packet of `staged_bytes` staged bytes.
+
+    min(24000, max(6000, staged_bytes // 4)) — the same 4 bytes-per-token estimate
+    route uses, so the ask tracks the packet: a 16 KB packet asks for 6 000 (cap
+    22 000 as before), a 60 KB packet for 15 000 (cap 49 000).
+    """
+    return min(MAX_THINKING_TOKENS, max(MIN_THINKING_TOKENS, staged_bytes // 4))
 
 
 def run(argv):
@@ -298,11 +318,16 @@ def _docs_only(paths):
     )
 
 
-def _plan_task(board_dir, project_root, task_id, family, lanes, budget, context, staged, patch):
+def _plan_task(
+    board_dir, project_root, task_id, family, lanes, budget, context, staged, patch, staged_bytes
+):
     """Build every file of one review task in memory: ([(path, bytes)], summary). No writes.
 
     All refusals — an existing task or staging, guard patterns, task validation — happen
     here, so a whole split can be planned before any part of it touches the board.
+    Without an explicit budget the thinking budget is sized from `staged_bytes`
+    (sized_thinking_tokens); the summary records the packet's bytes and the chosen
+    budget, since the task schema is fixed.
     """
     board_dir = Path(board_dir)
     project_root = Path(project_root)
@@ -327,7 +352,8 @@ def _plan_task(board_dir, project_root, task_id, family, lanes, budget, context,
         "artifacts": ["reply.txt"],
         "lanes": lanes or ["go"],
         "author_family": family,
-        "budget": budget or dict(REVIEW_BUDGET),
+        "budget": budget
+        or dict(REVIEW_BUDGET, thinking_tokens=sized_thinking_tokens(staged_bytes)),
         "state": "ready",
         "blocked_reason": None,
     }
@@ -347,6 +373,8 @@ def _plan_task(board_dir, project_root, task_id, family, lanes, budget, context,
         "staged": task["inputs"][1:],
         "author_family": family,
         "commits": 1,
+        "staged_bytes": staged_bytes,
+        "budget": dict(task["budget"]),
     }
     return files, summary
 
@@ -456,6 +484,7 @@ def _review_branch_scope(
         context,
         staged,
         patch,
+        total,
     )
     created["commits"] = len(commits)
     created["scope"] = "branch"
@@ -588,6 +617,7 @@ def review_branch(
                 context,
                 staged,
                 patch,
+                total,
             )
             created["commits"] = len(commits)
             if omitted:
@@ -686,6 +716,7 @@ def review_branch(
                 context,
                 staged,
                 patch,
+                total,
             )
         )
     for files, _ in plans:

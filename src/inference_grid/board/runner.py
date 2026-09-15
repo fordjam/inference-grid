@@ -966,8 +966,9 @@ def tick(
     Selection goes through lanes.route, which defaults and budget-filters the candidate
     set and hands select_lane a scorecard whose Laplace scores carry the calibration
     blend; every record for a task that reached route also carries the choice's
-    `candidates`, `dropped` (lanes filtered out with reasons, budget_unfit foremost) and
-    `score`.
+    `candidates` (rows naming each offered lane and the max_tokens cap it would run
+    under), `dropped` (lanes filtered out with reasons and the two token numbers,
+    budget_unfit foremost) and `score`.
 
     With auto_land the pass ends by landing every `passed` packet task through
     board.land (one landing at a time per base, a lock under packets_root); the pass's
@@ -1067,7 +1068,7 @@ def tick(
         if choice["lane"] is None:
             reason = choice["reason"]
             candidates = choice["candidates"]
-            if candidates and all(readiness[k]["state"] == "busy" for k in candidates):
+            if candidates and all(readiness[c["lane"]]["state"] == "busy" for c in candidates):
                 # Every remaining candidate is at its concurrency cap; say so instead of
                 # the generic no-ready-lane reason.
                 reason = "lane_busy"

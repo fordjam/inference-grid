@@ -12,7 +12,9 @@ inputs and carries its answer back with the drop report:
   estimate already covers it. A lane whose max_tokens cap (the lane view's own figure,
   else go.py's spend-guard policy for the task's thinking_tokens) or whose context
   window cannot hold the estimate is filtered out with reason budget_unfit before
-  selection; the returned `dropped` list says which lanes and why.
+  selection; the returned `dropped` rows say which lanes and why, carrying the two
+  numbers (`prompt`, `cap`) so a dry run can explain the refusal in tokens. The
+  `candidates` rows carry the cap each offered lane would run under.
 - Recall blend: select_lane reads scorecard rows keyed by (family, model, category)
   and scores each lane with the Laplace (accepted + 1) / (attempts + 2). route hands it
   reshaped rows whose Laplace score equals the packet's blend — see blended_row — so
@@ -107,11 +109,14 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
 
     Returns select_lane's dict with `candidates` replaced by the post-budget candidate
     set offered to selection (select_lane reports only its ready winners, which would
-    hide what was offered and lost on readiness) — plus `dropped`: the lanes filtered
-    out before selection as [{"lane", "reason", "detail"}], reason `budget_unfit` with
-    the prompt estimate and the cap it missed. When the budget filter empties the
-    candidate set the answer is lane None, reason `budget_unfit` — readiness and family
-    exclusion never get a say on a lane that cannot hold the packet.
+    hide what was offered and lost on readiness) as [{"lane", "cap"}] rows — cap is
+    max_tokens_cap for each offered lane — plus `dropped`: the lanes filtered out
+    before selection as [{"lane", "reason", "detail", "prompt", "cap"}], reason
+    `budget_unfit` with the prompt estimate and the cap it missed (`cap` is the
+    max_tokens cap, or the context window when that is what refused). When the budget
+    filter empties the candidate set the answer is lane None, reason `budget_unfit` —
+    readiness and family exclusion never get a say on a lane that cannot hold the
+    packet.
     """
     cat = task.get("category") if isinstance(task, dict) else None
     budget = task.get("budget") if isinstance(task, dict) else None
@@ -138,6 +143,8 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
                     "lane": lid,
                     "reason": "budget_unfit",
                     "detail": f"prompt ~{prompt} tokens exceeds max_tokens cap {cap}",
+                    "prompt": prompt,
+                    "cap": cap,
                 }
             )
         elif context and prompt > context:
@@ -146,10 +153,12 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
                     "lane": lid,
                     "reason": "budget_unfit",
                     "detail": f"prompt ~{prompt} tokens exceeds context {context}",
+                    "prompt": prompt,
+                    "cap": context,
                 }
             )
         else:
-            kept.append(lid)
+            kept.append({"lane": lid, "cap": cap})
     if not kept:
         return {
             "lane": None,
@@ -159,13 +168,13 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
             "dropped": dropped,
         }
     rows = []
-    for lid in kept:
+    for lid in sorted(row["lane"] for row in kept):
         row = blended_row(lanes[lid], cat, scorecard, calibration)
         if row is not None:
             rows.append(row)
     choice = select_lane(
         {"category": cat, "author_family": task.get("author_family")},
-        {lid: lanes[lid] for lid in kept},
+        {lid: lanes[lid] for lid in (row["lane"] for row in kept)},
         readiness,
         rows,
         now,
@@ -174,6 +183,6 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
         "lane": choice["lane"],
         "score": choice["score"],
         "reason": choice["reason"],
-        "candidates": sorted(kept),
+        "candidates": sorted(kept, key=lambda row: row["lane"]),
         "dropped": dropped,
     }
