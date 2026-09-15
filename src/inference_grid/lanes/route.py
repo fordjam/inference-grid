@@ -67,6 +67,20 @@ def max_tokens_cap(lane, thinking_tokens):
     return UNBUDGETED_MAX_TOKENS
 
 
+def default_lanes(category, lanes):
+    """route's defaulting: every lane declaring the category, minus explicit_only families.
+
+    An explicit_only lane (the first-party claude/openai families) runs only where the
+    author named it. The plan node uses this to give a drafted packet the build lanes its
+    category is offered by, before any selection has run.
+    """
+    return [
+        lid
+        for lid in lanes
+        if category in (lanes[lid].get("categories") or []) and not lanes[lid].get("explicit_only")
+    ]
+
+
 def blended_row(lane, category, scorecard, calibration):
     """The scorecard row select_lane reads, reshaped so its Laplace score is the blend.
 
@@ -148,11 +162,7 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
     if explicit:
         candidates = [lid for lid in lanes if lid in explicit]
     else:
-        candidates = [
-            lid
-            for lid in lanes
-            if cat in (lanes[lid].get("categories") or []) and not lanes[lid].get("explicit_only")
-        ]
+        candidates = default_lanes(cat, lanes)
     prompt = ceil(inputs_bytes / 4)
     # An output cap cannot bound a prompt. What it bounds is the reasoning the model spends
     # on it, which on 2026-09-14's reviews ran about half the prompt (10 279 tokens on a

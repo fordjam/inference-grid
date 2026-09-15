@@ -31,6 +31,7 @@ from ..worker import execute
 from .guard import check_input
 from .land import land
 from .packet_task import dispatch_packet, validate_board_task
+from .plan_task import DRAFTS_FILE, load_drafts, settle_plan
 from .policy import record_waiver, review_needed
 from .task import validate_task
 from .verify_merge import verify_merge
@@ -54,6 +55,9 @@ def model_unsupported_until(record, model, now):
 def load_board(board_dir):
     tasks = {}
     for path in sorted(Path(board_dir).glob("*.json")):
+        if path.name == DRAFTS_FILE:
+            # The plan node's drafts list is board-owned state, not a task file.
+            continue
         task = validate_board_task(json.loads(path.read_text()))
         if task["id"] != path.stem:
             raise ValueError(f"{path.name}: id must match the file name")
@@ -189,6 +193,10 @@ def lane_view(lanes, now):
             "categories": lane["categories"],
             "window_active": active,
             "explicit_only": lane["family"] in ("claude", "openai"),
+            # The operator's model-tier intent: SOTA for plan and review, workhorses for
+            # build. The packaged config's fixed key set cannot carry it (J2 reads it in
+            # route), so an absent tier is build.
+            "tier": lane.get("tier") if isinstance(lane.get("tier"), str) else "build",
             # Budget-fit caps when the operator's config carries them; the packaged
             # config's fixed key set cannot, and route falls back to the go.py policy.
             "max_tokens": lane.get("max_tokens"),
@@ -1027,6 +1035,7 @@ def tick(
     prepare_argv=None,
     dry_run=False,
     auto_land=False,
+    auto_dispatch=False,
 ):
     """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records.
 
@@ -1036,6 +1045,10 @@ def tick(
     `candidates` (rows naming each offered lane and the max_tokens cap it would run
     under), `dropped` (lanes filtered out with reasons and the two token numbers,
     budget_unfit foremost) and `score`.
+
+    A packet task the plan node authored waits in the board's drafts list (`draft`) until
+    the operator releases it or the pass runs with auto_dispatch; the plan task itself
+    runs only on a lane marked tier `plan`.
 
     With auto_land the pass ends by landing every `passed` packet task through
     board.land (one landing at a time per base, a lock under packets_root); the pass's
@@ -1048,6 +1061,7 @@ def tick(
     """
     now = time.time() if now is None else now
     results = []
+    drafted = set(load_drafts(board_dir))
     view = lane_view(lanes, now)
     scorecard = ledger.scorecard()
     calibration = calibration_reports(ledger)
@@ -1075,6 +1089,12 @@ def tick(
                 )
                 continue
             results.append(settle_verify_merge(path, task, project_root, packets_root))
+            continue
+        if task["category"] == "packet" and task_id in drafted and not auto_dispatch:
+            # The plan node drafts a packet task and records it here: nothing is
+            # dispatched to build until the operator releases it or the board sets
+            # auto_dispatch. The default is to draft, not to build.
+            results.append({"task": task_id, "lane": None, "attempt": None, "result": "draft"})
             continue
         clash = shadowing_names(task)
         if clash:
@@ -1108,21 +1128,47 @@ def tick(
                 lane_id: dict(lane, categories=list(lane.get("categories") or []) + ["canary"])
                 for lane_id, lane in view.items()
             }
+        elif task["category"] == "plan":
+            # Category plan is declared by the lanes the operator marks tier: plan (J2).
+            # Planning on any other tier is refused before selection, and only the
+            # plan-tier lanes are offered (with `plan` implicitly among their categories,
+            # the way a canary is).
+            wrong = sorted(
+                lane_id
+                for lane_id in task["lanes"]
+                if (lanes.get(lane_id) or {}).get("tier") != "plan"
+            )
+            if wrong:
+                results.append(
+                    {
+                        "task": task_id,
+                        "lane": None,
+                        "attempt": None,
+                        "result": "plan_requires_tier_plan: " + ", ".join(wrong),
+                    }
+                )
+                continue
+            lanes_view = {
+                lane_id: dict(lane, categories=list(lane.get("categories") or []) + ["plan"])
+                for lane_id, lane in view.items()
+                if lane.get("tier") == "plan"
+            }
         task_readiness = {}
         for lane_id in view:
             entry = dict(readiness[lane_id])
             # A packet, like a canary, may run on an unverified or unqualified lane: it
             # names its lanes explicitly, and no packet could ever run to earn the
             # qualification rows in the first place. A recently model-refused lane stays
-            # closed — no packet fixes a 401 by re-probing it.
+            # closed — no packet fixes a 401 by re-probing it. A plan task is the same:
+            # the lane is named by the operator and no category rows exist to earn.
             if (
-                task["category"] in ("canary", "packet")
+                task["category"] in ("canary", "packet", "plan")
                 and entry.get("state") in ("unverified", "unqualified")
                 and entry.get("reason") != "model_refused_recently"
             ):
                 entry["state"] = "ready"
             if (
-                task["category"] not in ("canary", "packet")
+                task["category"] not in ("canary", "packet", "plan")
                 and entry.get("state") == "ready"
                 and task["category"] not in entry.get("qualified_for", [])
             ):
@@ -1279,6 +1325,34 @@ def tick(
             )
             save_task(path, task, state="blocked", blocked_reason=reason)
             results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"})
+            continue
+        if task["category"] == "plan":
+            # The plan node settles by code: the lane's packet.md becomes a drafted
+            # packet task, or the task blocks with the validation error. No review task
+            # is spawned for a draft, and no build is dispatched until it is released.
+            try:
+                created = settle_plan(task, board_dir, project_root, output_dir, view)
+            except (OSError, ValueError, FileExistsError) as exc:
+                ledger.record_outcome(aid, "plan", False, note=str(exc)[:300])
+                save_task(path, task, state="blocked", blocked_reason=("plan: " + str(exc))[:300])
+                results.append(
+                    {"task": task_id, "lane": lane_id, "attempt": aid, "result": "blocked"}
+                )
+                continue
+            ledger.record_outcome(aid, "plan", True, note=f"drafted {created['id']}")
+            save_task(path, task, state="passed", blocked_reason=None)
+            results.append(
+                {
+                    "task": task_id,
+                    "lane": lane_id,
+                    "attempt": aid,
+                    "result": "passed",
+                    "drafted": created["id"],
+                    "candidates": choice["candidates"],
+                    "dropped": choice["dropped"],
+                    "score": choice["score"],
+                }
+            )
             continue
         if task["category"] == "packet":
             # The loop's gates ran as code inside the attempt (its outcome is already
