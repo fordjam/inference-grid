@@ -11,9 +11,16 @@ A ``calibration`` block in the config (``corpus_dir``, ``lanes``, ``every_days``
 loop author a calibration run once the newest scored run is older than ``every_days``: the
 ledger's own calibration outcomes are the clock, so a run in flight does not stop it. The
 run is a board task the board-tick steps through; no lane runs the calibration itself.
+
+A SIGTERM or SIGINT starts a drain: the board tick in flight (the packet loop's rounds
+included) finishes, the remaining boards of the pass are skipped and the loop exits; a
+second signal within 30 s exits at once. While draining the loop writes ``draining`` to a
+state file beside the log, so the operator can see why the restart is slow.
 """
 
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -24,6 +31,7 @@ DEFAULT_DIR = Path.home() / ".local/share/inference-grid-capacity"
 IDLE_SECONDS = 1800
 BUSY_SECONDS = 300
 CALIBRATION_EVERY_DAYS = 7
+DRAIN_GRACE_SECONDS = 30
 
 
 def default_prepare(config):
@@ -140,6 +148,46 @@ def default_calibrate(config, now=None):
     return created["id"]
 
 
+class Drain:
+    """The first SIGTERM/SIGINT starts the drain; a second within the grace exits at once.
+
+    The state file beside the log carries ``draining`` while the loop finishes the board
+    tick in flight, so a slow restart is explained; ``clear`` drops it when the drain
+    completes and when a restarting process finds a marker a forced exit left behind.
+    """
+
+    def __init__(self, state_path, clock=time.time, exit=os._exit):
+        self.state_path = Path(state_path)
+        self.draining = False
+        self.since = None
+        self._clock = clock
+        self._exit = exit
+
+    def on_signal(self, signum, frame):
+        if not self.draining:
+            self.draining = True
+            self.since = self._clock()
+            try:
+                self.state_path.write_text("draining\n")
+            except OSError:
+                pass
+        elif self._clock() - self.since <= DRAIN_GRACE_SECONDS:
+            self._exit(128 + signum)
+
+    def clear(self):
+        try:
+            self.state_path.unlink()
+        except OSError:
+            pass
+
+
+def install_drain(drain):
+    """SIGTERM and SIGINT both start the drain; the previous handlers are the caller's."""
+    signal.signal(signal.SIGTERM, drain.on_signal)
+    signal.signal(signal.SIGINT, drain.on_signal)
+    return drain
+
+
 def run(
     boards,
     deadline,
@@ -150,20 +198,27 @@ def run(
     idle=IDLE_SECONDS,
     busy=BUSY_SECONDS,
     calibrate=None,
+    drain=None,
 ):
     """Prepare before every board; the ready count decides the sleep. Returns the last count.
 
     ``calibrate`` (optional) runs once per pass before the boards: the weekly calibration
     author is idempotent per run, so a pass that finds a run in flight authors nothing.
+    ``drain`` (optional) ends the loop after the board tick in flight: the pass's remaining
+    boards are skipped and no further pass or sleep is started.
     """
     ready = 0
-    while clock() < deadline:
+    while clock() < deadline and not (drain and drain.draining):
         if calibrate:
             calibrate()
         ready = 0
         for board in boards:
+            if drain and drain.draining:
+                break
             prepare()
             ready += tick(board)
+        if drain and drain.draining:
+            break
         print(time.strftime("%FT%TZ", time.gmtime()), "ready tasks left across boards:", ready)
         sleep(idle if ready == 0 else busy)
     return ready
@@ -178,14 +233,21 @@ def main(argv=None):
     # loop runs a day and lets launchd start it again.
     boards = [b["name"] if isinstance(b, dict) else b for b in config["boards"]]
     deadline = config.get("deadline") or time.time() + 86400
-    run(
-        boards,
-        deadline,
-        lambda: default_prepare(config),
-        lambda board: default_tick(board, config),
-        time.sleep,
-        calibrate=lambda: default_calibrate(config),
-    )
+    log_path = Path(config.get("log_path", DEFAULT_DIR / "tick-boards.log"))
+    drain = install_drain(Drain(log_path.with_suffix(".draining")))
+    drain.clear()
+    try:
+        run(
+            boards,
+            deadline,
+            lambda: default_prepare(config),
+            lambda board: default_tick(board, config),
+            time.sleep,
+            calibrate=lambda: default_calibrate(config),
+            drain=drain,
+        )
+    finally:
+        drain.clear()
 
 
 if __name__ == "__main__":
