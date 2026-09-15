@@ -37,6 +37,10 @@ def default_prepare(config):
         subprocess.run(argv, stdout=log, stderr=log, timeout=300, check=True)
 
 
+# 8 rounds of an hour plus gates: the longest packet the task validator admits.
+TICK_TIMEOUT = 8 * 3600 + 1800
+
+
 def default_tick(board, config):
     """One ``inference-grid board-tick`` for the board; returns its ready-task count.
 
@@ -52,7 +56,20 @@ def default_tick(board, config):
         if config.get("database_url"):
             argv += ["--database", config["database_url"]]
         argv += ["board-tick", "--json", str(out)]
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=3600)
+        # A packet may run max_rounds (up to 8) rounds of wall_seconds (up to 3600) each, and
+        # a tick returns only when every attempt it started has settled. The old 3600 s cap
+        # here killed every packet past its first hour and, being uncaught, took the runtime
+        # with it — launchd respawned it and the orphaned attempts stayed "dispatching".
+        try:
+            done = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=config.get("tick_timeout", TICK_TIMEOUT),
+            )
+        except subprocess.TimeoutExpired as exc:
+            log.write(f"tick {board} exceeded {exc.timeout}s and was stopped\n")
+            return count_ready(json.loads(out.read_text()).get("board_dir")) if out.exists() else 0
         log.write(done.stderr)
         # board-tick reads its configuration from the --json file and prints the pass's
         # results to stdout: one row per ready task, with the lane and outcome when dispatched.

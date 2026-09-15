@@ -856,3 +856,31 @@ class InstallTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TickTimeoutTests(unittest.TestCase):
+    def test_a_tick_past_the_timeout_is_logged_not_fatal(self):
+        """A board whose packets outrun the timeout costs that board's pass, never the runtime."""
+        import subprocess as sp
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            (tmp / "board").mkdir()
+            out = tmp / "tick-b.json"
+            out.write_text(json.dumps({"board_dir": str(tmp / "board")}))
+            config = {"tick_dir": str(tmp), "log_path": str(tmp / "log"), "tick_timeout": 1}
+            calls = []
+
+            def fake_run(argv, **kw):
+                calls.append(kw.get("timeout"))
+                raise sp.TimeoutExpired(argv, kw.get("timeout"))
+
+            with mock.patch.object(tick_boards.subprocess, "run", fake_run):
+                ready = tick_boards.default_tick("b", config)
+            self.assertEqual(calls, [1])
+            self.assertEqual(ready, 0)
+            self.assertIn("exceeded 1s", (tmp / "log").read_text())
+
+    def test_the_default_timeout_outlasts_the_longest_admissible_packet(self):
+        self.assertGreaterEqual(tick_boards.TICK_TIMEOUT, 8 * 3600)
