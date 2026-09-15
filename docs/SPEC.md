@@ -26,6 +26,8 @@ This decision follows negative-control evaluations of competing claim/dispatch b
 
 The worker passes one JSON request on stdin containing attempt, generation, requested model, manifest hash, input directory and output directory. The adapter writes artifacts and emits exactly one terminal JSON receipt on stdout: `status=completed`, `finish_reason=stop`, `actual_model`, `manifest_sha256`, and nonempty `artifacts` with relative path/SHA-256. Native adapter logs belong in bounded stderr. An adapter must implement its own provider-token/output bound and expose its native completion facts; the worker cannot infer a native token budget from stdout size.
 
+Board task category `packet`: the task file carries, beside the standard keys, a `spec` of exactly `{brief, packet_id, gates, base, max_rounds?}` — the brief document path (the task's own `brief`), a `#### <id>.` heading inside it, code gates (`{name, argv, cwd?, timeout?, env?}`), the base branch, and an optional round bound. Dispatch opens the ledger attempt before the loop, runs the build→gate→re-enter loop in a scratch clone branched from `base`, and settles the attempt from the loop's verdict; on green gates the branch is fetched into the project as `packet/<task-id>` (docs/BOARD.md, "Packet tasks").
+
 ## State machine
 
 `queued → dispatching → completed → accepted`; `queued/dispatching → held` on stale admission or uncertainty; `held → abandoned | failed` only through operator `resolve`. Admission and an outbox row commit together. Generation plus state compare-and-set fences completion and duplicate start. Account reservations span five-hour, weekly and other explicitly configured windows. Account aliases cannot be reassigned. Workspace exclusion applies across accounts and projects.

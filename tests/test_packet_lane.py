@@ -199,3 +199,23 @@ def test_external_skeletons_carry_the_verdict_s_verification_flag(tmp_path):
     assert doc["receipt"]["verified_in_lane"] is False
     assert doc["receipt"]["operator_gates"] == ["playwright"]
     assert doc["category"] == "FILL" and doc["accepted"] is None
+
+
+def test_zcode_adapter_flags_and_session_id(tmp_path):
+    """Headless first run and resume flags; the session id comes from the final document."""
+    from inference_grid.lanes.packet import ZcodeAdapter
+
+    zc = ZcodeAdapter(work=tmp_path)
+    first = zc.first("build it")
+    assert "--prompt" in first and "build it" in first
+    assert "--mode" in first and "--json" in first and "--no-color" in first
+    assert first[first.index("--cwd") + 1] == str(tmp_path)
+    resumed = zc.resume("sess_9", "fix it")
+    assert resumed[resumed.index("--resume") + 1] == "sess_9"
+    assert resumed[resumed.index("--prompt") + 1] == "fix it"
+    wrapped = ZcodeAdapter(work=tmp_path, wrapper="/usr/bin/limit")
+    assert wrapped.first("go")[:2] == ["/usr/bin/limit", wrapped.binary]
+    log = tmp_path / "native.jsonl"
+    log.write_text('{"sessionId": "s-77", "response": "done"}\n')
+    assert zc.session_id(log) == "s-77"
+    assert zc.session_id(tmp_path / "absent.jsonl") is None

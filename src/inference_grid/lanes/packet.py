@@ -127,6 +127,59 @@ class CommandCodeAdapter(Adapter):
         return _first_match(native_jsonl, r'"sessionId"\s*:\s*"([^"]+)"')
 
 
+class ZcodeAdapter(Adapter):
+    """The ZCode CLI headless, re-entering the session it persisted.
+
+    Flags relied on — the invocation and its evidence are lanes/zcode.py's: `--prompt`
+    runs headless, `--mode yolo` grants the tools, `--json` makes the final stdout
+    document carry `sessionId`, `--no-color` keeps stdout parsable, `--cwd` pins the
+    worktree, and a later round resumes with `--resume <sessionId>` plus a fresh
+    `--prompt`. No model is passed: the CLI serves the model of its own session login.
+    """
+
+    name = "zcode"
+
+    def __init__(
+        self,
+        work: Optional[Path] = None,
+        binary: str = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+        wrapper: Optional[str] = None,
+        mode: str = "yolo",
+    ):
+        self.work, self.binary, self.wrapper, self.mode = work, binary, wrapper, mode
+
+    def _head(self) -> List[str]:
+        return [self.wrapper, self.binary] if self.wrapper else [self.binary]
+
+    def _tail(self, prompt: str) -> List[str]:
+        argv = ["--prompt", prompt, "--mode", self.mode, "--json", "--no-color"]
+        if self.work is not None:
+            argv += ["--cwd", str(self.work)]
+        return argv
+
+    def first(self, prompt: str) -> List[str]:
+        return self._head() + self._tail(prompt)
+
+    def resume(self, session_id: str, prompt: str) -> List[str]:
+        return self._head() + ["--resume", session_id] + self._tail(prompt)
+
+    def session_id(self, native_jsonl: Path) -> Optional[str]:
+        try:
+            raw = native_jsonl.read_bytes()
+        except OSError:
+            return None
+        start = raw.find(b"{")
+        if start < 0:
+            return None
+        try:
+            document = json.loads(raw[start:])
+        except ValueError:
+            return None
+        if isinstance(document, dict) and isinstance(document.get("sessionId"), str):
+            return document["sessionId"]
+        return None
+
+
 class OpencodeAdapter(Adapter):
     """`opencode run --format json`; resumes with `--session`."""
 

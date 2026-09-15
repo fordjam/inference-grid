@@ -28,6 +28,7 @@ from ..ledger import ACTIVE, Refused, classifier_view, digest, lanes as lane_rec
 from ..ledger import aliases as alias_records, attempts as attempt_records
 from ..worker import execute
 from .guard import check_input
+from .packet_task import dispatch_packet, validate_board_task
 from .task import validate_task
 from ..lanes.select import select_lane
 
@@ -49,7 +50,7 @@ def model_unsupported_until(record, model, now):
 def load_board(board_dir):
     tasks = {}
     for path in sorted(Path(board_dir).glob("*.json")):
-        task = validate_task(json.loads(path.read_text()))
+        task = validate_board_task(json.loads(path.read_text()))
         if task["id"] != path.stem:
             raise ValueError(f"{path.name}: id must match the file name")
         tasks[task["id"]] = (path, task)
@@ -58,7 +59,7 @@ def load_board(board_dir):
 
 def save_task(path, task, **changes):
     updated = dict(task, **changes)
-    validate_task(updated)
+    validate_board_task(updated)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(updated, indent=1) + "\n")
     tmp.replace(path)
@@ -358,6 +359,11 @@ def dispatch(
 ):
     """Submit, claim and execute one attempt for the task on the lane; returns (aid, state, output_dir)."""
     lane = lanes[lane_id]
+    if task["category"] == "packet":
+        # The build→gate→re-enter loop: admission first, the loop inside this process.
+        return dispatch_packet(
+            ledger, lanes, lane_id, task, project_root, packet_dir, account_alias
+        )
     if input_dir is None:
         input_dir, manifest = stage_packet(project_root, task, packet_dir)
     else:
@@ -877,14 +883,18 @@ def tick(
         task_readiness = {}
         for lane_id in allowed:
             entry = dict(readiness[lane_id])
+            # A packet, like a canary, may run on an unverified or unqualified lane: it
+            # names its lanes explicitly, and no packet could ever run to earn the
+            # qualification rows in the first place. A recently model-refused lane stays
+            # closed — no packet fixes a 401 by re-probing it.
             if (
-                task["category"] == "canary"
+                task["category"] in ("canary", "packet")
                 and entry.get("state") in ("unverified", "unqualified")
                 and entry.get("reason") != "model_refused_recently"
             ):
                 entry["state"] = "ready"
             if (
-                task["category"] != "canary"
+                task["category"] not in ("canary", "packet")
                 and entry.get("state") == "ready"
                 and task["category"] not in entry.get("qualified_for", [])
             ):
@@ -993,12 +1003,38 @@ def tick(
             # it, so the board only records the block with the hold reason. A transport
             # timeout names its bounds, and a 401/403 from the endpoint excludes the model
             # from this lane for a day.
+            if task["category"] == "packet":
+                # The loop already spent its bounded rounds; the verdict names what
+                # happened and the branch stays in the attempt directory for the operator.
+                verdict = read_verdict(packet_dir, aid) or {}
+                detail = (
+                    f"packet loop {verdict.get('reason')}"
+                    if verdict.get("reason")
+                    else f"{state}; resolve with evidence"
+                )
+                save_task(
+                    path,
+                    task,
+                    state="blocked",
+                    blocked_reason=(f"attempt {aid} held: {detail}; branch left for the operator")[
+                        :300
+                    ],
+                )
+                results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"})
+                continue
             note_model_refusal(ledger, lanes, lane_id, packet_dir, aid)
             reason = hold_block_reason(aid, read_verdict(packet_dir, aid), state) or (
                 f"attempt {aid} {state}; resolve with evidence"
             )
             save_task(path, task, state="blocked", blocked_reason=reason)
             results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"})
+            continue
+        if task["category"] == "packet":
+            # The loop's gates ran as code inside the attempt (its outcome is already
+            # recorded with the verdict's repairs); the branch is the deliverable and no
+            # review task is spawned for it.
+            save_task(path, task, state="passed", blocked_reason=None)
+            results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": "passed"})
             continue
         try:
             passed, summary = run_tests(project_root, task, output_dir, packet_dir / "scratch")
