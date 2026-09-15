@@ -21,6 +21,7 @@ def board_tick(
     dry_run=False,
     boards=None,
     auto_land=False,
+    auto_dispatch=False,
 ):
     from .board.runner import tick as board_run
     from .lanes.runner import load_lanes
@@ -45,6 +46,7 @@ def board_tick(
                             "accounts_by_lane",
                             "packets_root",
                             "auto_land",
+                            "auto_dispatch",
                         )
                         if key in config
                     },
@@ -64,12 +66,13 @@ def board_tick(
         prepare_argv=prepare_argv,
         dry_run=dry_run,
         auto_land=auto_land,
+        auto_dispatch=auto_dispatch,
     )
 
 
 def board_new(
     board_dir,
-    project_root,
+    project_root=None,
     task=None,
     retry=None,
     change=None,
@@ -82,9 +85,19 @@ def board_new(
     include_docs=None,
     exclude_commits=None,
     qualify=None,
+    ticket=None,
+    lane=None,
 ):
     from .board.new import new_task, retry_task
 
+    if ticket is not None:
+        from .board.plan_task import plan_task
+
+        if not lane:
+            raise ValueError("board-new from a ticket needs the lane to plan on")
+        return plan_task(board_dir, ticket, lane)
+    if project_root is None:
+        raise ValueError("board-new needs project_root")
     if qualify is not None:
         from .board.new import qualify_task
 
