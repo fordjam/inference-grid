@@ -130,8 +130,8 @@ def compose_prompt(
         f"- You are on branch `{branch}`, branched from `{base}`. Commit on this branch only.\n"
         f"- Run the suite with `PYTHONPATH=src {python} -m pytest -q -p no:cacheprovider` "
         "(PYTHONPATH matters: the interpreter's installed package is a different checkout). "
-        "Capture the list of failing tests BEFORE you change anything; some sandbox-only "
-        "failures (process-group kills) are pre-existing and must be byte-identical after.\n"
+        "The harness captures the base's failures and judges the branch on the ones it "
+        "introduced; pre-existing failures are named `inherited` in the pytest gate.\n"
         f"- `PYTHONPATH=src {python} -m ruff format` and `-m ruff check` must be clean.\n"
         f"- Finish with exactly ONE commit on this branch whose message explains why and ends "
         f"with the trailer `{trailer}`, one row in docs/CONTRIBUTIONS.md under "
@@ -281,7 +281,14 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
     )
     if args.adapter == "cline":
         env["CLINE_API_KEY"] = cline_key
-    gates = gates_for(args.python, f"origin/{args.base}", trailer_for(args.model))
+    # The pytest gate caches each base commit's failing node ids under the attempt
+    # store, so every packet that shares a base pays for the baseline once.
+    gates = gates_for(
+        args.python,
+        f"origin/{args.base}",
+        trailer_for(args.model),
+        str(Path(args.packets_root).expanduser()),
+    )
     print(f"[{args.lane}] {packet_id} → {branch} (attempt {attempt_dir})", flush=True)
     if resuming:
         (attempt_dir / "gates-0").mkdir(exist_ok=True)

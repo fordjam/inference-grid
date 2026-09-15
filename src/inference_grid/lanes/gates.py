@@ -7,22 +7,38 @@ small function returning a `packet.Gate`, and its check is module-level Python r
 as `python -m inference_grid.lanes.gates <gate> <args>` inside the worktree, so the
 driver writes no script file per attempt.
 
-The checks are read-only: they inspect `git` and run `ruff`, never the repository.
-The only value a check derives from the machine is the operator's home directory,
-read at runtime with `Path.home()` and never written down.
+The pytest gate is baseline-aware: it runs the suite once at the base commit (in a
+scratch worktree, the failing node ids cached per commit under the attempt store)
+and then on the packet's branch, so a packet is judged on the failures it caused,
+not the repository's pre-existing ones (see `run_pytest`); the driver no longer
+asks the agent to capture that baseline by hand.
+
+The checks never touch the repository; the pytest gate writes only its baseline
+cache under the attempt store. The only value a check derives from the machine is
+the operator's home directory, read at runtime with `Path.home()` and never written
+down.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from typing import Callable, Optional
 
 from inference_grid.lanes.packet import Gate
 
 
 def _git(*args: str) -> str:
     return subprocess.run(["git", *args], capture_output=True, text=True).stdout
+
+
+def _git_ok(*args: str) -> bool:
+    return subprocess.run(["git", *args], capture_output=True, text=True).returncode == 0
 
 
 def changed_python_files(base: str) -> list[str]:
@@ -77,10 +93,104 @@ def run_commit(base: str, trailer: str) -> int:
     return 1 if problems else 0
 
 
-def pytest_gate(python: str) -> Gate:
+SUITE_FLAGS = ("-m", "pytest", "-q", "--tb=no", "-p", "no:cacheprovider")
+
+
+def failing_node_ids(output: str) -> list[str]:
+    """The node ids pytest's short summary prints, in order.
+
+    A summary line is `FAILED path::test[params] - message`; the node id is taken up
+    to the ` - ` separator, so a parametrised id with spaces survives.
+    """
+    ids: list[str] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("FAILED "):
+            continue
+        node = line[len("FAILED ") :].split(" - ", 1)[0].strip()
+        if node and node not in ids:
+            ids.append(node)
+    return ids
+
+
+def run_suite(python: str, work: Path) -> str:
+    """The whole suite in `work`, its output returned.
+
+    No `-x`: comparing failures needs every node id, not the first one. `PYTHONPATH`
+    is relative, so each worktree imports the package it holds.
+    """
+    proc = subprocess.run(
+        [python, *SUITE_FLAGS],
+        cwd=work,
+        env=dict(os.environ, PYTHONPATH="src"),
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout + proc.stderr
+
+
+Suite = Callable[[Path], str]
+
+
+def baseline_failures(base: str, cache_dir, python: str, suite: Optional[Suite] = None) -> set[str]:
+    """Failing node ids at `base`, cached per resolved commit under `cache_dir`.
+
+    However many packets sit on one base, the suite runs there once: the scratch
+    worktree is checked out at the base commit, pytest runs in it, and the node ids
+    are read back from `<cache_dir>/pytest-baseline-<sha>.json` after that.
+    """
+    sha = _git("rev-parse", base).strip()
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache = cache_dir / f"pytest-baseline-{sha}.json"
+    try:
+        return set(json.loads(cache.read_text()))
+    except (OSError, ValueError):
+        pass
+    suite = suite or (lambda work: run_suite(python, work))
+    scratch = Path(tempfile.mkdtemp(dir=cache_dir, prefix=f"base-{sha[:12]}-"))
+    try:
+        if not _git_ok("worktree", "add", "--detach", "--force", str(scratch), sha):
+            raise RuntimeError(f"could not check out {base} ({sha}) for the pytest baseline")
+        ids = failing_node_ids(suite(scratch))
+    finally:
+        _git_ok("worktree", "remove", "--force", str(scratch))
+        shutil.rmtree(scratch, ignore_errors=True)
+    tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(sorted(ids)))
+    os.replace(tmp, cache)
+    return set(ids)
+
+
+def run_pytest(
+    base: str, cache_dir, python: Optional[str] = None, suite: Optional[Suite] = None
+) -> int:
+    """Pass when every failure on the branch is one the base already had.
+
+    Pre-existing failures are named on the `inherited:` line (the gate result keeps
+    this output); a node id that failed at base and passes now is named `repaired:`;
+    only a failure the base did not have fails the gate, listed by name.
+    """
+    python = python or sys.executable
+    suite = suite or (lambda work: run_suite(python, work))
+    inherited = baseline_failures(base, cache_dir, python, suite)
+    on_branch = set(failing_node_ids(suite(Path.cwd())))
+    print(f"inherited: {sorted(inherited & on_branch)}")
+    print(f"repaired: {sorted(inherited - on_branch)}")
+    new = sorted(on_branch - inherited)
+    if new:
+        print("new failures:")
+        for node in new:
+            print(f"  {node}")
+        return 1
+    print("no new failures")
+    return 0
+
+
+def pytest_gate(python: str, base: str, cache_dir: str) -> Gate:
     return Gate(
         "pytest",
-        [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-x"],
+        [python, "-m", "inference_grid.lanes.gates", "pytest", base, cache_dir],
         env={"PYTHONPATH": "src"},
         timeout=2400,
     )
@@ -113,10 +223,10 @@ def commit_gate(python: str, base: str, trailer: str) -> Gate:
     )
 
 
-def gates_for(python: str, base: str, trailer: str) -> list[Gate]:
+def gates_for(python: str, base: str, trailer: str, cache_dir: str) -> list[Gate]:
     """The five gates every packet round runs, in order."""
     return [
-        pytest_gate(python),
+        pytest_gate(python, base, cache_dir),
         ruff_gate(python, base, "format"),
         ruff_gate(python, base, "check"),
         home_paths_gate(python, base),
@@ -127,9 +237,11 @@ def gates_for(python: str, base: str, trailer: str) -> list[Gate]:
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
-        print("usage: python -m inference_grid.lanes.gates <ruff|home-paths|commit> <args>")
+        print("usage: python -m inference_grid.lanes.gates <pytest|ruff|home-paths|commit> <args>")
         return 2
     gate, rest = argv[0], argv[1:]
+    if gate == "pytest" and len(rest) == 2:
+        return run_pytest(rest[0], rest[1])
     if gate == "ruff" and len(rest) == 2:
         return run_scoped_ruff(rest[0], rest[1])
     if gate == "home-paths" and len(rest) == 1:
