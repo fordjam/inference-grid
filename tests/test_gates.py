@@ -87,6 +87,19 @@ def test_home_paths_gate_matches_the_runtime_home_in_changed_files_only(
     _commit(repo, "source")
     assert gates.run_home_paths("base") == 0
 
+    # A board task file is the operator's (its gate argv names this machine's
+    # interpreters) and the runner commits it with every landing: never a match.
+    (repo / "grid" / "board").mkdir(parents=True)
+    (repo / "grid" / "board" / "packet-x1.json").write_text(
+        f'{{"argv": ["{home}/.venv/bin/python"]}}\n'
+    )
+    _commit(repo, "board state")
+    assert gates.run_home_paths("base") == 0
+    # ...but a brief or any other file under grid/ still is.
+    (repo / "grid" / "note.md").write_text(f"{home}/projects\n")
+    _commit(repo, "grid note")
+    assert gates.run_home_paths("base") == 1
+
 
 def test_commit_gate_refuses_count_trailer_and_dirty_tree(tmp_path, monkeypatch, capsys):
     repo = _repo(tmp_path / "repo")

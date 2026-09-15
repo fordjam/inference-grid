@@ -63,6 +63,11 @@ def run_scoped_ruff(base: str, mode: str) -> int:
     return subprocess.run([sys.executable, "-m", "ruff", *flags, *files]).returncode
 
 
+def _board_task_file(path: str) -> bool:
+    parts = Path(path).parts
+    return len(parts) >= 3 and parts[-3:-1] == ("grid", "board") and path.endswith(".json")
+
+
 def run_home_paths(base: str) -> int:
     """Refuse a packet that bakes this machine's home directory into a changed file.
 
@@ -72,6 +77,10 @@ def run_home_paths(base: str) -> int:
     """
     home = str(Path.home())
     files = _git("diff", "--name-only", "--diff-filter=AMR", f"{base}...HEAD").split()
+    # Board task files are the operator's: their gate argv names this machine's
+    # interpreters and the board runner rewrites them on every settlement, so a board
+    # kept in git lands a state commit with every packet. No lane authors them.
+    files = [f for f in files if not _board_task_file(f)]
     found = _git("grep", "-n", "-F", home, "HEAD", "--", *files) if files else ""
     print(found or "no home paths in changed files")
     return 1 if found else 0
