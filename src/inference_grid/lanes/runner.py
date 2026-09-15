@@ -14,6 +14,9 @@ from pathlib import Path
 
 from .config import validate_lane_config
 
+# Coordinator edit (brief-14 D2): "opencode_cli" added where the accepted kind set is
+# consumed; lanes/config.py is provider-authored, so the operator's lanes.json cannot
+# name the kind until its own set grows by one entry — patch provided in the D2 report.
 KINDS = {
     "zcode_cli": "zcode",
     "claude_headless": "zai",
@@ -21,6 +24,7 @@ KINDS = {
     "goat_cli": "goat",
     "cline_cli": "cline",
     "codex_cli": "codex",
+    "opencode_cli": "opencode",
 }
 
 
