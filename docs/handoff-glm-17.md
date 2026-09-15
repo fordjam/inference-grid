@@ -123,6 +123,26 @@ Cline) that this serialization makes meaningless.
   ledger events are identical to the serial run's.
 - Size: medium. Why: seven packets are queued behind one.
 
+#### J7. A brief becomes board work: `board-new --from-brief`
+Every repository's backlog lives in `docs/handoff-*.md`; the board holds only what someone
+authored by hand, and "is this item done?" is answered differently in each repository
+(a CONTRIBUTIONS row, a report file, a commit subject). `board-new --json {from_brief:
+<path>, board_dir, project_root, lanes?, gates?, base?}` reads every `#### <id>. <title>`
+packet in the brief and authors one `packet` task per item **not already done**, where done
+means any of: a `docs/reports/*<id-lower>*.md` exists, a CONTRIBUTIONS row begins with
+`| <id> |`, or a commit since the brief's own commit mentions `<id>` in its subject with
+the brief's number (`brief 16, I2` / `(brief 14 A1)` / `[handoff-6/B1]` — accept the three
+shapes seen in this repository, yt-research-mcp and factory-frontend). Each task's brief file
+carries the umbrella brief's section 1 (found by `## 1. Hard rules` prefix, closed by `---`,
+as `lanes/brief.py` expects) plus the item; gates default to the repository's declared test
+command when the board config names one (`test_argv` in the tick config) and the commit
+gate always. Items judged done are listed in the reply with the evidence that decided it;
+`dry_run` prints the plan.
+- Tests: three "done" signals each recognised; an undone item authored with the right
+  lanes and gates; a brief with a rules section that lacks the closing rule is refused
+  with the line to add; the CLI round trip.
+- Size: medium. Why: the coordinator surveyed six repositories by hand and got two wrong.
+
 ---
 
 ## Definition of done, per packet
