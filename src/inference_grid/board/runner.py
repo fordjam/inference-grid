@@ -948,6 +948,65 @@ def settle_verify_merge(path, task, project_root, packets_root):
     }
 
 
+def step_calibration_run(path, task, board_dir, project_root, ledger, packets_root, dry_run=False):
+    """Drive the calibration_run code node one pass: author, wait, then score and pass.
+
+    No lane, no ledger attempt, no quota. The first pass authors one independent_review
+    task per corpus case (author_calibration); later passes wait until every case's review
+    task has settled, then score them through score_calibration(record=True) and settle
+    the run `passed` with the per-lane recall and precision in the result. A dry run plans
+    without authoring or scoring. A corpus that cannot be authored or scored blocks the
+    run with the reason, never the tick.
+    """
+    from .calibration import author_calibration, calibration_settled, score_calibration
+
+    spec = task["spec"]
+    run_id = spec["run_id"]
+    if dry_run:
+        return {"task": task["id"], "lane": None, "attempt": None, "result": "calibration_run"}
+    if task["state"] == "ready":
+        try:
+            author_calibration(
+                board_dir, project_root, spec["corpus_dir"], list(spec["lanes"]), run_id
+            )
+        except Exception as exc:  # noqa: BLE001 — a bad corpus blocks the run, not the tick
+            save_task(
+                path, task, state="blocked", blocked_reason=("calibration: " + str(exc))[:300]
+            )
+            return {"task": task["id"], "lane": None, "attempt": None, "result": "blocked"}
+        save_task(path, task, state="review_pending", blocked_reason=None)
+        return {"task": task["id"], "lane": None, "attempt": None, "result": "authored"}
+    settled, pending = calibration_settled(board_dir, run_id)
+    if not settled:
+        return {
+            "task": task["id"],
+            "lane": None,
+            "attempt": None,
+            "result": f"waiting on {len(pending)} case(s)",
+        }
+    try:
+        report = score_calibration(board_dir, run_id, packets_root, record=True, ledger=ledger)
+    except Exception as exc:  # noqa: BLE001
+        save_task(path, task, state="blocked", blocked_reason=("calibration: " + str(exc))[:300])
+        return {"task": task["id"], "lane": None, "attempt": None, "result": "blocked"}
+    save_task(path, task, state="passed", blocked_reason=None)
+    recall = {
+        lane: {
+            "recall": entry["recall"],
+            "precision": entry["precision"],
+            "cases": entry["cases"],
+        }
+        for lane, entry in report["lanes"].items()
+    }
+    return {
+        "task": task["id"],
+        "lane": None,
+        "attempt": None,
+        "result": "passed",
+        "reviewer_recall": recall,
+    }
+
+
 def tick(
     board_dir,
     project_root,
@@ -987,6 +1046,16 @@ def tick(
     readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
     board = load_board(board_dir)
     for task_id, (path, task) in board.items():
+        if task["category"] == "calibration_run" and task["state"] in ("ready", "review_pending"):
+            # The calibration run is a code node the runner steps through across passes:
+            # author the per-case reviews, wait for them to settle, then score and pass.
+            # It is read before the ready gate because a waiting run sits in review_pending.
+            results.append(
+                step_calibration_run(
+                    path, task, board_dir, project_root, ledger, packets_root, dry_run
+                )
+            )
+            continue
         if task["state"] != "ready":
             continue
         if task["category"] == "verify_merge":

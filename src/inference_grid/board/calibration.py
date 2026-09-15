@@ -13,11 +13,14 @@ answer keys and reports recall, false positives and weighted recall per lane.
 
 import json
 import re
+import time
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from .guard import check_input, check_name
 from .branch_review import _plan_task, _safe_rel, _write_files
 from .runner import parse_review
+from .task import validate_task
 
 # Task-id charset: ids are `calib-<run_id>-<case>`, so both parts are constrained.
 NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
@@ -27,6 +30,10 @@ DIFF_PATH = re.compile(r"^diff --git a/(.+?) b/(.+)$", re.MULTILINE)
 AUTHOR_FAMILY = "calibration"
 SEVERITY_WEIGHTS = {"high": 3, "medium": 2, "low": 1}
 DEFECT_KEYS = {"id", "file", "must_mention", "severity", "note"}
+# A calibration_run is code, not a model call: no lane runs it, no artifacts come back.
+RUN_BUDGET = {"wall_seconds": 60, "output_bytes": 100000, "thinking_tokens": None}
+# The per-case review task states that count as settled: approved (passed) or refused (blocked).
+SETTLED_STATES = ("passed", "blocked")
 
 
 def diff_paths(patch):
@@ -201,6 +208,179 @@ def author_calibration(board_dir, project_root, corpus_dir, lanes, run_id):
     return {"tasks": summaries, "manifest": str(manifest)}
 
 
+# --- the run as a code node (I3) ---
+
+
+def validate_calibration_run_task(raw):
+    """The calibration_run shape: the standard task keys plus spec {corpus_dir, lanes, run_id}.
+
+    board/task.py is provider-authored (integrated unmodified), so the shared key checks
+    run on a copy whose category it accepts. The node is code, not work: it stages nothing
+    and produces no artifacts, so `inputs`, `tests` and `artifacts` may be empty — the
+    validator fills placeholders only to satisfy the shared checks. Everything specific to
+    a calibration run is checked below.
+    """
+
+    def err(k, m):
+        raise ValueError(k + ": " + m)
+
+    if not isinstance(raw, dict):
+        err("task", "expected a dict")
+    if raw.get("category") != "calibration_run":
+        err("category", "expected calibration_run")
+    if "spec" not in raw:
+        err("task", "missing spec key")
+    core = {k: v for k, v in raw.items() if k != "spec"}
+    core["category"] = "pure_function"
+    if not isinstance(core.get("brief"), str) or not core["brief"]:
+        err("brief", "must be a non-empty str")
+    core["inputs"] = [core["brief"]]
+    core["artifacts"] = core["artifacts"] or ["report.json"]
+    core["lanes"] = core["lanes"] or ["code-node"]
+    validate_task(core)
+    spec = raw["spec"]
+    if not isinstance(spec, dict):
+        err("spec", "expected a dict")
+    required = {"corpus_dir", "lanes", "run_id"}
+    missing = required - set(spec)
+    unknown = set(spec) - required
+    if missing:
+        err("spec", "missing keys: " + ", ".join(sorted(missing)))
+    if unknown:
+        err("spec", "unknown keys: " + ", ".join(sorted(unknown)))
+    if not isinstance(spec["corpus_dir"], str) or not spec["corpus_dir"]:
+        err("spec", "corpus_dir must be a non-empty str")
+    if not isinstance(spec["run_id"], str) or not NAME.fullmatch(spec["run_id"]):
+        err("spec", "run_id must match [a-z0-9-]")
+    lanes = spec["lanes"]
+    if (
+        not isinstance(lanes, list)
+        or not lanes
+        or not all(isinstance(lane, str) and NAME.fullmatch(lane) for lane in lanes)
+    ):
+        err("spec", "lanes must be a non-empty list of lane ids")
+    out = {
+        k: (dict(v) if k == "budget" else list(v) if isinstance(v, list) else v)
+        for k, v in raw.items()
+        if k != "spec"
+    }
+    out["spec"] = {
+        "corpus_dir": spec["corpus_dir"],
+        "lanes": list(lanes),
+        "run_id": spec["run_id"],
+    }
+    return out
+
+
+def calibration_task(board_dir, corpus_dir, lanes, run_id):
+    """Author the one calibration_run board task for run_id; idempotent per run_id.
+
+    The task is a code node: the runner authors the per-case review tasks on the first
+    pass and, once they have all settled, scores them and settles the run `passed` with
+    the per-lane recall and precision. No lane ever runs it, so it carries no inputs or
+    artifacts and the brief is documentation. Re-authoring the same run_id returns the
+    existing task instead of refusing: the weekly trigger may fire again before the run
+    has been scored.
+    """
+    if not isinstance(run_id, str) or not NAME.fullmatch(run_id):
+        raise ValueError("run_id must match [a-z0-9-]")
+    if not isinstance(lanes, list) or not lanes:
+        raise ValueError("calibration needs a non-empty list of lanes")
+    if not isinstance(corpus_dir, str) or not corpus_dir:
+        raise ValueError("corpus_dir must be a non-empty str")
+    board_dir = Path(board_dir)
+    task_id = "calibration-" + run_id
+    if len(task_id) > 60:
+        raise ValueError(f"task id would exceed 60 chars: {task_id}")
+    task_path = board_dir / (task_id + ".json")
+    if task_path.exists():
+        return {"id": task_id, "task": str(task_path), "run_id": run_id, "existing": True}
+    brief_rel = str(Path("grid") / "briefs" / (task_id + ".txt"))
+    task = {
+        "id": task_id,
+        "category": "calibration_run",
+        "brief": brief_rel,
+        "inputs": [],
+        "tests": [],
+        "artifacts": [],
+        "lanes": list(dict.fromkeys(lanes)),
+        "author_family": None,
+        "budget": dict(RUN_BUDGET),
+        "state": "ready",
+        "blocked_reason": None,
+        "spec": {"corpus_dir": corpus_dir, "lanes": list(lanes), "run_id": run_id},
+    }
+    task = validate_calibration_run_task(task)
+    board_dir.mkdir(parents=True, exist_ok=True)
+    task_path.write_text(json.dumps(task, indent=1) + "\n")
+    brief_path = board_dir.parent.parent / brief_rel
+    brief_path.parent.mkdir(parents=True, exist_ok=True)
+    brief_path.write_text(
+        "Calibration run "
+        + run_id
+        + " for lanes "
+        + ", ".join(lanes)
+        + ". This is a code node: it authors one independent_review task per corpus "
+        "case, scores them when every case has settled, and settles itself passed with "
+        "the per-lane recall and precision. No lane runs it.\n"
+    )
+    return {
+        "id": task_id,
+        "task": str(task_path),
+        "brief": str(brief_path),
+        "run_id": run_id,
+        "existing": False,
+    }
+
+
+def calibration_settled(board_dir, run_id):
+    """(all_settled, pending): per-case review tasks not yet in a terminal state.
+
+    The manifest author_calibration wrote names every case task; a case is settled when
+    its board task reached `passed` (approved) or `blocked` (refused). A missing manifest
+    is never "settled" — the run waits rather than scoring a run it cannot enumerate.
+    """
+    manifest_path = Path(board_dir) / "calibration" / run_id / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        return False, [run_id]
+    pending = []
+    for task_id in manifest.get("tasks") or []:
+        try:
+            state = json.loads((Path(board_dir) / (task_id + ".json")).read_text()).get("state")
+        except (OSError, ValueError, AttributeError):
+            state = None
+        if state not in SETTLED_STATES:
+            pending.append(task_id)
+    return not pending, pending
+
+
+def newest_calibration_at(ledger):
+    """The newest instant a calibration case outcome was recorded, or None.
+
+    score_calibration(record=True) records one `calibration` outcome per settled case;
+    the ledger's own event timestamps are the durable state the weekly trigger reads, so
+    a run's presence on disk is never mistaken for a scored one.
+    """
+    from sqlalchemy import select
+
+    from ..ledger import events as event_records
+
+    newest = None
+    with ledger.engine.connect() as con:
+        rows = con.execute(
+            select(event_records).where(event_records.c.kind == "outcome_recorded")
+        ).mappings()
+        for event in rows:
+            detail = event["detail"]
+            if isinstance(detail, dict) and detail.get("category") == "calibration":
+                at = event["at"]
+                if isinstance(at, (int, float)) and (newest is None or at > newest):
+                    newest = at
+    return newest
+
+
 # --- scoring (K3) ---
 
 
@@ -282,7 +462,7 @@ def _markdown_table(header, rows):
     return "\n".join([head, rule] + ["| " + " | ".join(map(str, row)) + " |" for row in rows])
 
 
-def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None):
+def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None, now=None):
     """Compare each calibration task's settled reply against its answer key.
 
     Per lane: cases reviewed, defects total, recalled, recall, false positives,
@@ -290,8 +470,10 @@ def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None
     report is written to <board_dir>/calibration/<run_id>/report.json and a markdown
     table is printed. Nothing reaches the ledger unless record=True — then each case's
     attempt gets one `record_outcome` with category "calibration" and accepted = (all
-    defects recalled and no false positives).
+    defects recalled and no false positives). `scored_at` (ISO 8601 UTC) is stamped into
+    the report so the overlay can name the newest run per lane.
     """
+    now = time.time() if now is None else now
     run_dir = Path(board_dir) / "calibration" / run_id
     manifest = json.loads((run_dir / "manifest.json").read_text())
     lanes = manifest.get("lanes") or []
@@ -344,7 +526,11 @@ def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None
         rows.append(row)
         per_lane.setdefault(lane, []).append(row)
 
-    report = {"run_id": run_id, "lanes": {}}
+    report = {
+        "run_id": run_id,
+        "scored_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+        "lanes": {},
+    }
     printed = []
     for lane, lane_rows in sorted(per_lane.items()):
         defects = sum(r["defects"] for r in lane_rows)

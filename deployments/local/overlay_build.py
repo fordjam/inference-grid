@@ -319,7 +319,12 @@ def operator_lists(config):
             owner_decisions=config.get("owner_decisions"),
         )
     except Exception as exc:  # noqa: BLE001 — the overlay must still be written
-        return {"operator": [], "accepted_work": [], "operator_error": type(exc).__name__}
+        return {
+            "operator": [],
+            "accepted_work": [],
+            "reviewer_recall": [],
+            "operator_error": type(exc).__name__,
+        }
 
 
 def write(overlay, config):
