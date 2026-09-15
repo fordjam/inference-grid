@@ -110,10 +110,15 @@ def read_key(credential_path):
         document = json.loads(path.read_text())
     except ValueError:
         return None, "credential file is not valid JSON"
-    entry = document.get("opencode-go") if isinstance(document, dict) else None
-    key = entry.get("key") if isinstance(entry, dict) else None
+    # Two shapes: OpenCode's own auth.json ({"opencode-go": {"key": ...}}) for the Go
+    # subscription, and the grid's credential file ({"api_key": ...}) for any other
+    # provider the lane kind is pointed at (ClinePass).
+    key = None
+    if isinstance(document, dict):
+        entry = document.get("opencode-go")
+        key = entry.get("key") if isinstance(entry, dict) else document.get("api_key")
     if not isinstance(key, str) or not key:
-        return None, "credential opencode-go key is empty"
+        return None, "credential key is empty (expected opencode-go.key or api_key)"
     return key, None
 
 

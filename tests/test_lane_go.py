@@ -139,7 +139,8 @@ class GoLaneTests(unittest.TestCase):
         self.credential.write_text(json.dumps({"opencode-go": {"type": "api", "key": ""}}))
         receipt, verdict = go.run(request, self.lane, attempt, send=self.send(self.native()))
         self.assertEqual(
-            (receipt, verdict["refusal"]), (None, "credential opencode-go key is empty")
+            (receipt, verdict["refusal"]),
+            (None, "credential key is empty (expected opencode-go.key or api_key)"),
         )
 
     def test_qualification_refusals(self):
@@ -661,3 +662,18 @@ class ProviderEndpointTests(unittest.TestCase):
             self.assertEqual(verdict["refusal"], "unknown provider: goat")
         finally:
             tmp.cleanup()
+
+
+def test_read_key_accepts_the_grid_credential_shape(tmp_path):
+    """A provider other than OpenCode (ClinePass) supplies {"api_key": ...}."""
+    import json
+    import os
+
+    from inference_grid.lanes.go import read_key
+
+    f = tmp_path / "k.json"
+    f.write_text(json.dumps({"api_key": "abc"}))
+    os.chmod(f, 0o600)
+    assert read_key(f) == ("abc", None)
+    f.write_text(json.dumps({"api_key": ""}))
+    assert read_key(f)[0] is None
