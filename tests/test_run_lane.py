@@ -109,3 +109,21 @@ def test_commit_gate_requires_one_trailered_commit_and_a_clean_tree(tmp_path):
     assert out.returncode == 1 and "not clean" in out.stdout
     (repo / "dirty.txt").unlink()
     assert run().returncode == 0
+
+
+def test_cline_adapter_and_transcript_compaction(tmp_path):
+    from inference_grid.lanes.packet import ClineAdapter, compact_transcripts
+
+    a = ClineAdapter(
+        "z-ai/glm-5.3-flash", work=tmp_path, data_dir=tmp_path / "st", binary="/x/cline"
+    )
+    first = a.first("do it")
+    assert first[:2] == ["/x/cline", "do it"] and "--auto-approve" in first and "--json" in first
+    assert a.resume("s1", "fix")[:4] == ["/x/cline", "--id", "s1", "fix"]
+    native = tmp_path / "native-1.jsonl"
+    native.write_text(
+        '{"sessionId":"abc"}\n{"type":"thinking_delta","d":"x"}\n{"type":"tool_completed"}\n'
+    )
+    assert a.session_id(native) == "abc"
+    assert compact_transcripts(tmp_path) == {"native-1.jsonl": 1}
+    assert native.read_text().count("\n") == 2 and "thinking_delta" not in native.read_text()

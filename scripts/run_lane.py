@@ -29,7 +29,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from inference_grid.lanes import sandbox  # noqa: E402
-from inference_grid.lanes.packet import CommandCodeAdapter, Gate, build_loop  # noqa: E402
+from inference_grid.lanes.packet import (  # noqa: E402
+    ClineAdapter,
+    CommandCodeAdapter,
+    Gate,
+    build_loop,
+    compact_transcripts,
+)
 from inference_grid.lanes.scout import orient  # noqa: E402
 
 PACKET_HEADING = re.compile(r"^#### ([A-Z]\d+)\. (.+)$", re.M)
@@ -147,6 +153,21 @@ def gates_for(python: str, base: str, gate_dir: Path) -> list[Gate]:
     commit_check = gate_dir / "commit_gate.py"
     commit_check.write_text(commit_gate_script(base))
     env = {"PYTHONPATH": "src"}
+    # ruff runs only on the Python files this packet changed: the base is not format-clean,
+    # and a repo-wide check drives the agent into a 50-file reformat sweep to get past it.
+    scoped = gate_dir / "ruff_scoped.py"
+    scoped.write_text(
+        "import subprocess,sys\n"
+        f"base={base!r}\n"
+        "mode=sys.argv[1]\n"
+        "files=[f for f in subprocess.run(['git','diff','--name-only','--diff-filter=AMR',base+'...HEAD'],"
+        "capture_output=True,text=True).stdout.split() if f.endswith('.py')]\n"
+        "files+=[f for f in subprocess.run(['git','ls-files','--others','--exclude-standard'],"
+        "capture_output=True,text=True).stdout.split() if f.endswith('.py')]\n"
+        "if not files:print('no python files changed');sys.exit(0)\n"
+        "argv=[sys.executable,'-m','ruff']+(['format','--check'] if mode=='format' else ['check'])+files\n"
+        "sys.exit(subprocess.run(argv).returncode)\n"
+    )
     return [
         Gate(
             "pytest",
@@ -154,8 +175,8 @@ def gates_for(python: str, base: str, gate_dir: Path) -> list[Gate]:
             env=env,
             timeout=2400,
         ),
-        Gate("ruff-format", [python, "-m", "ruff", "format", "--check", "."], env=env, timeout=300),
-        Gate("ruff-check", [python, "-m", "ruff", "check", "."], env=env, timeout=300),
+        Gate("ruff-format", [python, str(scoped), "format"], env=env, timeout=300),
+        Gate("ruff-check", [python, str(scoped), "check"], env=env, timeout=300),
         Gate(
             "no-home-paths",
             [
@@ -251,14 +272,17 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
         deny_read_roots=sandbox.deny_read_roots(),
     )
     sandbox.probe(profile, clone)
-    (clone / "grid-effort.mjs").write_text(
-        "export default function (cmd) { cmd.on('session_start', () => { cmd.setEffort('high'); }); }\n"
-    )
-    adapter = CommandCodeAdapter(
-        args.model,
-        mod_path=clone / "grid-effort.mjs",
-        session_name=f"lane-{args.lane}-14-{packet_id}-{stamp}",
-    )
+    if args.adapter == "cline":
+        adapter = ClineAdapter(args.model, work=clone, data_dir=attempt_dir / "cline-state")
+    else:
+        (attempt_dir / "grid-effort.mjs").write_text(
+            "export default function (cmd) { cmd.on('session_start', () => { cmd.setEffort('high'); }); }\n"
+        )
+        adapter = CommandCodeAdapter(
+            args.model,
+            mod_path=attempt_dir / "grid-effort.mjs",
+            session_name=f"lane-{args.lane}-14-{packet_id}-{stamp}",
+        )
     env = dict(
         os.environ,
         HOME=str(home),
@@ -280,6 +304,7 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
         wall_seconds=args.wall_seconds,
         max_rounds=args.max_rounds,
     )
+    compact_transcripts(attempt_dir)
     passed = bool(verdict.get("gates_passed"))
     head = git(clone, "rev-parse", "--short", "HEAD")
     if passed:
@@ -340,6 +365,7 @@ def main(argv=None):
     p.add_argument("--branch-prefix", default="glm")
     p.add_argument("--lane", default="glm")
     p.add_argument("--model", default="z-ai/glm-5.3-flash")
+    p.add_argument("--adapter", choices=("command_code", "cline"), default="command_code")
     p.add_argument("--python", required=True, help="interpreter with the package's dependencies")
     p.add_argument("--packets-root", default="~/.grid-workspaces/packets")
     p.add_argument(

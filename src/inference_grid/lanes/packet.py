@@ -81,8 +81,14 @@ class CommandCodeAdapter(Adapter):
 
     name = "command_code"
 
-    def __init__(self, model: str, mod_path: Optional[Path] = None, binary: str = "/opt/homebrew/bin/cmd",
-                 max_turns: int = 1200, session_name: Optional[str] = None):
+    def __init__(
+        self,
+        model: str,
+        mod_path: Optional[Path] = None,
+        binary: str = "/opt/homebrew/bin/cmd",
+        max_turns: int = 1200,
+        session_name: Optional[str] = None,
+    ):
         self.model, self.mod_path, self.binary = model, mod_path, binary
         self.max_turns, self.session_name = max_turns, session_name
 
@@ -91,8 +97,19 @@ class CommandCodeAdapter(Adapter):
         return argv
 
     def _tail(self) -> List[str]:
-        argv = ["--model", self.model, "--max-turns", str(self.max_turns), "--output-format", "json",
-                "--skip-onboarding", "--no-auto-update", "--no-skills", "--yolo", "--tools-all"]
+        argv = [
+            "--model",
+            self.model,
+            "--max-turns",
+            str(self.max_turns),
+            "--output-format",
+            "json",
+            "--skip-onboarding",
+            "--no-auto-update",
+            "--no-skills",
+            "--yolo",
+            "--tools-all",
+        ]
         if self.mod_path is not None:
             argv += ["--mod", str(self.mod_path)]
         return argv
@@ -115,9 +132,21 @@ class OpencodeAdapter(Adapter):
 
     name = "opencode"
 
-    def __init__(self, model: str, work: Path, binary: str = "/opt/homebrew/bin/opencode",
-                 title: Optional[str] = None, debug: bool = False):
-        self.model, self.work, self.binary, self.title, self.debug = model, work, binary, title, debug
+    def __init__(
+        self,
+        model: str,
+        work: Path,
+        binary: str = "/opt/homebrew/bin/opencode",
+        title: Optional[str] = None,
+        debug: bool = False,
+    ):
+        self.model, self.work, self.binary, self.title, self.debug = (
+            model,
+            work,
+            binary,
+            title,
+            debug,
+        )
 
     def _tail(self, prompt: str) -> List[str]:
         argv = ["--model", self.model, "--format", "json", "--auto"]
@@ -135,6 +164,85 @@ class OpencodeAdapter(Adapter):
 
     def session_id(self, native_jsonl: Path) -> Optional[str]:
         return _first_match(native_jsonl, r'"sessionID"\s*:\s*"([^"]+)"')
+
+
+class ClineAdapter(Adapter):
+    """`cline --json --auto-approve true`; resumes with `--id <session>`.
+
+    Isolated local state under `data_dir` so nothing the lane does reaches the operator's
+    own Cline sessions; the provider's key is read by the CLI from its own login."""
+
+    name = "cline"
+
+    def __init__(
+        self,
+        model: str,
+        work: Path,
+        data_dir: Path,
+        binary: str = "/opt/homebrew/bin/cline",
+        provider: str = "cline",
+        thinking: str = "high",
+        retries: int = 8,
+    ):
+        self.model, self.work, self.data_dir, self.binary = model, work, data_dir, binary
+        self.provider, self.thinking, self.retries = provider, thinking, retries
+
+    def _tail(self) -> List[str]:
+        return [
+            "--provider",
+            self.provider,
+            "--model",
+            self.model,
+            "--json",
+            "--auto-approve",
+            "true",
+            "--thinking",
+            self.thinking,
+            "--retries",
+            str(self.retries),
+            "--cwd",
+            str(self.work),
+            "--data-dir",
+            str(self.data_dir),
+        ]
+
+    def first(self, prompt: str) -> List[str]:
+        return [self.binary, prompt] + self._tail()
+
+    def resume(self, session_id: str, prompt: str) -> List[str]:
+        return [self.binary, "--id", session_id, prompt] + self._tail()
+
+    def session_id(self, native_jsonl: Path) -> Optional[str]:
+        return _first_match(
+            native_jsonl, r'"(?:sessionId|session_id|taskId|task_id)"\s*:\s*"([^"]+)"'
+        )
+
+
+DELTA_EVENTS = ("thinking_delta", "text_delta", "content_delta")
+
+
+def compact_transcripts(attempt_dir: Path) -> Dict[str, int]:
+    """Drop per-token delta events from native-*.jsonl in place; keep every other line.
+
+    A streamed JSON transcript is one line per token, so a long session runs to gigabytes
+    of `thinking_delta`. The session id, tool calls and terminal events survive; a count of
+    what was dropped is written beside each file."""
+    dropped = {}
+    for native in sorted(Path(attempt_dir).glob("native-*.jsonl")):
+        keep, gone = [], 0
+        with native.open("rb") as fh:
+            for raw in fh:
+                if any(f'"{kind}"'.encode() in raw for kind in DELTA_EVENTS):
+                    gone += 1
+                    continue
+                keep.append(raw)
+        if gone:
+            native.write_bytes(b"".join(keep))
+            (native.with_suffix(".compacted.json")).write_text(
+                json.dumps({"dropped_delta_events": gone})
+            )
+        dropped[native.name] = gone
+    return dropped
 
 
 def _first_match(path: Path, pattern: str) -> Optional[str]:
@@ -156,9 +264,15 @@ def run_gate(work: Path, gate: Gate, env: Dict[str, str], log_dir: Path) -> Gate
     merged = dict(env, **gate.env)
     try:
         with log.open("wb") as out:
-            proc = subprocess.run(list(gate.argv), cwd=work / gate.cwd, env=merged,
-                                  stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                  timeout=gate.timeout)
+            proc = subprocess.run(
+                list(gate.argv),
+                cwd=work / gate.cwd,
+                env=merged,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                timeout=gate.timeout,
+            )
         code, reason = proc.returncode, "exited"
     except subprocess.TimeoutExpired:
         code, reason = None, "timeout"
@@ -169,7 +283,9 @@ def run_gate(work: Path, gate: Gate, env: Dict[str, str], log_dir: Path) -> Gate
     return GateResult(gate.name, code == 0, code, tail, time.monotonic() - started, reason)
 
 
-def run_gates(work: Path, gates: Iterable[Gate], env: Dict[str, str], log_dir: Path) -> List[GateResult]:
+def run_gates(
+    work: Path, gates: Iterable[Gate], env: Dict[str, str], log_dir: Path
+) -> List[GateResult]:
     return [run_gate(work, gate, env, log_dir) for gate in gates]
 
 
@@ -189,7 +305,9 @@ def fix_prompt(results: Sequence[GateResult], round_no: int, max_rounds: int) ->
         "",
     ]
     for r in failed:
-        head = f"### {r.name} — {r.reason}" + (f", exit {r.returncode}" if r.returncode is not None else "")
+        head = f"### {r.name} — {r.reason}" + (
+            f", exit {r.returncode}" if r.returncode is not None else ""
+        )
         lines += [head, "```", r.tail.strip()[-TAIL_CHARS:], "```", ""]
     return "\n".join(lines)
 
@@ -232,9 +350,15 @@ def build_loop(
         (attempt_dir / f"prompt-{round_no}.txt").write_text(text)
         run_started = clock.monotonic()
         with native.open("xb") as out, stderr.open("xb") as err:
-            proc = subprocess.Popen(sandbox_command(list(argv)), cwd=work, env=env,
-                                    stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                                    start_new_session=True)
+            proc = subprocess.Popen(
+                sandbox_command(list(argv)),
+                cwd=work,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                start_new_session=True,
+            )
             try:
                 code = proc.wait(timeout=max(1, int(remaining)))
                 agent_reason = "process_exited"
@@ -247,13 +371,15 @@ def build_loop(
         gate_dir = attempt_dir / f"gates-{round_no}"
         gate_dir.mkdir(exist_ok=True)
         results = run_gates(work, gates, env, gate_dir)
-        rounds.append({
-            "round": round_no,
-            "agent_returncode": code,
-            "agent_reason": agent_reason,
-            "agent_elapsed_s": round(clock.monotonic() - run_started),
-            "results": results,
-        })
+        rounds.append(
+            {
+                "round": round_no,
+                "agent_returncode": code,
+                "agent_reason": agent_reason,
+                "agent_elapsed_s": round(clock.monotonic() - run_started),
+                "results": results,
+            }
+        )
         if agent_reason == "wall_deadline":
             reason = "wall_deadline"
             break
@@ -307,10 +433,20 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "gate"
 
 
-def external_skeletons(attempt_dir: Path, branches: Iterable[str], *, task_prefix: str,
-                       project: str, account: str, model: str, family: str,
-                       argv: Sequence[str], work: Path, verdict: Dict,
-                       skip_suffixes: Sequence[str] = ("work",)) -> List[Path]:
+def external_skeletons(
+    attempt_dir: Path,
+    branches: Iterable[str],
+    *,
+    task_prefix: str,
+    project: str,
+    account: str,
+    model: str,
+    family: str,
+    argv: Sequence[str],
+    work: Path,
+    verdict: Dict,
+    skip_suffixes: Sequence[str] = ("work",),
+) -> List[Path]:
     """One `inference-grid external` skeleton per packet branch the lane left.
 
     `verified_in_lane` is copied from the verdict — false whenever an operator
@@ -328,16 +464,37 @@ def external_skeletons(attempt_dir: Path, branches: Iterable[str], *, task_prefi
         if packet in skip_suffixes:
             continue
         path = out / f"{packet}.json"
-        path.write_text(json.dumps({
-            "task": f"{task_prefix}-{packet}", "project": project,
-            "spec": {"authorized": True, "account": account, "model": model, "family": family,
-                     "argv": list(argv)[:6], "workspace": str(work), "lane_stamp": attempt_dir.name,
-                     "commit": sha},
-            "receipt": {"verified_in_lane": bool(verdict.get("verified_in_lane")),
+        path.write_text(
+            json.dumps(
+                {
+                    "task": f"{task_prefix}-{packet}",
+                    "project": project,
+                    "spec": {
+                        "authorized": True,
+                        "account": account,
+                        "model": model,
+                        "family": family,
+                        "argv": list(argv)[:6],
+                        "workspace": str(work),
+                        "lane_stamp": attempt_dir.name,
+                        "commit": sha,
+                    },
+                    "receipt": {
+                        "verified_in_lane": bool(verdict.get("verified_in_lane")),
                         "elapsed_s": verdict.get("elapsed_s", 0),
-                        "returncode": (verdict.get("rounds") or [{}])[-1].get("agent_returncode", 0),
+                        "returncode": (verdict.get("rounds") or [{}])[-1].get(
+                            "agent_returncode", 0
+                        ),
                         "operator_gates": list(verdict.get("operator_gates") or []),
-                        "rounds": len(verdict.get("rounds") or [])},
-            "category": "FILL", "accepted": None, "repairs": 0, "note": ""}, indent=1))
+                        "rounds": len(verdict.get("rounds") or []),
+                    },
+                    "category": "FILL",
+                    "accepted": None,
+                    "repairs": 0,
+                    "note": "",
+                },
+                indent=1,
+            )
+        )
         written.append(path)
     return written
