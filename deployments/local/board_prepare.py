@@ -107,7 +107,9 @@ def configure(config, ledger):
     try:
         ledger.configure_account(
             "go-account",
-            1,
+            # HTTP reviews are one call each; the plan caps requests per window per model,
+            # not concurrency. One slot serialised every reviewer lane behind one review.
+            int(config.get("go_capacity", 3)),
             grem,
             gt + GO_VALID,
             [entry["model"] for entry in go_lanes(config)],
