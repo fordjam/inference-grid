@@ -620,3 +620,35 @@ def test_a_completed_clone_leaves_no_reservation_behind(world):
     tick(world)
     reservations = world["packets"] / ".reservations"
     assert not reservations.exists() or list(reservations.iterdir()) == []
+
+
+def test_a_packet_waits_for_its_dependencies_to_land(world):
+    """M5 dispatched on 2026-09-16 before M4 — the code it was told to extend — had landed;
+    the brief's "Depends on M4" was prose nobody read. `depends_on` is read at dispatch:
+    the task stays ready, nothing is spent, and the row names what it waits for."""
+    task_path = world["board"] / "d1-packet.json"
+    raw = json.loads(task_path.read_text())
+    raw["depends_on"] = ["d0-packet"]
+    task_path.write_text(json.dumps(raw, indent=1) + "\n")
+    # The dependency is not on the board at all: that is unlanded too.
+    results = tick(world)
+    assert [r["result"] for r in results] == ["waits_for: d0-packet"]
+    assert json.loads(task_path.read_text())["state"] == "ready"
+    assert not any(r["account"] == world["account"] for r in world["ledger"].status())
+    # On the board but only passed: still waits. Landed: dispatches.
+    dep = dict(make_packet_task(tid="d0-packet", brief="grid/briefs/packet-d0.txt"))
+    dep["state"] = "passed"
+    (world["board"] / "d0-packet.json").write_text(json.dumps(dep, indent=1) + "\n")
+    assert [r["result"] for r in tick(world)] == ["waits_for: d0-packet"]
+    dep["state"] = "landed"
+    dep["landed"] = {"base_head": "a" * 40, "merge_commit": "b" * 40, "how": "merge"}
+    (world["board"] / "d0-packet.json").write_text(json.dumps(dep, indent=1) + "\n")
+    results = tick(world)
+    assert [r["result"] for r in results] == ["passed"]
+    # The key survives validation round-trips and rejects junk.
+    saved = json.loads(task_path.read_text())
+    assert saved["depends_on"] == ["d0-packet"]
+    with pytest.raises(ValueError, match="depends_on"):
+        packet_task.validate_board_task({**raw, "depends_on": ["d0-packet", "d0-packet"]})
+    with pytest.raises(ValueError, match="depends_on"):
+        packet_task.validate_board_task({**raw, "depends_on": []})

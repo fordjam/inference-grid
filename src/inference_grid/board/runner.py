@@ -109,6 +109,17 @@ def duplicate_basenames(task, key):
     return dupes
 
 
+def unlanded_dependencies(task, board):
+    """The `depends_on` ids not yet `landed` on this board — a missing id counts as
+    unlanded, since a dependency that is not on the board cannot have landed through it."""
+    waiting = []
+    for dep in task.get("depends_on") or []:
+        entry = board.get(dep)
+        if entry is None or entry[1].get("state") != "landed":
+            waiting.append(dep)
+    return waiting
+
+
 def shadowing_names(task):
     """Basename collisions between tests and artifacts or staged inputs, if any.
 
@@ -2082,6 +2093,18 @@ def tick(
             rows[index] = {"task": task_id, "lane": None, "attempt": None, "result": "draft"}
             continue
         if task["category"] == "packet":
+            waiting = unlanded_dependencies(task, board)
+            if waiting:
+                # `depends_on`: the base this packet extends is not on the board's
+                # base branch yet. Nothing is spent, the task stays ready, and the row
+                # names what it waits for; the tick after the dependency lands takes it.
+                rows[index] = {
+                    "task": task_id,
+                    "lane": None,
+                    "attempt": None,
+                    "result": "waits_for: " + ", ".join(waiting),
+                }
+                continue
             prefix = owner_only_prefix(task, owner_only)
             if prefix is not None:
                 # The autonomy policy's one dispatch-time wait (brief 14 M3): a packet

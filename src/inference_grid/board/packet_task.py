@@ -97,6 +97,12 @@ def validate_packet_task(raw):
     board/land.py's transition is validated here: the record ({base_head, merge_commit,
     how}) and the state come together or not at all.
 
+    `depends_on` (a list of task ids) is a packet-only key the runner reads at dispatch:
+    the task stays ready and is not dispatched until every named task is `landed` on
+    this board. M5 was dispatched on 2026-09-16 before M4, which it built on, had landed
+    — its base lacked the code it was told to extend, and an hour of cline went on
+    reinventing it. The brief said "Depends on M4"; nothing read the prose.
+
     Failover (brief J4) rides on two more packet-only keys, handled the same way:
     `failover` (bool, default true — the operator turns the one different-family retry
     off per task) and `failover_from` (the predecessor id, present only on a task the
@@ -115,6 +121,14 @@ def validate_packet_task(raw):
     landed = raw.get("landed")
     failover = raw.get("failover", True)
     failover_from = raw.get("failover_from")
+    depends_on = raw.get("depends_on")
+    if depends_on is not None and (
+        not isinstance(depends_on, list)
+        or not depends_on
+        or not all(isinstance(d, str) and d and len(d) <= 60 for d in depends_on)
+        or len(set(depends_on)) != len(depends_on)
+    ):
+        err("depends_on", "must be a non-empty list of distinct task ids")
     if not isinstance(failover, bool):
         err("failover", "must be a bool")
     if failover_from is not None and (
@@ -122,7 +136,9 @@ def validate_packet_task(raw):
     ):
         err("failover_from", "must be a non-empty str of at most 60 chars")
     core = {
-        k: v for k, v in raw.items() if k not in ("spec", "landed", "failover", "failover_from")
+        k: v
+        for k, v in raw.items()
+        if k not in ("spec", "landed", "failover", "failover_from", "depends_on")
     }
     core["category"] = "pure_function"
     if core.get("state") == "landed":
@@ -192,11 +208,13 @@ def validate_packet_task(raw):
     out = {
         k: (dict(v) if k == "budget" else list(v) if isinstance(v, list) else v)
         for k, v in raw.items()
-        if k not in ("spec", "landed", "failover", "failover_from")
+        if k not in ("spec", "landed", "failover", "failover_from", "depends_on")
     }
     out["failover"] = failover
     if failover_from is not None:
         out["failover_from"] = failover_from
+    if depends_on is not None:
+        out["depends_on"] = list(depends_on)
     out["spec"] = {
         "brief": spec["brief"],
         "packet_id": spec["packet_id"],
