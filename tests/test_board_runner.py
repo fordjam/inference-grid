@@ -2037,12 +2037,13 @@ def test_rows_keep_board_order_however_the_attempts_finish(world, monkeypatch):
     assert [r["task"] for r in run_tick(world, now)] == ["copy-ok", "copy-wrong"]
 
 
-def test_a_concurrent_pass_matches_a_serial_one(tmp_path, monkeypatch):
+def test_a_concurrent_pass_matches_a_serial_one(tmp_path, monkeypatch, second_database):
     # "the stdout rows and ledger events are identical to the serial run's": the same board
     # settled on a capacity-1 account (one attempt at a time) and on a capacity-2 account
     # (two at once) produces the same rows and the same events per attempt.
     fake_worker(monkeypatch)
     serial = build_world(tmp_path / "serial", monkeypatch)
+    second_database()  # two ledgers, not one: the worlds reuse task ids
     concurrent = build_world(tmp_path / "concurrent", monkeypatch)
     two_wide(concurrent)
     now = time.time()
