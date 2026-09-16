@@ -1,0 +1,46 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### M1. A held attempt drafts its own fix packet
+When a `packet` attempt settles `held` or `blocked` with a reason the operator owes nothing
+for (`wall_deadline`, `agent_idle`, `rounds_exhausted`, a gate that failed on the same test
+three rounds running, a transport refusal that repeated), the runner authors **one** `plan`
+task (J1's plan node) on a `tier: plan` lane whose ticket is built from the verdict: the
+task's packet section, the last round's gate tails, the last 4 KB of the transcript, and
+the question "what change to the packet, the gates or the harness would let this land?".
+The plan's `packet.md` becomes a ready `packet` task only when the board sets
+`auto_dispatch: true`; otherwise it waits for the operator, listed under *needs-you* with the
+drafted title. No plan is drafted twice for the same task + reason. Tests: a held attempt
+yields exactly one plan task with the verdict in its ticket; a second identical hold does not;
+`auto_dispatch` gates the build.
+- Size: medium.
+
+---

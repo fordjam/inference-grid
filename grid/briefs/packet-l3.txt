@@ -1,0 +1,44 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### L3. An idle agent round ends early with `agent_idle`
+`lanes/packet.py::build_loop` runs a round until the adapter exits or the wall. Add an idle
+watchdog: if the clone's tree (`git status --porcelain` plus `HEAD`) is unchanged for
+`idle_seconds` (default 900, from the task spec) *and* the transcript has grown by fewer than
+2 KB in that window, terminate the round with `agent_reason: agent_idle`, run the gates as
+usual, and let the loop's next round re-enter with the idle noted in the prompt ("the previous
+round produced no change in 15 minutes; commit what you have or say why"). Two idle rounds in
+one attempt hold the attempt `agent_idle` so the operator sees it, instead of `wall_deadline`
+an hour later. Tests: a fake adapter that sleeps is cut at the idle window; one that keeps
+writing is not; the verdict names `agent_idle`.
+- Size: medium. Why: J4 on cline-deepseek and the first Q5 burned an hour each.
+
+---

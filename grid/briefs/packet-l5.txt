@@ -1,0 +1,44 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### L5. The attempt wall grows with the packet's gates
+`board/task.py` bounds `wall_seconds` at 3600 (provider-authored; do not edit) and the ledger
+bounds `timeout` at 3600. For `packet` tasks, `board/packet_task.py::dispatch_packet` computes
+the attempt's wall as `wall_seconds + sum(gate timeouts) + 60 × max_rounds` — the agent's hour
+is the agent's; the gates and the re-entry overhead are not charged to it — and passes that
+to `build_loop` and to the ledger spec (raise the ledger's admission bound for `packet`
+specs only, in `ledger.py::_check_spec`, to 4 × 3600, with a test that a non-packet spec is
+still bounded at 3600). The runtime's `tick_timeout` (8 h 30) already covers it. Tests: a
+packet with three 600 s gates and 3 rounds gets 3600 + 1800 + 180; a review task is
+unchanged.
+- Size: small.
+
+---
