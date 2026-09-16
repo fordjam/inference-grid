@@ -277,6 +277,20 @@ def test_immutable_spec_and_input_paths(grid):
         submit(grid, "invalid", inputs=manifest, manifest_sha256=digest(manifest))
 
 
+def test_non_packet_timeout_is_bounded_at_an_hour(grid):
+    with pytest.raises(Refused, match="bounded timeout"):
+        submit(grid, timeout=3601)
+
+
+def test_packet_spec_timeout_is_bounded_at_four_hours(grid):
+    # A packet's admission timeout covers the gates and the re-entry rounds on top of
+    # the agent's own budget; the bound grows only for packet-loop argv.
+    argv = ["packet-loop:goat_cli", "A1", "task"]
+    submit(grid, timeout=4 * 3600, argv=argv)
+    with pytest.raises(Refused, match="bounded timeout"):
+        submit(grid, "two", timeout=4 * 3600 + 1, argv=argv)
+
+
 def test_quota_observation_replay_cannot_restore_spent_units(grid):
     ledger, account, _ = grid
     stamp = time.time()

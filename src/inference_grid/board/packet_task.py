@@ -253,6 +253,19 @@ def build_sandbox(kind, work, attempt_dir):
     return lambda argv: sandbox.command(profile, argv)
 
 
+def packet_wall_seconds(task):
+    """The attempt's wall: the agent's budget plus the gates' own timeouts plus a minute
+    of re-entry overhead per round — the agent's hour is the agent's, the gates and the
+    re-entry are not charged to it. Gates keep `lanes/packet.py`'s default timeout when
+    they declare none, the same figure `_gates_for` runs them under."""
+    spec = task["spec"]
+    return (
+        task["budget"]["wall_seconds"]
+        + sum(g.get("timeout", 1800) for g in spec["gates"])
+        + 60 * spec["max_rounds"]
+    )
+
+
 def _git(repo, *args, check=True):
     proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True)
     if check and proc.returncode != 0:
@@ -347,7 +360,7 @@ def admit_packet(ledger, lanes, lane_id, task, project_root, packet_dir, account
         # Descriptive: the loop builds one argv per round from the adapter.
         "argv": ["packet-loop:" + kind, spec["packet_id"], task["id"]],
         "workspace": str(workspace),
-        "timeout": min(task["budget"]["wall_seconds"] + 40, 3600),
+        "timeout": packet_wall_seconds(task),
         "output_bytes": task["budget"]["output_bytes"],
         "inputs": {},
         "manifest_sha256": digest({}),
@@ -432,7 +445,7 @@ def run_packet(ledger, admission):
             prompt,
             _gates_for(spec, base_rev, attempt_dir, trailer_for(lane["model"])),
             attempt_dir,
-            wall_seconds=task["budget"]["wall_seconds"],
+            wall_seconds=packet_wall_seconds(task),
             max_rounds=spec["max_rounds"],
             idle_seconds=spec.get("idle_seconds", DEFAULT_IDLE_SECONDS),
         )

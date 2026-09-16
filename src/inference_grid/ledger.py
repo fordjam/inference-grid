@@ -288,7 +288,10 @@ class Ledger:
             raise Refused("argv required")
         if not Path(spec.get("workspace", "")).is_absolute():
             raise Refused("absolute isolated workspace required")
-        if type(spec.get("timeout")) is not int or not 1 <= spec["timeout"] <= 3600:
+        # A packet spec's timeout covers the gates and the re-entry rounds on top of the
+        # agent's own budget, so its admission bound is four hours, not one.
+        bound = 4 * 3600 if spec["argv"][0].startswith("packet-loop:") else 3600
+        if type(spec.get("timeout")) is not int or not 1 <= spec["timeout"] <= bound:
             raise Refused("bounded timeout required")
         if type(spec.get("priority", 100)) is not int:
             raise Refused("integer priority required")
@@ -692,8 +695,9 @@ class Ledger:
             )
         return {"attempt": aid, "category": category, "accepted": accepted}
 
-    def record_external(self, task, project, spec, receipt, category, accepted,
-                        usage=None, repairs=0, note=None):
+    def record_external(
+        self, task, project, spec, receipt, category, accepted, usage=None, repairs=0, note=None
+    ):
         """Record work the operator ran OUTSIDE the grid — a sandboxed lane launched by
         hand — as a completed attempt with its outcome, so the scorecard sees it.
 
@@ -731,7 +735,11 @@ class Ledger:
         receipt = dict(receipt, provenance="operator")
         with self.tx() as con:
             self.lock(con, ["task:" + task])
-            acct = con.execute(select(accounts).where(accounts.c.id == spec["account"])).mappings().first()
+            acct = (
+                con.execute(select(accounts).where(accounts.c.id == spec["account"]))
+                .mappings()
+                .first()
+            )
             if not acct:
                 raise Refused("unknown account")
             old = con.execute(select(tasks).where(tasks.c.id == task)).mappings().first()

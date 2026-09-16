@@ -19,7 +19,8 @@ import pytest
 
 from inference_grid.board import packet_task, runner
 from inference_grid.lanes import packet
-from inference_grid.ledger import Ledger
+from inference_grid.ledger import Ledger, attempts, tasks
+from sqlalchemy import select
 
 TRAILER = "Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>"
 
@@ -314,6 +315,37 @@ def test_tick_runs_the_packet_loop_and_fetches_the_branch(world):
         for e in world["ledger"].scorecard(account=world["account"])
     }
     assert card == {("packet", 1, 1)}
+
+
+def test_the_attempt_wall_covers_the_gates_and_the_reentry_rounds(world, monkeypatch):
+    """The agent's budget is the agent's: the gates' timeouts and one minute of re-entry
+    per round ride on top of it, both in the ledger spec and in the loop's deadline."""
+    task_path = world["board"] / "d1-packet.json"
+    raw = json.loads(task_path.read_text())
+    raw["budget"]["wall_seconds"] = 3600
+    raw["spec"]["max_rounds"] = 3
+    raw["spec"]["gates"] = [
+        {"name": "one", "argv": [sys.executable, "-c", "print('ok')"], "timeout": 600},
+        {"name": "two", "argv": [sys.executable, "-c", "print('ok')"], "timeout": 600},
+        {"name": "three", "argv": [sys.executable, "-c", "print('ok')"], "timeout": 600},
+    ]
+    task_path.write_text(json.dumps(raw, indent=1) + "\n")
+    wall = {}
+    real_build_loop = packet.build_loop
+
+    def spy(*args, **kwargs):
+        wall["seconds"] = kwargs["wall_seconds"]
+        return real_build_loop(*args, **kwargs)
+
+    monkeypatch.setattr(packet_task, "build_loop", spy)
+    results = tick(world)
+    assert [r["result"] for r in results] == ["passed"]
+    assert wall["seconds"] == 3600 + 3 * 600 + 60 * 3
+    aid = next(r["id"] for r in world["ledger"].status() if r["state"] == "completed")
+    with world["ledger"].engine.connect() as con:
+        ledger_task = con.execute(select(attempts.c.task).where(attempts.c.id == aid)).scalar_one()
+        spec = con.execute(select(tasks).where(tasks.c.id == ledger_task)).mappings().one()["spec"]
+    assert spec["timeout"] == 3600 + 1800 + 180
 
 
 def test_a_failing_gate_holds_the_attempt_and_leaves_the_branch(world):
