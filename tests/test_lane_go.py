@@ -244,6 +244,97 @@ class GoLaneTests(unittest.TestCase):
         self.assertNotIn("insufficient_credits", json.dumps(verdict))
         self.assertFalse((attempt / "native.json").exists())
 
+    def test_429_is_the_free_tier_cap_the_first_canary_hit(self):
+        import io
+
+        request, attempt = self.attempt(expected=["reply.txt"], prompt="Reply with exactly OK")
+        # canary-cline-http, 2026-09-16 (grid/board/canary-cline-http.json): the vendor
+        # id z-ai/glm-5.3-flash is served from a free tier with a daily cap, and the
+        # canary exhausted it. The refusal names the status; the body is never recorded.
+        error = urllib.error.HTTPError(
+            ENDPOINT,
+            429,
+            "Too Many Requests",
+            {},
+            io.BytesIO(b'{"error": {"message": "daily cap reached"}}'),
+        )
+        lane = dict(self.lane, provider="clinepass")
+        request["model"] = "z-ai/glm-5.3-flash"
+        receipt, verdict = go.run(request, lane, attempt, send=self.send(error))
+        self.assertIsNone(receipt)
+        self.assertEqual(verdict["refusal"], "endpoint returned HTTP 429")
+        self.assertNotIn("daily cap reached", json.dumps(verdict))
+        self.assertFalse((attempt / "native.json").exists())
+
+    # The recorded ClinePass answer shape (observed on the raw API 2026-09-15, brief 14
+    # G1): the chat-completions document wrapped as {"data": {...}} with the wrapper's
+    # provider field; the inner document echoes the id the request carried.
+    CLINEPASS_CANARY_RESPONSE = {
+        "provider": "clinepass",
+        "data": {
+            "model": "cline-pass/glm-5.3-flash",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "OK"},
+                }
+            ],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11},
+        },
+    }
+
+    def test_the_cline_http_canary_passes_on_the_pass_namespaced_wire_id(self):
+        # canary-cline-http: brief "Reply with exactly OK", artifact reply.txt, lane
+        # model z-ai/glm-5.3-flash over provider clinepass. The wire carries the pass
+        # id — vendor ids draw on the free tier (429 above) or bill credits (402).
+        request, attempt = self.attempt(expected=["reply.txt"], prompt="Reply with exactly OK")
+        request["model"] = "z-ai/glm-5.3-flash"
+        lane = dict(self.lane, provider="clinepass")
+        sender = self.send(self.CLINEPASS_CANARY_RESPONSE)
+        receipt, verdict = go.run(request, lane, attempt, send=sender)
+        self.assertIsNone(verdict["refusal"], verdict)
+        self.assertEqual(receipt["status"], "completed")
+        self.assertEqual([a["path"] for a in receipt["artifacts"]], ["reply.txt"])
+        self.assertEqual((attempt / "artifacts/reply.txt").read_text(), "OK")
+        # The receipt keeps the lane's canonical id; the wire id is in the verdict.
+        self.assertEqual(receipt["actual_model"], "z-ai/glm-5.3-flash")
+        self.assertEqual(sender.recorded["body"]["model"], "cline-pass/glm-5.3-flash")
+        self.assertEqual(verdict["wire_model"], "cline-pass/glm-5.3-flash")
+        self.assertEqual(verdict["provider"], "clinepass")
+        self.assertEqual(verdict["finish_reason"], "stop")
+        # native.json keeps the endpoint's own document, wrapper included.
+        native = json.loads((attempt / "native.json").read_text())
+        self.assertEqual(native["provider"], "clinepass")
+        self.assertEqual(native["data"]["model"], "cline-pass/glm-5.3-flash")
+
+    def test_clinepass_vendor_id_echo_still_qualifies(self):
+        # The endpoint may echo the lane's configured id instead of the pass id it was
+        # sent (the form G1 observed for the vendor id); both name the one model.
+        request, attempt = self.attempt(expected=["reply.txt"], prompt="Reply with exactly OK")
+        request["model"] = "z-ai/glm-5.3-flash"
+        lane = dict(self.lane, provider="clinepass")
+        response = {
+            "provider": "clinepass",
+            "data": self.native(model="z-ai/glm-5.3-flash", content="OK"),
+        }
+        receipt, verdict = go.run(request, lane, attempt, send=self.send(response))
+        self.assertIsNone(verdict["refusal"], verdict)
+        self.assertEqual(receipt["status"], "completed")
+
+    def test_clinepass_another_model_behind_the_prefix_is_still_refused(self):
+        # The alias covers the one lane model's two ids, nothing else.
+        request, attempt = self.attempt(expected=["reply.txt"], prompt="Reply with exactly OK")
+        request["model"] = "z-ai/glm-5.3-flash"
+        lane = dict(self.lane, provider="clinepass")
+        response = {
+            "provider": "clinepass",
+            "data": self.native(model="cline-pass/kimi-k3", content="OK"),
+        }
+        receipt, verdict = go.run(request, lane, attempt, send=self.send(response))
+        self.assertIsNone(receipt)
+        self.assertEqual(verdict["refusal"], "request served by an unexpected model")
+        self.assertTrue((attempt / "native.json").is_file())
+
     def test_clinepass_wrapped_response_is_unwrapped_and_provider_recorded(self):
         request, attempt = self.attempt(expected=["out.py"])
         wrapped = {"provider": "clinepass", "data": self.native()}
@@ -631,6 +722,18 @@ class ProviderEndpointTests(unittest.TestCase):
         )
         # A lane without a provider key keeps the Go endpoint.
         self.assertEqual(go.ENDPOINT, go.endpoint_for("opencode"))
+
+    def test_wire_model_maps_clinepass_ids_into_the_pass_namespace(self):
+        # Only cline-pass/ ids draw on the subscription; the wire id drops any vendor
+        # prefix and is idempotent for an already-namespaced id.
+        self.assertEqual(
+            go.wire_model("clinepass", "z-ai/glm-5.3-flash"), "cline-pass/glm-5.3-flash"
+        )
+        self.assertEqual(go.wire_model("clinepass", "cline-pass/kimi-k3"), "cline-pass/kimi-k3")
+        self.assertEqual(go.wire_model("clinepass", "glm-5.3-flash"), "cline-pass/glm-5.3-flash")
+        # Every other provider's lane id goes on the wire unchanged.
+        self.assertEqual(go.wire_model("opencode", "kimi-k3"), "kimi-k3")
+        self.assertEqual(go.wire_model("opencode", "z-ai/glm-5.3-flash"), "z-ai/glm-5.3-flash")
 
     def test_an_unknown_provider_refuses_before_any_request_or_credential(self):
         tmp = tempfile.TemporaryDirectory(dir=str(scratch_base()))

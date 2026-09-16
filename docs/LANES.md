@@ -187,13 +187,23 @@ and records the response's `provider` field in the verdict. Key path only — no
 executable; the credential file is the same 0o600 JSON document `read_key` already
 parses. An unknown `provider` in a `go_http` lane refuses before anything is sent.
 
-Plan coverage, observed on the raw API 2026-09-15: only some models are covered by the
-subscription — `z-ai/glm-5.3-flash` answered, while `moonshotai/kimi-k3` and
-`deepseek/deepseek-v4-flash-0731` returned `402 insufficient_credits` (those are billed
-to pay-as-you-go credits unless called through the Cline client). `go.py` classifies a
-402 as `refusal: model_not_in_plan`, which the driver never retries — a model outside
-the plan is a lane-config fact, not a transient fault. Qualify new models through a
-canary row before dispatching work on them.
+Model id namespace (L6): ClinePass bills vendor ids to credits; the subscription
+draws on the `cline-pass/` namespace instead, so `go.py` puts `cline-pass/<bare id>`
+on the wire while the lane record keeps the canonical vendor id — the runner's model
+match and the scorecard key on it, and the verdict carries `wire_model` whenever the
+two differ. The endpoint may echo either id in its response; both name the one model,
+and a different model is still refused. This is why `canary-cline-http` failed with
+HTTP 429 on 2026-09-16: the vendor id `z-ai/glm-5.3-flash` was served from a free
+tier with a daily cap, which the first canary exhausted.
+
+Plan coverage, observed on the raw API 2026-09-15: the pass namespace is what the
+subscription serves — the first canary's `429` on the vendor id
+(`grid/board/canary-cline-http.json`) and the `402 insufficient_credits` answers for
+`moonshotai/kimi-k3` and `deepseek/deepseek-v4-flash-0731` both came from the vendor
+id space (those two are billed to pay-as-you-go credits unless called through the
+Cline client). `go.py` classifies a 402 as `refusal: model_not_in_plan`, which the
+driver never retries — a model outside the plan is a lane-config fact, not a transient
+fault. Qualify new models through a canary row before dispatching work on them.
 
 ## Go subscription as an agent — `opencode_cli`
 
