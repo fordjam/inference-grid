@@ -41,6 +41,14 @@ CLINE_VALID = 900
 ADMISSION_LIMIT_PERCENT = 80
 
 
+def admission_limit(config):
+    """The used-percent at which a lane stops admitting work: `admission_limit_percent`
+    in config.json, else 80. The operator set it to 100 on 2026-09-16 — a plan is spent
+    when it is spent, and the lane rolls to the next provider at 100, not at 80."""
+    value = config.get("admission_limit_percent", ADMISSION_LIMIT_PERCENT)
+    return int(value) if 0 <= int(value) <= 100 else ADMISSION_LIMIT_PERCENT
+
+
 def _ts(iso):
     return datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
@@ -81,7 +89,7 @@ def configure(config, ledger):
             "used_percent_max": float(
                 max(quota["five_hour_used_percent"], quota["weekly_used_percent"])
             ),
-            "admission_limit_percent": ADMISSION_LIMIT_PERCENT,
+            "admission_limit_percent": admission_limit(config),
             "cooldown_until": None,
             "qualification": "qualified",
             "blocked_until": None,
@@ -114,7 +122,7 @@ def configure(config, ledger):
         "quota_observed_at": gt,
         "quota_freshness_seconds": GO_VALID,
         "used_percent_max": float(max(w["used_percent"] for w in go["windows"])),
-        "admission_limit_percent": ADMISSION_LIMIT_PERCENT,
+        "admission_limit_percent": admission_limit(config),
         "cooldown_until": None,
         "qualification": "qualified",
         "blocked_until": None,
@@ -176,7 +184,7 @@ def configure_observation(
         "quota_observed_at": observed if ok else None,
         "quota_freshness_seconds": valid,
         "used_percent_max": float(max(used.values())) if used else None,
-        "admission_limit_percent": ADMISSION_LIMIT_PERCENT,
+        "admission_limit_percent": admission_limit(config),
         "cooldown_until": None,
         "qualification": "qualified",
         "blocked_until": None,

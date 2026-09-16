@@ -252,3 +252,10 @@ class ConfigureObservationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdmissionLimitTests(unittest.TestCase):
+    def test_the_admission_limit_comes_from_config_and_defaults_to_80(self):
+        self.assertEqual(prepare.admission_limit({}), 80)
+        self.assertEqual(prepare.admission_limit({"admission_limit_percent": 100}), 100)
+        self.assertEqual(prepare.admission_limit({"admission_limit_percent": 250}), 80)
