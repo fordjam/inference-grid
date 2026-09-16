@@ -55,6 +55,31 @@ def test_digest_reports_boards_suggestions_and_lanes(tmp_path):
     assert "| go-" + account[-8:] + " |" in text or f"| {account} |" in text
 
 
+def test_digest_survives_the_drafts_sidecar(tmp_path):
+    """The plan node's drafts list is board-owned state, not a task file (brief J1)."""
+    from pathlib import Path
+
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_board_status import write_task  # reuse the fixtures
+
+    project = tmp_path / "project"
+    board = project / "grid/board"
+    board.mkdir(parents=True)
+    write_task(board, "waiting", "ready")
+    (board / "drafts.json").write_text(json.dumps({"drafts": ["packet-k1"]}))
+    ledger = Ledger("sqlite:///" + str(tmp_path / "ledger.sqlite"))
+    ledger.initialize()
+    boards_dir = tmp_path / "boards"
+    boards_dir.mkdir()
+    (boards_dir / "project.json").write_text(
+        json.dumps({"board_dir": str(board), "project_root": str(project)})
+    )
+    text = digest(ledger, boards_dir)
+    assert "oldest ready task: waiting" in text
+
+
 def uuid_hex():
     import uuid
 

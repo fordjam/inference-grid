@@ -37,6 +37,7 @@ from .failover import (
     failed_family,
     pending_failover_note,
 )
+from .fix_packet import author_fix_plan, fix_reason, recover_fix
 from .guard import check_input
 from .land import land
 from .packet_task import admit_packet, run_packet, validate_board_task
@@ -1291,6 +1292,25 @@ def tick(
                         :300
                     ],
                 )
+                row = {"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"}
+                # M1: a hold the operator owes nothing for drafts its own fix packet —
+                # one plan task per (task, reason), whose id makes a second draft a
+                # no-op. Authored before the failover so a crash between the two still
+                # leaves the plan recorded.
+                reason = fix_reason(verdict, task["blocked_reason"], ledger_reason)
+                if reason:
+                    fix = author_fix_plan(
+                        board_dir,
+                        project_root,
+                        task,
+                        verdict,
+                        Path(packet_dir) / "attempts" / aid,
+                        reason,
+                        lanes,
+                        note=f"{task['blocked_reason']}; ledger reason: {ledger_reason}",
+                    )
+                    if fix and fix.get("authored"):
+                        row["fix"] = fix["plan"]
                 # J4: one retry on a different family, authored here where the failed
                 # family is known; the block reason above is what makes it eligible.
                 authored = author_failover(
@@ -1304,7 +1324,6 @@ def tick(
                     board,
                     texts=(verdict.get("reason"), verdict.get("refusal"), ledger_reason),
                 )
-                row = {"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"}
                 if authored and authored.get("authored"):
                     row["failover"] = authored["task"]
                 rows[index] = row
@@ -1461,6 +1480,16 @@ def tick(
                 path, task, board_dir, project_root, ledger, packets_root, dry_run
             )
             continue
+        if task["category"] == "packet" and task["state"] == "blocked":
+            # M1: a packet that settled blocked for a reason the operator owes nothing
+            # for drafts its fix packet. The settlement authors it; this recovers one a
+            # crashed tick never wrote, or one whose plan lane the operator configured
+            # afterwards. The deterministic plan id is the guard, so a task that already
+            # has its plan falls through to the failover hook below.
+            fix_note = recover_fix(board_dir, project_root, task, lanes, packets_root, dry_run)
+            if fix_note is not None:
+                rows[index] = {"task": task_id, "lane": None, "attempt": None, "result": fix_note}
+                continue
         if failover_candidate(task, board):
             # J4: a packet that settled with an exhaustion or transport reason is due one
             # different-family retry. A dry run names the pending swap without writing;

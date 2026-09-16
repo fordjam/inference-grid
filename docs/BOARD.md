@@ -120,7 +120,19 @@ task with the validation error; no packet task is written.
 That task is a **draft, not a build**: its id is recorded in the board's `drafts.json`,
 and the tick reports `draft` and dispatches nothing until the operator releases it
 (removing the id) or the board config carries `"auto_dispatch": true`. The default is to
-draft, not to build.
+draft, not to build. A draft is listed under the dashboard's *needs-you* list
+(`kind: draft`) with the title its brief carries.
+
+The plan node also answers itself. When a `packet` attempt settles held or blocked for a
+reason the operator owes nothing for — `wall_deadline`, the L3 idle watchdog's
+`agent_idle`, `rounds_exhausted`, a gate that ended every round identically, a transport
+refusal — the runner authors **one** plan task for it (`board/fix_packet.py`) whose
+ticket is built from the verdict: the task's packet section, the last round's gate
+tails, the last 4 KB of the transcript, and the question *what change to the packet, the
+gates or the harness would let this land?* The drafted packet waits in `drafts.json` as
+above. The plan task's id is derived from the (failed task, reason) pair, so the same
+task settling the same way a second time drafts nothing; the pass loop recovers a draft
+a crashed tick never wrote, and names it in a dry run as `fix pending: <plan id>`.
 
 ## Landing
 

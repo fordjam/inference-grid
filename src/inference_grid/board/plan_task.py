@@ -214,7 +214,7 @@ def validate_plan_task(raw):
     return out
 
 
-def plan_task(board_dir, ticket, lane):
+def plan_task(board_dir, ticket, lane, task_id=None):
     """Author one plan task from a ticket; returns the created paths and the scouted paths.
 
     The ticket is `{title, body, repo, paths?}`: `repo` is the repository to scout (and
@@ -222,6 +222,10 @@ def plan_task(board_dir, ticket, lane):
     about — absent, they are guessed from the body. The drafted packet's base is `main`
     (the ticket names none); the operator edits the draft when the project's base
     differs. Existing files are refused, like every authoring path.
+
+    `task_id` overrides the id derived from the title. The runner's fix-packet drafting
+    passes a deterministic id derived from (failed task, reason) so that the task file's
+    own existence is the record that the plan was already drafted.
     """
     if not isinstance(ticket, dict):
         raise ValueError("ticket: expected a dict")
@@ -243,7 +247,7 @@ def plan_task(board_dir, ticket, lane):
     paths = [p for p in (ticket.get("paths") or []) if isinstance(p, str) and p]
     if not paths:
         paths = guess_paths(repo, body)
-    task_id = "plan-" + slug(title)
+    task_id = task_id or ("plan-" + slug(title))
     brief_rel = f"grid/briefs/{task_id}.txt"
     task = validate_plan_task(
         {
