@@ -1,0 +1,25 @@
+{
+ "id": "canary-cline-http-2",
+ "category": "canary",
+ "brief": "grid/briefs/canary-cline-http-2.txt",
+ "inputs": [
+  "grid/briefs/canary-cline-http-2.txt"
+ ],
+ "tests": [
+  "grid/tests/test_canary_reply.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "cline-http"
+ ],
+ "author_family": null,
+ "budget": {
+  "wall_seconds": 120,
+  "output_bytes": 10000,
+  "thinking_tokens": null
+ },
+ "state": "blocked",
+ "blocked_reason": "superseded: canary-cline-http-3 \u2014 stamped dispatched by the 11:05Z tick that froze in mkdir on the removable volume (TCC) and was killed; no attempt was ever admitted; re-authored (L2 will requeue these itself once main carries it)"
+}

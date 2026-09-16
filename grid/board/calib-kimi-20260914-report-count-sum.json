@@ -1,0 +1,27 @@
+{
+ "id": "calib-kimi-20260914-report-count-sum",
+ "category": "independent_review",
+ "brief": "grid/briefs/calib-kimi-20260914-report-count-sum.txt",
+ "inputs": [
+  "grid/briefs/calib-kimi-20260914-report-count-sum.txt",
+  "grid/board/review/calib-kimi-20260914-report-count-sum/docs/coverage-report.md",
+  "grid/board/review/calib-kimi-20260914-report-count-sum/diff.patch"
+ ],
+ "tests": [
+  "grid/tests/test_review_schema.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "go-kimi"
+ ],
+ "author_family": "calibration",
+ "budget": {
+  "wall_seconds": 600,
+  "output_bytes": 2000000,
+  "thinking_tokens": 6000
+ },
+ "state": "blocked",
+ "blocked_reason": "attempt b0012f8f-9ec2-4666-b127-9588f49224e0 review rejected with 1 finding(s)"
+}

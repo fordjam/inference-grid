@@ -1,0 +1,27 @@
+{
+ "id": "calib-kimi-20260914-abatement-base-includes-grant",
+ "category": "independent_review",
+ "brief": "grid/briefs/calib-kimi-20260914-abatement-base-includes-grant.txt",
+ "inputs": [
+  "grid/briefs/calib-kimi-20260914-abatement-base-includes-grant.txt",
+  "grid/board/review/calib-kimi-20260914-abatement-base-includes-grant/src/cost/abatement.py",
+  "grid/board/review/calib-kimi-20260914-abatement-base-includes-grant/diff.patch"
+ ],
+ "tests": [
+  "grid/tests/test_review_schema.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "go-kimi"
+ ],
+ "author_family": "calibration",
+ "budget": {
+  "wall_seconds": 600,
+  "output_bytes": 2000000,
+  "thinking_tokens": 6000
+ },
+ "state": "blocked",
+ "blocked_reason": "attempt 566c7fbd-4f2b-4f54-9e71-11638af4b0b5 review rejected with 1 finding(s)"
+}

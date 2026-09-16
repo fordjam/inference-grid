@@ -18,8 +18,9 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
+ "state": "landed",
  "blocked_reason": null,
+ "failover": true,
  "spec": {
   "brief": "grid/briefs/packet-k1.txt",
   "packet_id": "K1",
@@ -83,5 +84,10 @@
   ],
   "base": "glm/work",
   "max_rounds": 3
+ },
+ "landed": {
+  "base_head": "de38191e7e520866417ea656611fa5f80e3f567a",
+  "merge_commit": "188bb41b423ab67efb904e48b40a32e97a687f14",
+  "how": "union"
  }
 }

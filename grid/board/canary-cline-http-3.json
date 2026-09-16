@@ -1,0 +1,25 @@
+{
+ "id": "canary-cline-http-3",
+ "category": "canary",
+ "brief": "grid/briefs/canary-cline-http-3.txt",
+ "inputs": [
+  "grid/briefs/canary-cline-http-3.txt"
+ ],
+ "tests": [
+  "grid/tests/test_canary_reply.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "cline-http"
+ ],
+ "author_family": null,
+ "budget": {
+  "wall_seconds": 120,
+  "output_bytes": 10000,
+  "thinking_tokens": null
+ },
+ "state": "passed",
+ "blocked_reason": null
+}

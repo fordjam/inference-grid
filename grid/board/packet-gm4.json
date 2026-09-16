@@ -18,8 +18,9 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
+ "state": "landed",
  "blocked_reason": null,
+ "failover": true,
  "spec": {
   "brief": "grid/briefs/packet-gm4.txt",
   "packet_id": "M4",
@@ -83,5 +84,10 @@
   ],
   "base": "glm/work",
   "max_rounds": 3
+ },
+ "landed": {
+  "base_head": "2fbbd6164163113eb2fc82e31e5e9fecd9ef672b",
+  "merge_commit": "7bf3a3b2b56075ca2dd68520d8f99a984f1fc853",
+  "how": "merge"
  }
 }

@@ -1,0 +1,28 @@
+{
+ "id": "calib-kimi-20260914-clean-normalize",
+ "category": "independent_review",
+ "brief": "grid/briefs/calib-kimi-20260914-clean-normalize.txt",
+ "inputs": [
+  "grid/briefs/calib-kimi-20260914-clean-normalize.txt",
+  "grid/board/review/calib-kimi-20260914-clean-normalize/src/text/normalize.py",
+  "grid/board/review/calib-kimi-20260914-clean-normalize/tests/test_normalize.py",
+  "grid/board/review/calib-kimi-20260914-clean-normalize/diff.patch"
+ ],
+ "tests": [
+  "grid/tests/test_review_schema.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "go-kimi"
+ ],
+ "author_family": "calibration",
+ "budget": {
+  "wall_seconds": 600,
+  "output_bytes": 2000000,
+  "thinking_tokens": 6000
+ },
+ "state": "passed",
+ "blocked_reason": null
+}

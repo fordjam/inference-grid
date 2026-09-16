@@ -18,8 +18,9 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
+ "state": "landed",
  "blocked_reason": null,
+ "failover": true,
  "spec": {
   "brief": "grid/briefs/packet-gm3.txt",
   "packet_id": "M3",
@@ -83,5 +84,10 @@
   ],
   "base": "glm/work",
   "max_rounds": 3
+ },
+ "landed": {
+  "base_head": "3ae92a38828bd8960c0bdf38c27adc5f6a0ea66c",
+  "merge_commit": "6c23c6bcd52d501744cfe3a487fd24c623766fa1",
+  "how": "ff"
  }
 }

@@ -18,8 +18,9 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
- "blocked_reason": null,
+ "state": "blocked",
+ "blocked_reason": "superseded: packet-gm5-2 \u2014 held disk_low 2026-09-16 02:48Z: packets volume full; packets moved to /Volumes/SATA_Drive, retried",
+ "failover": true,
  "spec": {
   "brief": "grid/briefs/packet-gm5.txt",
   "packet_id": "M5",

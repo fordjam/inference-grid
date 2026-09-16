@@ -1,0 +1,26 @@
+diff --git a/docs/coverage-report.md b/docs/coverage-report.md
+new file mode 100644
+--- /dev/null
++++ b/docs/coverage-report.md
+@@ -0,0 +1,22 @@
++# Pilot cohort coverage report
++
++Across the pilot cohort we audited fourteen sites in total. Each visit covered
++billing, metering and settlement as far as the site's instrumentation allowed,
++and the per-site scope is listed below.
++
++- Alder Weir — billing and metering
++- Bramford Rise — billing and settlement
++- Clay Hooton — billing only
++- Dunmarrow — billing, metering and settlement
++- East Ferren — billing and metering
++- Fenn Low — billing only
++- Garrowby Sound — billing and settlement
++- Hexen Mires — billing, metering and settlement
++- Ilkley Toll — billing only
++- Jarrow Fen — billing and metering
++- Kirkby Silt — billing and settlement
++- Lunder Bank — billing only
++- Marrow Quay — billing and metering
++
++Follow-ups are scheduled for the second half of the quarter.

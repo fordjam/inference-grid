@@ -1,0 +1,8 @@
+{
+ "review": {
+  "waived": true,
+  "reason": "waived: verified_in_lane and every declared gate passed",
+  "task": "packet-j3",
+  "attempt": "bcf6f246-740c-4023-8e45-056cd33902fa"
+ }
+}

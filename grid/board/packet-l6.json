@@ -18,8 +18,9 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
+ "state": "landed",
  "blocked_reason": null,
+ "failover": true,
  "spec": {
   "brief": "grid/briefs/packet-l6.txt",
   "packet_id": "L6",
@@ -83,5 +84,10 @@
   ],
   "base": "glm/work",
   "max_rounds": 3
+ },
+ "landed": {
+  "base_head": "5484e193faa8c98c03edd4f1f43426509f77d061",
+  "merge_commit": "a6d6b7fe19084f8eff13510f8466a50df8c93e2d",
+  "how": "union"
  }
 }

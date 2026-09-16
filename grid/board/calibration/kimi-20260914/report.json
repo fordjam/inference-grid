@@ -1,0 +1,107 @@
+{
+ "run_id": "kimi-20260914",
+ "lanes": {
+  "go-kimi": {
+   "cases": 5,
+   "defects": 4,
+   "recalled": 4,
+   "recall": 1.0,
+   "false_positives": 0,
+   "findings": 4,
+   "precision": 1.0,
+   "weighted_recall": 1.0,
+   "cases_detail": [
+    {
+     "case": "abatement-base-includes-grant",
+     "task": "calib-kimi-20260914-abatement-base-includes-grant",
+     "lane": "go-kimi",
+     "verdict": "rejected",
+     "attempt": null,
+     "defects": 1,
+     "recalled": 1,
+     "recalled_ids": [
+      "base-includes-grant"
+     ],
+     "missed": [],
+     "false_positives": 0,
+     "findings": 1,
+     "accepted": true,
+     "weighted_recalled": 3,
+     "weighted_total": 3
+    },
+    {
+     "case": "clean-normalize",
+     "task": "calib-kimi-20260914-clean-normalize",
+     "lane": "go-kimi",
+     "verdict": "approved",
+     "attempt": null,
+     "defects": 0,
+     "recalled": 0,
+     "recalled_ids": [],
+     "missed": [],
+     "false_positives": 0,
+     "findings": 0,
+     "accepted": true,
+     "weighted_recalled": 0,
+     "weighted_total": 0
+    },
+    {
+     "case": "delete-nested-under-list",
+     "task": "calib-kimi-20260914-delete-nested-under-list",
+     "lane": "go-kimi",
+     "verdict": "rejected",
+     "attempt": null,
+     "defects": 1,
+     "recalled": 1,
+     "recalled_ids": [
+      "delete-never-handled"
+     ],
+     "missed": [],
+     "false_positives": 0,
+     "findings": 1,
+     "accepted": true,
+     "weighted_recalled": 3,
+     "weighted_total": 3
+    },
+    {
+     "case": "mock-path-mismatch",
+     "task": "calib-kimi-20260914-mock-path-mismatch",
+     "lane": "go-kimi",
+     "verdict": "rejected",
+     "attempt": null,
+     "defects": 1,
+     "recalled": 1,
+     "recalled_ids": [
+      "unreachable-put-mock"
+     ],
+     "missed": [],
+     "false_positives": 0,
+     "findings": 1,
+     "accepted": true,
+     "weighted_recalled": 3,
+     "weighted_total": 3
+    },
+    {
+     "case": "report-count-sum",
+     "task": "calib-kimi-20260914-report-count-sum",
+     "lane": "go-kimi",
+     "verdict": "rejected",
+     "attempt": null,
+     "defects": 1,
+     "recalled": 1,
+     "recalled_ids": [
+      "count-does-not-sum"
+     ],
+     "missed": [],
+     "false_positives": 0,
+     "findings": 1,
+     "accepted": true,
+     "weighted_recalled": 2,
+     "weighted_total": 2
+    }
+   ]
+  }
+ },
+ "table": "| lane | cases | defects | recalled | recall | false positives | precision | weighted recall |\n|---|---|---|---|---|---|---|---|\n| go-kimi | 5 | 4 | 4 | 1.00 | 0 | 1.00 | 1.00 |",
+ "cases": "| lane | case | verdict | defects | recalled | false positives | accepted |\n|---|---|---|---|---|---|---|\n| go-kimi | abatement-base-includes-grant | rejected | 1 | 1 | 0 | True |\n| go-kimi | clean-normalize | approved | 0 | 0 | 0 | True |\n| go-kimi | delete-nested-under-list | rejected | 1 | 1 | 0 | True |\n| go-kimi | mock-path-mismatch | rejected | 1 | 1 | 0 | True |\n| go-kimi | report-count-sum | rejected | 1 | 1 | 0 | True |"
+}

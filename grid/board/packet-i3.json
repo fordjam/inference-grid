@@ -10,7 +10,7 @@
   "docs/reports/brief-16-i3.md"
  ],
  "lanes": [
-  "cline-deepseek"
+  "goat-deepseek"
  ],
  "author_family": null,
  "budget": {
@@ -18,7 +18,7 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
+ "state": "landed",
  "blocked_reason": null,
  "spec": {
   "brief": "grid/briefs/packet-i3.txt",
@@ -83,5 +83,10 @@
   ],
   "base": "glm/work",
   "max_rounds": 3
+ },
+ "landed": {
+  "base_head": "bd159c7c11e5c72ab2754b9169d804e00640e5fb",
+  "merge_commit": "a2e6ca3b1a3cdd3e9c92fb4bab1283378e3961f9",
+  "how": "ff"
  }
 }

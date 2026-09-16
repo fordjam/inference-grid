@@ -18,8 +18,9 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
- "blocked_reason": null,
+ "state": "blocked",
+ "blocked_reason": "superseded: packet-l3-2 \u2014 held wall_deadline on cline 2026-09-16 02:43Z while the disk was filling and clones stalled; retried",
+ "failover": true,
  "spec": {
   "brief": "grid/briefs/packet-l3.txt",
   "packet_id": "L3",

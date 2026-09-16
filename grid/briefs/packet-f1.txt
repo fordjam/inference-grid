@@ -1,0 +1,53 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### F1. shadowing_names catches two tests with one basename
+Independent review `review-board-runner-4` (attempt d36f530c, go-kimi) rejected the board
+runner on one finding, reproduced here as the packet:
+
+`board/runner.py::shadowing_names` checks artifact-vs-test/input and test-vs-input
+basenames, never test-vs-test. A flat task whose `tests` list names two files with the
+same basename — `strict/test_mod2.py` and `lenient/test_mod2.py` — passes the check and
+dispatches. `run_tests` then copies both to `scratch/test_mod2.py` in list order, so the
+second silently overwrites the first and the gate runs only `lenient/test_mod2.py`: a task
+can pass on the test that was not meant to decide it.
+
+Do: make `shadowing_names` report a test-vs-test basename clash the same way it reports
+the other two (the returned clash names both paths), so `tick` blocks the task with the
+existing `shadowing_names:` reason instead of dispatching. Tree tasks (artifacts with a
+`/`) keep relative paths in scratch and are not affected — do not change them. Tests: a
+flat task with two same-basename tests is blocked before any attempt with both paths in
+the reason; a tree task with the same two paths still dispatches; the existing
+artifact-vs-test and test-vs-input cases keep their current messages. Report:
+`docs/reports/packet-f1.md` naming the finding and the review that raised it.
+- Size: small. Why: the reviewer found the gate deciding on the wrong file.
+
+---

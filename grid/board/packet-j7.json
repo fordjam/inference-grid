@@ -18,13 +18,12 @@
   "output_bytes": 10000000,
   "thinking_tokens": 6000
  },
- "state": "ready",
+ "state": "landed",
  "blocked_reason": null,
+ "failover": true,
  "spec": {
   "brief": "grid/briefs/packet-j7.txt",
   "packet_id": "J7",
-  "base": "glm/work",
-  "max_rounds": 3,
   "gates": [
    {
     "name": "pytest",
@@ -82,6 +81,13 @@
      "PYTHONPATH": "src"
     }
    }
-  ]
+  ],
+  "base": "glm/work",
+  "max_rounds": 3
+ },
+ "landed": {
+  "base_head": "e52dfc3936218adae43f0d33e36e2588517ddcb3",
+  "merge_commit": "830fbcab3295cced650ac3de4a7fe02d8b4f421e",
+  "how": "merge"
  }
 }
