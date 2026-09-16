@@ -36,17 +36,19 @@ from ..lanes.packet import (
     ClineAdapter,
     CommandCodeAdapter,
     Gate,
+    OpencodeAdapter,
     ZcodeAdapter,
     build_loop,
 )
 from ..lanes.scout import orient
 from .task import validate_task
 
-# Lane kinds a packet task can run. Command Code and ZCode re-enter the same session on a
-# fix round; the ClinePass CLI cannot (`--id` refuses a prompt in JSON mode), so its rounds
-# are fresh sessions on the fix prompt — the branch and the gate output carry the context,
-# exactly as the operator's driver does it. Kinds outside this set are refused with a reason.
-PACKET_KINDS = ("goat_cli", "zcode_cli", "cline_cli")
+# Lane kinds a packet task can run. Command Code, ZCode and OpenCode re-enter the same
+# session on a fix round (`opencode run --session <id>`); the ClinePass CLI cannot (`--id`
+# refuses a prompt in JSON mode), so its rounds are fresh sessions on the fix prompt — the
+# branch and the gate output carry the context, exactly as the operator's driver does it.
+# Kinds outside this set are refused with a reason.
+PACKET_KINDS = ("goat_cli", "zcode_cli", "cline_cli", "opencode_cli")
 UNSUPPORTED_ADAPTERS = {}
 
 PACKET_ID = re.compile(r"[A-Z]\d{1,3}")
@@ -228,6 +230,11 @@ def packet_adapter(kind, lane, work, attempt_dir, session_name):
             data_dir=Path.home() / ".cline" / "data",
             binary=lane["executable"],
         )
+    if kind == "opencode_cli":
+        # The Go plan's login is the CLI's own (`~/.local/share/opencode/auth.json`,
+        # read-only under the sandbox); the session id comes from the JSON stream and a
+        # fix round resumes it with `--session`.
+        return OpencodeAdapter(lane["model"], work=work, binary=lane["executable"])
     raise Refused("lane kind " + kind + " does not run packet tasks")
 
 
@@ -236,7 +243,13 @@ def build_sandbox(kind, work, attempt_dir):
     from ..lanes import sandbox
 
     home = Path.home()
-    extra = home / {"goat_cli": ".commandcode", "cline_cli": ".cline"}.get(kind, ".zcode")
+    # OpenCode keeps its state directory (.opencode/) under the clone, inside the
+    # workspace's own write root — it is the one CLI kind that needs no home root.
+    extra = {
+        "goat_cli": home / ".commandcode",
+        "cline_cli": home / ".cline",
+        "zcode_cli": home / ".zcode",
+    }.get(kind)
     # The agent writes only in its clone, its CLI's own state and a scratch tmp/ under the
     # attempt; the attempt directory itself is the harness's (transcripts, gates), written
     # from outside the sandbox. Granting all of it would put the clone's parent inside a
@@ -246,7 +259,7 @@ def build_sandbox(kind, work, attempt_dir):
     profile = sandbox.write_profile(
         work,
         Path(attempt_dir) / "packet.sb",
-        extra_write_roots=[extra, tmp],
+        extra_write_roots=[extra, tmp] if extra else [tmp],
         deny_read_roots=sandbox.deny_read_roots(),
     )
     sandbox.probe(profile, work)
@@ -328,6 +341,16 @@ def admit_packet(ledger, lanes, lane_id, task, project_root, packet_dir, account
         raise Refused("packet lane kind " + kind + " unsupported: " + UNSUPPORTED_ADAPTERS[kind])
     if kind not in PACKET_KINDS:
         raise Refused("lane kind " + kind + " does not run packet tasks")
+    if kind == "opencode_cli":
+        # The one policy gate the one-shot opencode lane enforces, at admission: when the
+        # operator's deny-read list covers the CLI's auth file, nothing spawns — the digest
+        # discipline proves a readable key was not modified, never that it was not read.
+        from ..lanes import sandbox
+        from ..lanes.opencode import credential_denied
+
+        denied = credential_denied(Path.home(), sandbox.deny_read_roots())
+        if denied is not None:
+            raise Refused("credential_denied_by_policy: the deny-read list covers " + str(denied))
     spec = task["spec"]
     project_root = Path(project_root)
     branch = "packet/" + task["id"]
