@@ -16,6 +16,7 @@ the operator. The base branch is never advanced here — that stays an operator 
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -31,7 +32,15 @@ from ..lanes.brief import (
     mentioned_paths,
     packet_text,
 )
-from ..lanes.packet import ClineAdapter, CommandCodeAdapter, Gate, ZcodeAdapter, build_loop
+from ..lanes.packet import (
+    DEFAULT_MIN_FREE_BYTES,
+    ClineAdapter,
+    CommandCodeAdapter,
+    Gate,
+    ZcodeAdapter,
+    build_loop,
+    free_disk_bytes,
+)
 from ..lanes.scout import orient
 from .task import validate_task
 
@@ -369,7 +378,60 @@ def admit_packet(ledger, lanes, lane_id, task, project_root, packet_dir, account
     }
 
 
-def run_packet(ledger, admission):
+def checkout_bytes(project_root, rev):
+    """Bytes a full checkout of `rev` writes: the sum of its blob sizes, read from the tree
+    alone. A shared clone saves the objects but not the working tree, so this is what one
+    more attempt costs the packets volume (vix-rs: 3.2 GiB of committed series per clone)."""
+    total = 0
+    for line in _git(project_root, "ls-tree", "-r", "-l", rev).decode().splitlines():
+        meta = line.split("\t", 1)[0].split()
+        if len(meta) == 4 and meta[1] == "blob":
+            total += int(meta[3])
+    return total
+
+
+RESERVATIONS = ".reservations"
+# A clone that has not finished in an hour is not coming; its reservation is ignored.
+RESERVATION_TTL_SECONDS = 3600
+
+
+def _packets_root(attempt_dir):
+    """The packets root above an attempt: <packets_root>/<task>/<stamp>/attempts/<aid>."""
+    return Path(attempt_dir).parents[3]
+
+
+def reserved_bytes(packets_root, now=None):
+    """Bytes other attempts have claimed for clones still being written.
+
+    Concurrent dispatch (J6) runs several boards as separate processes and several
+    packets per board as threads, so a free-space reading is stale the moment two of
+    them take it: on 2026-09-16 two 3.2 GiB vix-rs clones each passed the pre-clone
+    guard against the same 15 GiB and left 5 GiB. Each pending clone writes its size to
+    `<packets_root>/.reservations/<aid>` before cloning and removes it after, and the
+    guard subtracts the live reservations from what the volume reports."""
+    now = time.time() if now is None else now
+    root = Path(packets_root) / RESERVATIONS
+    total = 0
+    if not root.is_dir():
+        return 0
+    for entry in root.iterdir():
+        try:
+            if now - entry.stat().st_mtime > RESERVATION_TTL_SECONDS:
+                continue
+            total += int(entry.read_text().strip() or 0)
+        except (OSError, ValueError):
+            continue
+    return total
+
+
+def _reserve(packets_root, aid, nbytes):
+    root = Path(packets_root) / RESERVATIONS
+    root.mkdir(parents=True, exist_ok=True)
+    (root / aid).write_text(str(nbytes) + "\n")
+    return root / aid
+
+
+def run_packet(ledger, admission, *, min_free_bytes=DEFAULT_MIN_FREE_BYTES, free_bytes=None):
     """Run an admitted packet attempt's loop and settle it; returns (aid, state, attempt_dir).
 
     The loop half of a packet attempt: build the scratch clone, run the lane adapter with
@@ -377,6 +439,14 @@ def run_packet(ledger, admission):
     attempt with the verdict as its receipt, or hold it with the loop's reason and leave
     the branch for the operator. A reconciliation hold at admission returns immediately
     without running anything, the state `admit_packet` reported.
+
+    The clone is the expensive part, so the disk guard runs before it, not just before
+    each round: the volume must hold `min_free_bytes` plus the checkout itself, or the
+    attempt is held `disk_low` without writing anything. Concurrent dispatch (J6) starts
+    several clones in one tick, so the floor alone is not enough — on 2026-09-16 four of
+    them filled the disk together. On completion the clone is removed: the branch is
+    already fetched into the project and the receipt pins its head, so the working tree
+    is dead weight (30 of 37 GiB of packet workspaces were landed clones).
     """
     aid = admission["aid"]
     context = admission["context"]
@@ -391,9 +461,31 @@ def run_packet(ledger, admission):
     base_rev = context["base_rev"]
     project_root = context["project_root"]
     attempt_dir = context["attempt_dir"]
+    measure = free_bytes or free_disk_bytes
+    reservation = None
     try:
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        packets_root = _packets_root(attempt_dir)
+        checkout = checkout_bytes(project_root, base_rev)
+        # Claim first, then read: a reader who claims after us sees our reservation, and
+        # ours counts the claims that beat us to the directory.
+        reservation = _reserve(packets_root, aid, checkout)
+        free = measure(attempt_dir) - (reserved_bytes(packets_root) - checkout)
+        need = min_free_bytes + checkout
+        if free < need:
+            reservation.unlink(missing_ok=True)
+            reservation = None
+            ledger.hold(
+                aid,
+                f"packet attempt: disk_low: {free} free after other pending clones, "
+                f"clone needs {need}",
+            )
+            return aid, "held", attempt_dir
         clone = attempt_dir / "work"
         _git(project_root, "clone", "-q", "--shared", str(project_root), str(clone))
+        # The checkout is on disk now; what the volume reports includes it.
+        reservation.unlink(missing_ok=True)
+        reservation = None
         _git(clone, "checkout", "-q", "-B", branch, base_rev)
         adapter = packet_adapter(
             kind, lane, clone, attempt_dir, session_name=f"packet-{task['id']}-{aid[:8]}"
@@ -425,6 +517,8 @@ def run_packet(ledger, admission):
             max_rounds=spec["max_rounds"],
         )
     except Exception as exc:
+        if reservation is not None:
+            reservation.unlink(missing_ok=True)
         ledger.hold(aid, "packet attempt: " + type(exc).__name__ + ": " + str(exc)[:300])
         return aid, "held", attempt_dir
 
@@ -438,6 +532,9 @@ def run_packet(ledger, admission):
     # The deliverable is the branch; its receipt artifact pins the exact commit object.
     commit_digest = hashlib.sha256(_git(clone, "cat-file", "commit", head)).hexdigest()
     _git(project_root, "fetch", "-q", str(clone), f"refs/heads/{branch}:refs/heads/{branch}")
+    # The branch now lives in the project; the clone's working tree is reclaimed. Held
+    # attempts keep theirs — verify_followup reads the files a hold left behind.
+    shutil.rmtree(clone, ignore_errors=True)
     receipt = {
         "status": "completed",
         "finish_reason": "stop",

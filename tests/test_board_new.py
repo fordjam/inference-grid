@@ -353,3 +353,27 @@ def test_retry_leaves_a_link_that_names_a_different_review_alone(tmp_path):
     created = retry_task(board, tmp_path, "review-x", "an unrelated review retried")
     assert created["standalone"] is True
     assert (board / "review/y/source.json").read_bytes() == before
+
+
+def test_retry_of_a_packet_task_renames_the_brief_in_its_spec_too(tmp_path):
+    # A packet spec names the task's own brief and its validator insists the two agree;
+    # before this, every packet retry was refused with "brief must be the task's own
+    # brief file" (2026-09-16: the disk-full retries of vix-rs Q9/R1 and GM5/L3).
+    from inference_grid.board.new import retry_task
+    from tests.test_packet_task import make_packet_task
+
+    board = tmp_path / "grid/board"
+    board.mkdir(parents=True)
+    packet = make_packet_task()
+    # Packet tasks are authored by from-brief, not new_task's shared schema: write the card.
+    (board / "d1-packet.json").write_text(json.dumps(packet, indent=1) + "\n")
+    (tmp_path / "grid/briefs").mkdir()
+    (tmp_path / "grid/briefs/packet-d1.txt").write_text("A1: the packet\n")
+    created = retry_task(board, tmp_path, "d1-packet", "clone died when the packets volume filled")
+    assert created["id"] == "d1-packet-2"
+    retried = json.loads((board / "d1-packet-2.json").read_text())
+    assert retried["brief"] == "grid/briefs/d1-packet-2.txt"
+    assert retried["spec"]["brief"] == retried["brief"]
+    assert retried["spec"]["packet_id"] == "A1"
+    assert (tmp_path / "grid/briefs/d1-packet-2.txt").read_text() == "A1: the packet\n"
+    assert load_board(board)["d1-packet-2"][1]["state"] == "ready"

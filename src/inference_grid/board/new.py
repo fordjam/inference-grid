@@ -184,6 +184,10 @@ def retry_task(board_dir, project_root, retry, change, budget=None, lanes=None, 
     task["inputs"] = [
         new_brief_rel if p == predecessor["brief"] else p for p in predecessor["inputs"]
     ]
+    # A packet spec names the task's own brief too, and its validator insists the two
+    # agree — so a packet retry must carry the renamed brief in both places.
+    if isinstance(task.get("spec"), dict) and task["spec"].get("brief") == predecessor["brief"]:
+        task["spec"] = dict(task["spec"], brief=new_brief_rel)
     if budget is not None:
         task["budget"] = budget
     if lanes is not None:

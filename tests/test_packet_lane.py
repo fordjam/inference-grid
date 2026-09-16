@@ -555,3 +555,78 @@ def test_the_verdict_records_the_free_space_the_guard_measured(tmp_path):
     )
     assert verdict["reason"] == "gates_passed"
     assert verdict["disk_free_bytes"] == 6_000_000_000
+
+
+class QuotaCutAgent(ScriptedAgent):
+    """An agent the provider stops mid-round: ClinePass's limit message, then exit 1."""
+
+    def _argv(self, prompt, session):
+        self.calls.append((session, prompt))
+        code = (
+            "import sys\n"
+            'print(\'{"type":"run_start","sessionId":"sess-42"}\')\n'
+            'print(\'{"ts":"2026-09-16T12:21:55Z","type":"error","message":"ClinePass limit reached\\\\n'
+            "You have reached your 5-hour Clinepass limit. The limit resets in 4h 10m\"}')\n"
+            'print(\'{"type":"run_result","finishReason":"error","iterations":125}\')\n'
+            "sys.exit(1)\n"
+        )
+        return [PY, "-c", code]
+
+
+def test_a_provider_limit_ends_the_attempt_as_a_transport_error(tmp_path):
+    # 2026-09-16: two cline packets ran 52 minutes, then ClinePass cut them off. With red
+    # gates and under ten minutes left the loop said `wall_deadline_before_round`, so the
+    # different-family failover never saw a transport refusal. Now the provider's own
+    # message names the reason, and no fix round is spent on an account that is out.
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "gate-marker").write_text("fail")
+    agent = QuotaCutAgent(work, pass_on_round=99)
+    verdict = build_loop(
+        agent,
+        plain,
+        work,
+        dict(os.environ),
+        "brief",
+        [marker_gate(work)],
+        tmp_path / "attempt",
+        wall_seconds=3600,
+        max_rounds=3,
+        min_free_bytes=1,
+        free_bytes=lambda path: 6_000_000_000,
+    )
+    assert verdict["reason"].startswith("transport_error: provider limit: ClinePass limit reached")
+    assert len(verdict["rounds"]) == 1 and len(agent.calls) == 1
+    assert verdict["gates_passed"] is False
+    assert verdict["rounds"][0]["agent_terminal"] == {"kind": "cline", "finish_reason": "error"}
+
+
+def test_a_limit_message_never_overrides_green_gates(tmp_path):
+    # The provider cut the agent off after it had already finished: the gates decide.
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "gate-marker").write_text("pass")
+    verdict = build_loop(
+        QuotaCutAgent(work, pass_on_round=1),
+        plain,
+        work,
+        dict(os.environ),
+        "brief",
+        [marker_gate(work)],
+        tmp_path / "attempt",
+        wall_seconds=3600,
+        min_free_bytes=1,
+        free_bytes=lambda path: 6_000_000_000,
+    )
+    assert verdict["reason"] == "gates_passed"
+
+
+def test_provider_limit_message_ignores_agent_prose(tmp_path):
+    native = tmp_path / "native.jsonl"
+    native.write_text(
+        '{"type":"agent_event","event":{"type":"content_start","reasoning":"the rate limit test"}}\n'
+        '{"type":"run_result","finishReason":"completed","text":"done"}\n'
+    )
+    assert packet.provider_limit_message(native) is None
+    native.write_text('{"type":"error","message":"HTTP 429 Too Many Requests"}\n')
+    assert packet.provider_limit_message(native) == "HTTP 429 Too Many Requests"

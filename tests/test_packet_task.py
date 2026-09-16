@@ -299,8 +299,11 @@ def test_tick_runs_the_packet_loop_and_fetches_the_branch(world):
     assert receipt["artifacts"][0]["path"] == "packet/d1-packet"
     assert len(receipt["artifacts"][0]["sha256"]) == 64
     # The branch is in the coordinator's repo; the base and the checkout are untouched.
+    # The clone itself is gone — the receipt pins the head, and a landed clone is the
+    # working tree that filled the disk.
     branch_head = git(world["project"], "rev-parse", "packet/d1-packet")
-    assert branch_head == git(attempt_dir / "work", "rev-parse", "HEAD")
+    assert branch_head == receipt["head"]
+    assert not (attempt_dir / "work").exists()
     assert git(world["project"], "rev-parse", "main") == base_before
     assert git(world["project"], "rev-parse", "HEAD") == head_before
     # The fetch wrote refs only: the working tree and index are exactly as they were.
@@ -310,6 +313,36 @@ def test_tick_runs_the_packet_loop_and_fetches_the_branch(world):
         for e in world["ledger"].scorecard(account=world["account"])
     }
     assert card == {("packet", 1, 1)}
+
+
+def test_a_short_volume_holds_the_attempt_before_any_clone(world, monkeypatch):
+    # The guard counts the checkout, not just the floor: 5 GiB free is enough for the
+    # floor alone, but this repo's tree plus the floor is more than the volume holds.
+    tree = packet_task.checkout_bytes(world["project"], "main")
+    assert tree > 0
+    floor = 5 * 1024**3
+    original = packet_task.run_packet
+    monkeypatch.setattr(
+        packet_task,
+        "run_packet",
+        lambda ledger, admission: original(
+            ledger, admission, min_free_bytes=floor, free_bytes=lambda path: floor + tree - 1
+        ),
+    )
+    monkeypatch.setattr(runner, "run_packet", packet_task.run_packet)
+    results = tick(world)
+    assert [r["result"] for r in results] == ["held"]
+    held = [r for r in world["ledger"].status() if r["state"] == "held"]
+    assert len(held) == 1 and held[0]["reason"].startswith("packet attempt: disk_low:")
+    attempt_dir = next(iter((world["packets"]).glob("*/*/attempts/" + held[0]["id"])))
+    assert not (attempt_dir / "work").exists()
+    assert (
+        subprocess.run(
+            ["git", "-C", str(world["project"]), "rev-parse", "--verify", "-q", "packet/d1-packet"],
+            capture_output=True,
+        ).returncode
+        != 0
+    )
 
 
 def test_a_failing_gate_holds_the_attempt_and_leaves_the_branch(world):
@@ -410,3 +443,42 @@ def test_the_commit_gate_and_the_prompt_carry_the_lanes_own_trailer(world):
     message = git(world["project"], "log", "-1", "--format=%B", "packet/d1-packet")
     assert "Co-Authored-By: Deepseek-V4.1-Flash <noreply@deepseek.com>" in message
     assert "GLM" not in message
+
+
+def test_a_pending_clone_elsewhere_counts_against_the_guard(world, monkeypatch, tmp_path):
+    # Two boards dispatch in the same second: the first has claimed its clone's bytes but
+    # not written them yet, so the volume still reports them free. The second must count
+    # that claim — on 2026-09-16 two vix-rs clones each passed against the same 15 GiB.
+    tree = packet_task.checkout_bytes(world["project"], "main")
+    floor = 5 * 1024**3
+    # Enough for the floor and exactly one checkout — and one is already pending.
+    reported_free = floor + tree
+    packets_root = world["packets"]
+    packet_task._reserve(packets_root, "other-attempt", tree)
+    original = packet_task.run_packet
+    monkeypatch.setattr(
+        packet_task,
+        "run_packet",
+        lambda ledger, admission: original(
+            ledger, admission, min_free_bytes=floor, free_bytes=lambda path: reported_free
+        ),
+    )
+    monkeypatch.setattr(runner, "run_packet", packet_task.run_packet)
+    results = tick(world)
+    assert [r["result"] for r in results] == ["held"]
+    held = [r for r in world["ledger"].status() if r["state"] == "held"]
+    assert held[0]["reason"].startswith("packet attempt: disk_low:")
+    assert "after other pending clones" in held[0]["reason"]
+    # The held attempt left no reservation of its own; the other one is untouched.
+    assert sorted(p.name for p in (packets_root / ".reservations").iterdir()) == ["other-attempt"]
+    # A reservation older than the TTL is a dead clone and no longer counts.
+    stale = packets_root / ".reservations" / "other-attempt"
+    old = time.time() - packet_task.RESERVATION_TTL_SECONDS - 5
+    os.utime(stale, (old, old))
+    assert packet_task.reserved_bytes(packets_root) == 0
+
+
+def test_a_completed_clone_leaves_no_reservation_behind(world):
+    tick(world)
+    reservations = world["packets"] / ".reservations"
+    assert not reservations.exists() or list(reservations.iterdir()) == []

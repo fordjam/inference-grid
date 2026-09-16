@@ -423,6 +423,56 @@ def terminal_corroboration(native: Path) -> Optional[Dict]:
     return found
 
 
+# What a provider says when it stops the agent for quota, not for the work: ClinePass's
+# "You have reached your 5-hour Clinepass limit", HTTP 429s, rate limits. Matched only on the
+# native stream's own error rows, never on the agent's prose.
+PROVIDER_LIMIT_PATTERNS = (
+    r"limit reached",
+    r"rate.?limit",
+    r"\b429\b",
+    r"quota",
+    r"usage limit",
+    r"insufficient (?:credits|balance|quota)",
+)
+
+
+def provider_limit_message(native: Path) -> Optional[str]:
+    """The provider's own limit message from the native stream, or None.
+
+    On 2026-09-16 two cline packets each ran 52 minutes, then ClinePass cut them off with
+    "5-hour limit reached"; the loop saw an exited process with red gates and, with under
+    ten minutes left, settled `wall_deadline_before_round` — a deadline that was really a
+    quota refusal, so the one different-family retry never fired. Reads the error rows
+    (`{"type": "error", "message": ...}`) and a `run_result`/`result` terminal whose
+    finish is an error, and returns the first line of the first match."""
+    try:
+        with native.open("rb") as handle:
+            for raw in handle:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                text = None
+                if row.get("type") == "error":
+                    text = row.get("message")
+                elif row.get("type") == "run_result" and row.get("finishReason") == "error":
+                    text = row.get("text")
+                elif row.get("type") == "result" and row.get("subtype", "").startswith("error"):
+                    text = row.get("result") or row.get("error")
+                if not isinstance(text, str):
+                    continue
+                if any(re.search(pat, text, re.IGNORECASE) for pat in PROVIDER_LIMIT_PATTERNS):
+                    return text.strip().splitlines()[0][:200]
+    except OSError:
+        return None
+    return None
+
+
 def run_gate(work: Path, gate: Gate, env: Dict[str, str], log_dir: Path) -> GateResult:
     """Run one gate as code and keep its whole output on disk; return the tail."""
     log = log_dir / f"gate-{_slug(gate.name)}.log"
@@ -622,6 +672,12 @@ def build_loop(
             break
         if all(r.ok for r in results):
             reason = "gates_passed"
+            break
+        limit = provider_limit_message(native) if code != 0 else None
+        if limit is not None:
+            # The provider stopped the agent, not the work: no fix round can help on this
+            # account, and the runner's failover reads `transport_error` as its cue.
+            reason = "transport_error: provider limit: " + limit
             break
         if session is None:
             reason = "no_session_to_resume"
