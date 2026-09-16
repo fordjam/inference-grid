@@ -743,3 +743,110 @@ def test_exclude_commits_refuses_single_mode_and_unknown_spec_keys(tmp_path):
             exclude_commits=["not a sha"],
         )
     assert not (board / "review").exists() or not any((board / "review").rglob("*"))
+
+
+def one_commit_two_groups_repo(tmp_path, src_size=900, tests_size=900):
+    """A repo whose whole range is one commit touching src/ and tests/."""
+    repo = tmp_path / "factory-frontend"
+    (repo / "src").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "src/seed.py").write_text("SEED = 0\n")
+    git(repo, "add", "-A")
+    commit(repo, "base")
+    base = rev(repo, "HEAD")
+    (repo / "src/app.py").write_text("VALUE = " + "x" * src_size + "\n")
+    (repo / "tests/test_app.py").write_text("EXPECTED = " + "y" * tests_size + "\n")
+    git(repo, "add", "-A")
+    commit(repo, "add the app and its test", trailer="Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>")
+    return repo, base, rev(repo, "HEAD")
+
+
+def test_a_single_over_budget_commit_splits_by_top_level_directory(tmp_path):
+    """The range a whole-repository review needs is often one commit, so the per-commit
+    split cannot help: the commit splits again, one task per top-level directory, each
+    packet measured against the budget before anything is written."""
+    repo, base, tip = one_commit_two_groups_repo(tmp_path)
+    board, project = board_and_project(tmp_path)
+    created = branch_review.review_branch(
+        board,
+        project,
+        {"repo": str(repo), "base": base, "tip": tip},
+        split="commit",
+        max_input_bytes=2500,
+    )
+    assert [entry["id"] for entry in created["tasks"]] == [
+        f"review-factory-frontend-{tip[:7]}-src",
+        f"review-factory-frontend-{tip[:7]}-tests",
+    ]
+    for entry in created["tasks"]:
+        assert 0 < entry["staged_bytes"] <= 2500
+        task = json.loads(Path(entry["task"]).read_text())
+        assert task["state"] == "ready"
+    # Each packet stages and diffs only its own group.
+    src_task = created["tasks"][0]
+    assert any(p.endswith("src/app.py") for p in src_task["staged"])
+    assert not any(p.startswith("grid/board/review") and "tests/" in p for p in src_task["staged"])
+    src_patch = (project / f"grid/board/review/{src_task['id']}/diff.patch").read_text()
+    assert "VALUE = " in src_patch and "EXPECTED = " not in src_patch
+    # The brief names the group under review and lists the sibling reviews.
+    brief = Path(src_task["brief"]).read_text()
+    assert "restricted to the src files" in brief
+    assert f"review-factory-frontend-{tip[:7]}-tests" in brief
+
+
+def test_paths_restrict_staging_and_the_patch(tmp_path):
+    repo, base, _ = reviewed_repo(tmp_path)
+    (repo / "docs").mkdir()
+    (repo / "docs/notes.md").write_text("# notes\n")
+    git(repo, "add", "-A")
+    commit(repo, "note the docs")
+    tip = rev(repo, "HEAD")
+    board, project = board_and_project(tmp_path)
+    created = branch_review.review_branch(
+        board, project, {"repo": str(repo), "base": base, "tip": tip, "paths": ["src/"]}
+    )
+    task = json.loads(Path(created["task"]).read_text())
+    assert all("src/" in p for p in task["inputs"][1:-1])
+    assert not any("docs/notes.md" in p for p in task["inputs"])
+    patch = (project / f"grid/board/review/{created['id']}/diff.patch").read_text()
+    assert "VALUE = 2" in patch and "notes.md" not in patch
+    brief = Path(created["brief"]).read_text()
+    assert "src/" in brief and "covers only them" in brief
+
+
+def test_paths_entries_are_validated(tmp_path):
+    repo, base, tip = reviewed_repo(tmp_path)
+    board, project = board_and_project(tmp_path)
+    with pytest.raises(ValueError, match="safe relative path"):
+        branch_review.review_branch(
+            board, project, {"repo": str(repo), "base": base, "tip": tip, "paths": ["../up"]}
+        )
+    with pytest.raises(ValueError, match="no changed files under the requested path filter"):
+        branch_review.review_branch(
+            board, project, {"repo": str(repo), "base": base, "tip": tip, "paths": ["web/"]}
+        )
+    with pytest.raises(ValueError, match="non-empty path prefixes"):
+        branch_review.review_branch(
+            board, project, {"repo": str(repo), "base": base, "tip": tip, "paths": ["src/", ""]}
+        )
+
+
+def test_an_over_budget_directory_is_refused_with_its_byte_count(tmp_path):
+    """A directory that still exceeds the budget after the split is refused with its
+    size, never forced; nothing is written."""
+    repo, base, tip = one_commit_two_groups_repo(tmp_path, src_size=1400, tests_size=40)
+    board, project = board_and_project(tmp_path)
+    with pytest.raises(ValueError, match="exceeds the 2500-byte budget") as excinfo:
+        branch_review.review_branch(
+            board,
+            project,
+            {"repo": str(repo), "base": base, "tip": tip},
+            split="commit",
+            max_input_bytes=2500,
+        )
+    message = str(excinfo.value)
+    assert "src (" in message and "bytes:" in message
+    assert not any(board.glob("review-*.json"))
+    assert not (board / "review").exists() or not any((board / "review").rglob("*"))
+    assert not any((project / "grid/briefs").glob("review-factory-frontend-*"))
