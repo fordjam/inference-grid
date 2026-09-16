@@ -1,155 +1,79 @@
-"""Reviewer calibration: a corpus of review packets with known answers.
+"""Reviewer and packet calibration: a corpus of eval cases with known answers.
 
-The board routes independent_review tasks by an acceptance rate that means "the
-reviewer produced a well-formed verdict", not "the verdict was right". A calibration
-corpus measures the difference: each case is a directory holding exactly what a review
-packet holds (a diff.patch, the changed files under their relative paths, a brief.txt)
-plus an answer.json that is never staged into the packet, naming the defects a correct
-reviewer must find (file, must_mention keywords, severity) or `clean: true` to measure
-false positives. `author_calibration` writes the cases onto a board as ordinary
-independent_review tasks; `score_calibration` compares the settled replies against the
-answer keys and reports recall, false positives and weighted recall per lane.
+The board routes tasks by an acceptance rate that means "the lane produced a well-formed
+result", not "the result was right". A calibration corpus measures the difference, in two
+kinds (board/calibration/case.py): a `review` case holds exactly what a review packet
+holds (a diff.patch, the changed files, a brief.txt) plus an answer.json naming the
+defects a correct reviewer must find (or `clean: true` to measure false positives); a
+`packet` case holds a brief and the repository at `base` plus a hidden `reference/` with
+the reference fix and the reference test suite. `author_calibration` writes the review
+cases onto a board as ordinary independent_review tasks; `score_calibration` compares the
+settled replies against the answer keys and reports recall, false positives and weighted
+recall per lane. Scoring the two kinds is board/calibration/score.py's `score`, and one
+outcome path records both as `eval:<kind>` rows.
 """
 
 import json
-import re
 import time
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
-from .guard import check_input, check_name
-from .branch_review import _plan_task, _safe_rel, _write_files
-from .runner import parse_review
-from .task import validate_task
+from .case import (
+    CASE_FILE,
+    DEFECT_KEYS,
+    KINDS,
+    NAME,
+    SEVERITY_WEIGHTS,
+    diff_paths,
+    load_case,
+    load_corpus,
+)
+from .score import _score_findings, record_outcome, score
 
-# Task-id charset: ids are `calib-<run_id>-<case>`, so both parts are constrained.
-NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
-# The file blocks of a unified diff, on both sides of each rename pair.
-DIFF_PATH = re.compile(r"^diff --git a/(.+?) b/(.+)$", re.MULTILINE)
+from ..branch_review import _plan_task, _write_files
+from ..runner import parse_review
+from ..task import validate_task
+
+__all__ = [
+    "CASE_FILE",
+    "DEFECT_KEYS",
+    "KINDS",
+    "NAME",
+    "SEVERITY_WEIGHTS",
+    "author_calibration",
+    "calibration_settled",
+    "calibration_task",
+    "diff_paths",
+    "is_calibration_outcome",
+    "load_case",
+    "load_corpus",
+    "newest_calibration_at",
+    "record_outcome",
+    "score",
+    "score_calibration",
+    "validate_calibration_run_task",
+]
 
 AUTHOR_FAMILY = "calibration"
-SEVERITY_WEIGHTS = {"high": 3, "medium": 2, "low": 1}
-DEFECT_KEYS = {"id", "file", "must_mention", "severity", "note"}
 # A calibration_run is code, not a model call: no lane runs it, no artifacts come back.
 RUN_BUDGET = {"wall_seconds": 60, "output_bytes": 100000, "thinking_tokens": None}
 # The per-case review task states that count as settled: approved (passed) or refused (blocked).
 SETTLED_STATES = ("passed", "blocked")
+# score_calibration records review outcomes as `eval:review` (the pre-kinds corpus used
+# the bare `calibration`); both feed the ledger-side calibration aggregate.
+EVAL_CATEGORY_PREFIX = "eval:"
+LEGACY_CATEGORY = "calibration"
 
 
-def diff_paths(patch):
-    """Every path a unified diff touches, both the a/ and b/ side of each block."""
-    paths = set()
-    for match in DIFF_PATH.finditer(patch):
-        paths.update(match.groups())
-    return paths
-
-
-def _validate_answer(case, answer, patch_paths):
-    """The answer key must be well-formed and only name files the diff touches."""
-    if not isinstance(answer, dict) or set(answer) != {"defects", "clean"}:
-        raise ValueError(f"{case}: answer.json must hold exactly defects and clean")
-    clean = answer["clean"]
-    defects = answer["defects"]
-    if not isinstance(clean, bool) or not isinstance(defects, list):
-        raise ValueError(f"{case}: answer.json clean must be bool, defects a list")
-    if clean and defects:
-        raise ValueError(f"{case}: a clean case must have zero defects")
-    seen = set()
-    for defect in defects:
-        if not isinstance(defect, dict) or set(defect) != DEFECT_KEYS:
-            raise ValueError(f"{case}: each defect holds exactly {sorted(DEFECT_KEYS)}")
-        if not isinstance(defect["id"], str) or not defect["id"] or defect["id"] in seen:
-            raise ValueError(f"{case}: defect ids must be distinct non-empty strings")
-        seen.add(defect["id"])
-        file = defect["file"]
-        if not isinstance(file, str) or not _safe_rel(file):
-            raise ValueError(f"{case}: defect file must be a safe relative path")
-        denied = check_name(file)
-        if denied:
-            raise ValueError(f"{case}: {file}: {denied}")
-        if file not in patch_paths:
-            raise ValueError(f"{case}: defect names {file}, which the diff does not touch")
-        mentions = defect["must_mention"]
-        if (
-            not isinstance(mentions, list)
-            or not mentions
-            or not all(isinstance(m, str) and m for m in mentions)
-        ):
-            raise ValueError(f"{case}: must_mention must be a non-empty list of strings")
-        if defect["severity"] not in SEVERITY_WEIGHTS:
-            raise ValueError(f"{case}: severity must be one of {sorted(SEVERITY_WEIGHTS)}")
-        if not isinstance(defect["note"], str) or not defect["note"]:
-            raise ValueError(f"{case}: defect note must be a non-empty string")
-
-
-def load_corpus(corpus_dir):
-    """Load and validate every case under corpus_dir; returns case records in name order.
-
-    Each case is a directory holding brief.txt, diff.patch and answer.json plus the
-    changed files under their relative paths. Everything that would be staged passes the
-    board's input guard (credential names and content are refused), the diff must touch
-    every file an answer names, and two staged files may not share a basename (packets
-    are flat: the runner copies inputs into one scratch directory by basename). The
-    answer key itself is validated but never enters the staged file list.
-    """
-    corpus_dir = Path(corpus_dir)
-    if not corpus_dir.is_dir():
-        raise ValueError(f"calibration corpus is not a directory: {corpus_dir}")
-    cases = []
-    for case_dir in sorted(
-        p for p in corpus_dir.iterdir() if p.is_dir() and not p.name.startswith(".")
-    ):
-        name = case_dir.name
-        if not NAME.fullmatch(name):
-            raise ValueError(f"{name}: case names must match [a-z0-9-]")
-        for required in ("brief.txt", "diff.patch", "answer.json"):
-            if not (case_dir / required).is_file():
-                raise ValueError(f"{name}: a case holds {required}")
-        staged = []
-        seen_basenames = set()
-        for path in sorted(case_dir.rglob("*")):
-            if not path.is_file():
-                continue
-            relative = path.relative_to(case_dir).as_posix()
-            if relative in ("answer.json", "brief.txt", "diff.patch"):
-                continue
-            if not _safe_rel(relative):
-                raise ValueError(f"{name}: {relative} is not a safe relative path")
-            if PurePosixPath(relative).name in seen_basenames:
-                raise ValueError(f"{name}: {relative} shares a basename with another staged file")
-            seen_basenames.add(PurePosixPath(relative).name)
-            data = path.read_bytes()
-            problem = check_input(relative, data)
-            if problem:
-                raise ValueError(f"{name}: {relative}: {problem}")
-            staged.append((relative, data))
-        brief = (case_dir / "brief.txt").read_bytes()
-        patch = (case_dir / "diff.patch").read_bytes()
-        for label, data in (("brief.txt", brief), ("diff.patch", patch)):
-            problem = check_input(label, data)
-            if problem:
-                raise ValueError(f"{name}: {label}: {problem}")
-        try:
-            answer = json.loads((case_dir / "answer.json").read_text())
-        except ValueError as exc:
-            raise ValueError(f"{name}: answer.json is not valid JSON: {exc}") from exc
-        _validate_answer(name, answer, diff_paths(patch.decode("utf-8", "replace")))
-        cases.append(
-            {
-                "case": name,
-                "brief": brief.decode("utf-8"),
-                "files": staged,
-                "diff": patch.decode("utf-8"),
-                "answer": answer,
-            }
-        )
-    if not cases:
-        raise ValueError(f"calibration corpus holds no cases: {corpus_dir}")
-    return cases
+def is_calibration_outcome(category):
+    """True for a calibration/eval outcome: `eval:<kind>` or the legacy `calibration`."""
+    return isinstance(category, str) and (
+        category.startswith(EVAL_CATEGORY_PREFIX) or category == LEGACY_CATEGORY
+    )
 
 
 def author_calibration(board_dir, project_root, corpus_dir, lanes, run_id):
-    """Author one independent_review task per case; answer keys live beside the board.
+    """Author one independent_review task per review case; answer keys live beside the board.
 
     Task ids are `calib-<run_id>-<case>`; author_family is the `calibration` sentinel,
     which no lane declares, so select_lane's family exclusion keeps every listed lane
@@ -157,15 +81,19 @@ def author_calibration(board_dir, project_root, corpus_dir, lanes, run_id):
     case brief travels inside the shared review brief (which carries the mandatory
     verdict format), the staged files and the diff are written through the same
     planning path review_branch uses, and the answer keys plus a manifest land under
-    `<board_dir>/calibration/<run_id>/`, outside every task's inputs.
+    `<board_dir>/calibration/<run_id>/`, outside every task's inputs. A packet case is
+    not a review packet: it is listed in the result as `skipped` (authoring it is the
+    evals path, M5) rather than staged as one.
     """
     if not isinstance(run_id, str) or not NAME.fullmatch(run_id):
         raise ValueError("run_id must match [a-z0-9-]")
     if not isinstance(lanes, list) or not lanes:
         raise ValueError("calibration needs a non-empty list of lanes")
     cases = load_corpus(corpus_dir)
+    review = [case for case in cases if case["kind"] == "review"]
+    skipped = [case["case"] for case in cases if case["kind"] != "review"]
     plans, summaries, keys = [], [], []
-    for case in cases:
+    for case in review:
         task_id = f"calib-{run_id}-{case['case']}"
         if len(task_id) > 60:
             raise ValueError(f"task id would exceed 60 chars: {task_id}")
@@ -197,15 +125,18 @@ def author_calibration(board_dir, project_root, corpus_dir, lanes, run_id):
             {
                 "run_id": run_id,
                 "lanes": lanes,
-                "cases": [case["case"] for case in cases],
-                "tasks": [f"calib-{run_id}-{case['case']}" for case in cases],
+                "cases": [case["case"] for case in review],
+                "tasks": [f"calib-{run_id}-{case['case']}" for case in review],
             },
             indent=1,
         )
         + "\n"
     )
     _write_files([file for plan in plans for file in plan] + keys)
-    return {"tasks": summaries, "manifest": str(manifest)}
+    result = {"tasks": summaries, "manifest": str(manifest)}
+    if skipped:
+        result["skipped"] = skipped
+    return result
 
 
 # --- the run as a code node (I3) ---
@@ -359,13 +290,13 @@ def calibration_settled(board_dir, run_id):
 def newest_calibration_at(ledger):
     """The newest instant a calibration case outcome was recorded, or None.
 
-    score_calibration(record=True) records one `calibration` outcome per settled case;
-    the ledger's own event timestamps are the durable state the weekly trigger reads, so
-    a run's presence on disk is never mistaken for a scored one.
+    score_calibration(record=True) records one eval outcome per settled case; the
+    ledger's own event timestamps are the durable state the weekly trigger reads, so a
+    run's presence on disk is never mistaken for a scored one.
     """
     from sqlalchemy import select
 
-    from ..ledger import events as event_records
+    from ...ledger import events as event_records
 
     newest = None
     with ledger.engine.connect() as con:
@@ -374,7 +305,7 @@ def newest_calibration_at(ledger):
         ).mappings()
         for event in rows:
             detail = event["detail"]
-            if isinstance(detail, dict) and detail.get("category") == "calibration":
+            if isinstance(detail, dict) and is_calibration_outcome(detail.get("category")):
                 at = event["at"]
                 if isinstance(at, (int, float)) and (newest is None or at > newest):
                     newest = at
@@ -382,43 +313,6 @@ def newest_calibration_at(ledger):
 
 
 # --- scoring (K3) ---
-
-
-def _names_file(location, file):
-    """True when a finding's location names the defect's file: the relative path or its
-    basename on word boundaries ("src/api/routes/views.py (handle_views)" matches both)."""
-    location = str(location).replace("\\", "/").lower()
-    file = str(file).lower()
-    if file in location:
-        return True
-    base = re.escape(PurePosixPath(file).name)
-    return re.search(r"(?<![a-z0-9._/-])" + base + r"(?![a-z0-9._-])", location) is not None
-
-
-def _finding_text(finding):
-    return " ".join(str(v) for v in finding.values() if isinstance(v, str)).lower()
-
-
-def _score_findings(findings, answer):
-    """Classify findings against one answer key; returns (recalled ids, false positives).
-
-    A defect is recalled when some finding names its file AND the finding's text carries
-    every must_mention string case-insensitively. A finding that recalls no defect is a
-    false positive — on a clean case every finding is one.
-    """
-    findings = [f for f in findings if isinstance(f, dict)]
-    matched = [False] * len(findings)
-    recalled = []
-    for defect in answer["defects"]:
-        hit = False
-        for index, finding in enumerate(findings):
-            if _names_file(finding.get("location"), defect["file"]) and all(
-                m.lower() in _finding_text(finding) for m in defect["must_mention"]
-            ):
-                matched[index] = hit = True
-        if hit:
-            recalled.append(defect["id"])
-    return recalled, findings, matched.count(False)
 
 
 def _find_packet(packets_root, task_id):
@@ -443,7 +337,7 @@ def _lane_from_ledger(ledger, aid):
     """The lane id a dispatched attempt ran on, from the ledger task's argv."""
     from sqlalchemy import select
 
-    from ..ledger import attempts as attempt_records, tasks as task_records
+    from ...ledger import attempts as attempt_records, tasks as task_records
 
     with ledger.engine.connect() as con:
         row = con.execute(
@@ -469,9 +363,9 @@ def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None
     precision, weighted recall (high=3, medium=2, low=1) and a per-case table. The
     report is written to <board_dir>/calibration/<run_id>/report.json and a markdown
     table is printed. Nothing reaches the ledger unless record=True — then each case's
-    attempt gets one `record_outcome` with category "calibration" and accepted = (all
-    defects recalled and no false positives). `scored_at` (ISO 8601 UTC) is stamped into
-    the report so the overlay can name the newest run per lane.
+    attempt gets one `record_outcome` with category "eval:review" (board/calibration/score.py)
+    and accepted = (all defects recalled and no false positives). `scored_at` (ISO 8601
+    UTC) is stamped into the report so the overlay can name the newest run per lane.
     """
     now = time.time() if now is None else now
     run_dir = Path(board_dir) / "calibration" / run_id
@@ -481,6 +375,7 @@ def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None
     for case, task_id in zip(manifest["cases"], manifest["tasks"]):
         answer = json.loads((run_dir / (case + ".answer.json")).read_text())
         packet = _find_packet(packets_root, task_id)
+        attempt_dir = packet[0].parent.parent if packet else None
         verdict, findings, aid, note = None, [], (packet[1] if packet else None), None
         if packet is None:
             note = "no settled reply found"
@@ -492,9 +387,12 @@ def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None
                     findings = []
             except Exception as exc:
                 note = f"reply unreadable: {exc}"[:200]
+        # One scorer for both kinds: the review record is what score.py returns, and the
+        # per-defect ids the table names come from the same primitive.
+        case_record = {"case": case, "kind": "review", "answer": answer}
+        scored = score(case_record, attempt_dir)
         recalled, findings, false_positives = _score_findings(findings, answer)
         total = len(answer["defects"])
-        accepted = packet is not None and len(recalled) == total and false_positives == 0
         if len(lanes) == 1:
             lane = lanes[0]
         elif ledger is not None and aid is not None:
@@ -507,6 +405,7 @@ def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None
         all_weights = weights([d["id"] for d in answer["defects"]])
         row = {
             "case": case,
+            "kind": scored["kind"],
             "task": task_id,
             "lane": lane,
             "verdict": verdict or ("missing" if packet is None else "unreadable"),
@@ -517,12 +416,12 @@ def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None
             "missed": [d["id"] for d in answer["defects"] if d["id"] not in recalled],
             "false_positives": false_positives,
             "findings": len(findings),
-            "accepted": accepted,
+            "accepted": scored["accepted"],
             "weighted_recalled": weights(recalled),
             "weighted_total": all_weights,
         }
-        if note:
-            row["note"] = note
+        if note or scored["notes"]:
+            row["note"] = note or scored["notes"]
         rows.append(row)
         per_lane.setdefault(lane, []).append(row)
 
@@ -598,12 +497,16 @@ def score_calibration(board_dir, run_id, packets_root, record=False, ledger=None
             if row["attempt"] is None:
                 continue
             try:
-                ledger.record_outcome(
+                record_outcome(
+                    ledger,
                     row["attempt"],
-                    "calibration",
-                    row["accepted"],
-                    note=f"calibration {run_id}/{row['case']}: {row['recalled']}/{row['defects']}"
-                    f" recalled, {row['false_positives']} false positive(s)",
+                    {
+                        "kind": row["kind"],
+                        "accepted": row["accepted"],
+                        "repairs": 0,
+                        "notes": f"calibration {run_id}/{row['case']}: {row['recalled']}"
+                        f"/{row['defects']} recalled, {row['false_positives']} false positive(s)",
+                    },
                 )
             except Exception as exc:
                 row["record_error"] = str(exc)[:200]
