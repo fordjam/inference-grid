@@ -8,9 +8,13 @@ review staging. Packets are budgeted (the working reviewer takes ~24k tokens pro
 91-file / 976 KB packet is refused, not dispatched): generated and locked content is
 never staged, files over the per-file cap are represented by their hunks in the patch
 alone, and a range over budget is split into one task per commit — each packet measured
-before anything is written. Without an explicit budget the packet's thinking budget is
-sized from its staged bytes (sized_thinking_tokens), so the request cap the go lane
-derives from it grows with the packet. author_family comes from the commits'
+before anything is written. A commit that is still over budget on its own (the range a
+whole-repository review needs is often one commit) splits again, one task per top-level
+directory of its changed files, each measured against the budget; a directory that still
+exceeds it is refused with its size, never forced. An explicit `paths` filter restricts
+staging and the patch to the requested prefixes. Without an explicit budget the packet's
+thinking budget is sized from its staged bytes (sized_thinking_tokens), so the request cap
+the go lane derives from it grows with the packet. author_family comes from the commits'
 Co-Authored-By trailers (one mapping constant): mixed families refuse, no trailer means
 claude. Everything here is read-only over the reviewed repository.
 """
@@ -268,13 +272,15 @@ def _disambiguate(staged):
     return out
 
 
-def _filter_patch(patch, attrs):
+def _filter_patch(patch, attrs, prefixes=None):
     """The patch reduced to the file blocks the review stages, plus the dropped paths.
 
     Exclusions must apply to diff.patch too, or a fixtures-only commit blows the budget
     with hunks that were never staged. Works on both shapes the seam produces — `git
     diff` range output and `git diff-tree -p` per-commit output — since every file block
-    starts with a `diff --git` line; blocks are matched on their destination path.
+    starts with a `diff --git` line; blocks are matched on their destination path. With
+    `prefixes`, blocks whose path is outside them vanish as well (the `paths` filter and
+    the per-directory split both narrow the packet this way).
     """
     kept, dropped = [], []
     for block in re.split(r"(?m)^(?=diff --git )", patch):
@@ -282,11 +288,33 @@ def _filter_patch(patch, attrs):
             continue
         match = re.search(r"^diff --git a/(.+?) b/(.+)$", block, re.MULTILINE)
         path = match.group(2) if match else None
+        if path is not None and prefixes and not path.startswith(tuple(prefixes)):
+            continue
         if path is not None and _generated(path, attrs):
             dropped.append(path)
             continue
         kept.append(block)
     return "".join(kept), dropped
+
+
+def _path_groups(paths):
+    """Changed paths grouped by their top-level directory, sorted by name.
+
+    Root-level files (a README.md, pyproject.toml) have no directory to name, so they
+    are one `root` group keyed by their own names — the exact prefixes the patch filter
+    matches on.
+    """
+    dirs, root = {}, []
+    for path in paths:
+        parts = PurePosixPath(path).parts
+        if len(parts) > 1:
+            dirs.setdefault(parts[0], []).append(path)
+        else:
+            root.append(path)
+    groups = [(name, (name + "/",), members) for name, members in sorted(dirs.items())]
+    if root:
+        groups.append(("root", tuple(sorted(root)), root))
+    return groups
 
 
 def _packet_notes(oversized, omitted):
@@ -388,7 +416,7 @@ def _write_files(files):
 
 
 REQUIRED_BRANCH_KEYS = ("repo", "base", "tip")
-REVIEW_BRANCH_KEYS = REQUIRED_BRANCH_KEYS + ("scope",)
+REVIEW_BRANCH_KEYS = REQUIRED_BRANCH_KEYS + ("scope", "paths")
 BRANCH_SCOPES = (None, "branch")
 
 
@@ -417,7 +445,16 @@ def _passed_verify_merge(board_dir, branch):
 
 
 def _review_branch_scope(
-    board_dir, project_root, repo, target, branch, lanes, budget, limit, allowed_prefixes
+    board_dir,
+    project_root,
+    repo,
+    target,
+    branch,
+    lanes,
+    budget,
+    limit,
+    allowed_prefixes,
+    path_filter,
 ):
     """One packet for the whole branch as it would land on the target.
 
@@ -438,6 +475,8 @@ def _review_branch_scope(
     if code != 0:
         raise ValueError("git diff refused the merged tree: " + (err or "unknown")[:200])
     paths = [line for line in changed.splitlines() if line.strip()]
+    if path_filter:
+        paths = [path for path in paths if path.startswith(path_filter)]
     if not paths:
         raise ValueError("the branch changes nothing against the target tree; nothing to review")
     prefixes = tuple(allowed_prefixes) if allowed_prefixes else ALLOWED_PREFIXES
@@ -457,7 +496,7 @@ def _review_branch_scope(
     code, diff, err = run(["git", "-C", repo, "diff", target, merged])
     if code != 0:
         raise ValueError("git diff refused the merged tree: " + (err or "unknown")[:200])
-    patch, _ = _filter_patch(diff, attrs)
+    patch, _ = _filter_patch(diff, attrs, prefixes=path_filter or None)
     total = file_bytes + len(patch.encode())
     if total > limit:
         raise ValueError(
@@ -465,10 +504,17 @@ def _review_branch_scope(
             "review it in parts with the per-commit scope"
         )
     subjects = "; ".join(commit["subject"] for commit in commits if commit["subject"])
+    filter_note = ""
+    if path_filter:
+        filter_note = (
+            " The review was asked for the path group(s) "
+            + ", ".join(path_filter)
+            + ": only changed files under them are staged, and diff.patch covers only them."
+        )
     context = (
         f"The work under review is the branch {branch} as it would land on {target}: the "
         f"merged tree ({merged[:7]}) diffed against the target's current tree, not the "
-        f"branch's history ({len(commits)} commit(s): {subjects}). Findings must be made "
+        f"branch's history ({len(commits)} commit(s): {subjects}).{filter_note} Findings must be made "
         "against the target's current tree, not against what each commit changed when it "
         "was written; every finding must quote the staged file or the diff next to the "
         "requirement it violates." + _packet_notes(oversized, omitted)
@@ -508,18 +554,23 @@ def review_branch(
     exclude_commits=None,
     allowed_prefixes=None,
     scope=None,
+    paths=None,
 ):
     """Author review task(s) judging a git range; one task, or one per commit when split.
 
     The whole-range packet is measured first: if it fits the byte budget a single task is
     written as before. Over budget, `split: "commit"` (also the fallback) authors one
     task per commit whose own packet fits, in range order; `split: "none"` refuses with
-    the per-commit plan, and a commit whose packet alone exceeds the budget is refused
-    with its file sizes. Docs-only commits (all paths under docs/ or *.md) get no review
-    task by default and are listed in the result as `docs-only, not reviewed`;
-    `include_docs: true` reviews them too. `exclude_commits: [sha, …]` (sha prefixes)
-    skips the listed commits in a split, listed as `excluded by operator`; in single
-    mode their changes ride in the whole-range diff, so such a range refuses.
+    the per-commit plan, and a commit whose packet alone exceeds the budget is split one
+    task per top-level directory of its changed files — each packet measured before
+    anything is written and named `review-<repo>-<sha>-<dir>` — with a directory that
+    still exceeds the budget refused with its size, never forced. `paths` (spec key or
+    argument) is an explicit filter: only changed files under those prefixes are staged
+    and diff.patch covers only them. Docs-only commits (all paths under docs/ or *.md)
+    get no review task by default and are listed in the result as `docs-only, not
+    reviewed`; `include_docs: true` reviews them too. `exclude_commits: [sha, …]` (sha
+    prefixes) skips the listed commits in a split, listed as `excluded by operator`; in
+    single mode their changes ride in the whole-range diff, so such a range refuses.
 
     `scope: "branch"` (also accepted as the `scope` argument) authors one packet for the
     whole branch: the merged tree's diff against the target's current tree, and only when
@@ -533,11 +584,21 @@ def review_branch(
     unknown = sorted(set(spec) - set(REVIEW_BRANCH_KEYS))
     if unknown:
         raise ValueError(
-            "review_branch accepts only repo, base, tip, scope; unknown keys: " + ", ".join(unknown)
+            "review_branch accepts only repo, base, tip, scope, paths; unknown keys: "
+            + ", ".join(unknown)
         )
     scope = spec.get("scope", scope)
     if scope not in BRANCH_SCOPES:
         raise ValueError("scope must be 'branch'")
+    raw_paths = spec.get("paths", paths) or []
+    if not isinstance(raw_paths, list) or not all(
+        isinstance(entry, str) and entry for entry in raw_paths
+    ):
+        raise ValueError("paths must be a list of non-empty path prefixes")
+    for entry in raw_paths:
+        if not _safe_rel(entry):
+            raise ValueError(f"{entry} is not a safe relative path")
+    path_filter = tuple(raw_paths)
     if split not in (None, "commit", "none"):
         raise ValueError("split must be 'commit' or 'none'")
     excluded = []
@@ -550,7 +611,16 @@ def review_branch(
     if scope == "branch":
         limit = MAX_INPUT_BYTES if max_input_bytes is None else max_input_bytes
         return _review_branch_scope(
-            board_dir, project_root, repo, base, tip, lanes, budget, limit, allowed_prefixes
+            board_dir,
+            project_root,
+            repo,
+            base,
+            tip,
+            lanes,
+            budget,
+            limit,
+            allowed_prefixes,
+            path_filter,
         )
 
     code, changed, err = run(["git", "-C", repo, "diff", "--name-only", f"{base}..{tip}"])
@@ -561,6 +631,12 @@ def review_branch(
         raise ValueError("the range changes no files; nothing to review")
     prefixes = tuple(allowed_prefixes) if allowed_prefixes else ALLOWED_PREFIXES
     _check_paths(paths, prefixes)
+    if path_filter:
+        paths = [path for path in paths if path.startswith(path_filter)]
+        if not paths:
+            raise ValueError(
+                "no changed files under the requested path filter: " + ", ".join(path_filter)
+            )
 
     code, log, err = run(
         ["git", "-C", repo, "log", "--format=%H%n%an%n%s%n%(trailers)", f"{base}..{tip}"]
@@ -590,7 +666,7 @@ def review_branch(
         code, diff, err = run(["git", "-C", repo, "diff", f"{base}..{tip}"])
         if code != 0:
             raise ValueError("git diff refused the range: " + (err or "unknown")[:200])
-        filtered, _ = _filter_patch(diff, attrs)
+        filtered, _ = _filter_patch(diff, attrs, prefixes=path_filter or None)
         return filtered
 
     if split != "commit":
@@ -599,12 +675,20 @@ def review_branch(
         total = file_bytes + len(patch.encode())
         if total <= limit:
             subjects = "; ".join(commit["subject"] for commit in commits if commit["subject"])
+            filter_note = ""
+            if path_filter:
+                filter_note = (
+                    " The review was asked for the path group(s) "
+                    + ", ".join(path_filter)
+                    + ": only changed files under them are staged, and diff.patch covers "
+                    "only them."
+                )
             context = (
                 f"The work under review is the git range {base}..{tip} ({len(commits)} "
-                f"commit(s): {subjects}). The changed files are staged at their repository "
-                "paths beside this brief, and the full diff is staged as diff.patch; every "
-                "finding must quote the diff or the staged file next to the requirement it "
-                "violates." + _packet_notes(oversized, omitted)
+                f"commit(s): {subjects}).{filter_note} The changed files are staged at their "
+                "repository paths beside this brief, and the full diff is staged as "
+                "diff.patch; every finding must quote the diff or the staged file next to "
+                "the requirement it violates." + _packet_notes(oversized, omitted)
             )
             short = re.sub(r"[^a-z0-9-]+", "", tip.lower())[:7]
             files, created = _plan_task(
@@ -637,7 +721,7 @@ def review_branch(
     # measured on its own. Everything is planned before anything is written — the live
     # round once wrote eight task files and then died on the first one's id — and a
     # commit that already has its task on the board is skipped, so a re-run resumes.
-    plans, skipped, docs_only, excluded_list = [], [], [], []
+    plans, skipped, docs_only, excluded_list, filtered_out = [], [], [], [], []
     for commit in reversed(commits):
         code, c_paths, err = run(
             [
@@ -660,6 +744,11 @@ def review_branch(
         if excluded_by(commit):
             excluded_list.append({"commit": short, "note": "excluded by operator"})
             continue
+        if path_filter:
+            commit_paths = [path for path in commit_paths if path.startswith(path_filter)]
+        if not commit_paths:
+            filtered_out.append({"commit": short, "note": "no changed files under the path filter"})
+            continue
         if not include_docs and _docs_only(commit_paths):
             docs_only.append(
                 {
@@ -669,29 +758,44 @@ def review_branch(
                 }
             )
             continue
+        code, raw_patch, err = run(
+            ["git", "-C", repo, "diff-tree", "-p", "--no-commit-id", "--root", commit["hash"]]
+        )
+        if code != 0:
+            raise ValueError("git diff-tree refused: " + (err or "unknown")[:200])
         # Split packets stage the file as of this commit, never the range tip: a
         # reviewer comparing the commit's hunks against tip contents reports ghosts.
         staged, oversized, omitted, file_bytes = _classify(
             repo, commit["hash"], cache, attrs, commit_paths, deleted_ok=True
         )
-        code, patch, err = run(
-            ["git", "-C", repo, "diff-tree", "-p", "--no-commit-id", "--root", commit["hash"]]
-        )
-        if code != 0:
-            raise ValueError("git diff-tree refused: " + (err or "unknown")[:200])
-        patch, _ = _filter_patch(patch, attrs)
+        patch, _ = _filter_patch(raw_patch, attrs, prefixes=path_filter or None)
         total = file_bytes + len(patch.encode())
-        if total > limit:
-            sizes = ", ".join(
-                f"{relative} {len(data)} bytes"
-                for relative, data in sorted(staged, key=lambda s: -len(s[1]))[:5]
-            )
-            raise ValueError(
-                f"commit {commit['hash'][:7]} alone exceeds the {limit}-byte budget "
-                f"({total} bytes: {sizes}); split the branch further"
-            )
         code, body, _ = run(["git", "-C", repo, "log", "-1", "--format=%B", commit["hash"]])
         message = (body if code == 0 else commit["subject"]).strip()
+        if total > limit:
+            group_plans, group_skips = _plan_directory_split(
+                repo,
+                board_dir,
+                project_root,
+                commit,
+                short,
+                repo_name,
+                base,
+                tip,
+                message,
+                commit_paths,
+                staged,
+                raw_patch,
+                cache,
+                attrs,
+                family,
+                lanes,
+                budget,
+                limit,
+            )
+            plans.extend(group_plans)
+            skipped.extend(group_skips)
+            continue
         context = (
             f"The work under review is commit {commit['hash']} in {repo_name}, one part of a "
             f"split review of {base}..{tip}. The commit message is: {message}. The changed "
@@ -700,7 +804,6 @@ def review_branch(
             "the diff or the staged file next to the requirement it violates."
             + _packet_notes(oversized, omitted)
         )
-        short = re.sub(r"[^a-z0-9-]+", "", commit["hash"].lower())[:7]
         task_id = f"review-{repo_name}-{short}"[:60]
         if (board_dir / (task_id + ".json")).exists():
             skipped.append({"id": task_id, "note": "already authored; skipped"})
@@ -728,9 +831,109 @@ def review_branch(
         result["docs_only"] = docs_only
     if excluded_list:
         result["excluded"] = excluded_list
+    if filtered_out:
+        result["filtered_out"] = filtered_out
     if not result["tasks"] and not skipped and not docs_only and not excluded_list:
+        if filtered_out:
+            raise ValueError("no commit changes files under the path filter; nothing to review")
         raise ValueError("every commit packet was empty; nothing to review")
     return result
+
+
+def _plan_directory_split(
+    repo,
+    board_dir,
+    project_root,
+    commit,
+    short,
+    repo_name,
+    base,
+    tip,
+    message,
+    commit_paths,
+    staged,
+    raw_patch,
+    cache,
+    attrs,
+    family,
+    lanes,
+    budget,
+    limit,
+):
+    """The last-resort split of one over-budget commit: one packet per top-level
+    directory of its changed files, each measured before anything is written.
+
+    Returns ((files, summary) plans, skipped notes) for the directories that fit, ids
+    suffixed `review-<repo>-<sha>-<dir>`. A single-directory commit keeps the plain
+    refusal with its file sizes, and a directory that still exceeds the budget refuses
+    the whole split with its byte count — never forced. Every brief names the group
+    under review and lists the sibling reviews, so the reviewer knows what it is not
+    seeing.
+    """
+    groups = _path_groups(commit_paths)
+    if len(groups) < 2:
+        sizes = ", ".join(
+            f"{relative} {len(data)} bytes"
+            for relative, data in sorted(staged, key=lambda s: -len(s[1]))[:5]
+        )
+        raise ValueError(
+            f"commit {commit['hash'][:7]} alone exceeds the {limit}-byte budget "
+            f"({sum(len(data) for _, data in staged)} staged bytes: {sizes}); "
+            "split the branch further"
+        )
+    ids = {
+        label: f"review-{repo_name}-{short}-{re.sub(r'[^a-z0-9-]+', '', label.lower())}"[:60]
+        for label, _, _ in groups
+    }
+    plans, skipped, over = [], [], []
+    for label, _, group_paths in groups:
+        task_id = ids[label]
+        if (Path(board_dir) / (task_id + ".json")).exists():
+            skipped.append({"id": task_id, "note": "already authored; skipped"})
+            continue
+        g_staged, g_over, g_omit, g_bytes = _classify(
+            repo, commit["hash"], cache, attrs, group_paths, deleted_ok=True
+        )
+        g_patch, _ = _filter_patch(raw_patch, attrs, prefixes=tuple(group_paths))
+        g_total = g_bytes + len(g_patch.encode())
+        if g_total > limit:
+            g_sizes = ", ".join(
+                f"{relative} {len(data)} bytes"
+                for relative, data in sorted(g_staged, key=lambda s: -len(s[1]))[:5]
+            )
+            over.append(f"{label} ({g_total} bytes: {g_sizes})")
+            continue
+        siblings = ", ".join(ids[other] for other, _, _ in groups if other != label)
+        context = (
+            f"The work under review is commit {commit['hash']} in {repo_name}, one part of "
+            f"a split review of {base}..{tip}, restricted to the {label} files the commit "
+            f"changed. The sibling review(s) {siblings} cover the rest of the commit; a "
+            "finding outside this group belongs there, not here. The commit message is: "
+            f"{message}. The changed files are staged at their repository paths as of this "
+            "commit (not the range tip), and this group's hunks are staged as diff.patch; "
+            "every finding must quote the diff or the staged file next to the requirement "
+            "it violates." + _packet_notes(g_over, g_omit)
+        )
+        plans.append(
+            _plan_task(
+                board_dir,
+                project_root,
+                task_id,
+                family,
+                lanes,
+                budget,
+                context,
+                g_staged,
+                g_patch,
+                g_total,
+            )
+        )
+    if over:
+        raise ValueError(
+            f"commit {short} does not fit even split by top-level directory; the split "
+            f"still exceeds the {limit}-byte budget: " + "; ".join(over)
+        )
+    return plans, skipped
 
 
 def _plan(repo_name, repo, tip, commits, cache, attrs):

@@ -161,15 +161,18 @@ task after the dispatch pass.
 
 `board-new --json {task: …}` writes one validated task file with its empty brief (handoff-1 B4); `{retry, change, budget?, lanes?, author_family?}` authors the authorised retry — a new task with a `superseded:` predecessor, the source link moved for board-work reviews (handoff-5/7).
 
-`{review_branch: {repo, base, tip, scope?}}` authors independent_review task(s) from a git range, staging the changed files plus a generated `diff.patch` under `grid/board/review/<task-id>/`. The keys inside `review_branch` are exactly `repo`, `base`, `tip` and the optional `scope` — anything else is refused. `scope: "branch"` (see Review policy) stages the merged tree's diff instead of the commit range and requires a passed `verify_merge` task for the same branch. The top-level knobs are:
+`{review_branch: {repo, base, tip, scope?, paths?}}` authors independent_review task(s) from a git range, staging the changed files plus a generated `diff.patch` under `grid/board/review/<task-id>/`. The keys inside `review_branch` are exactly `repo`, `base`, `tip` and the optional `scope` and `paths` — anything else is refused. `scope: "branch"` (see Review policy) stages the merged tree's diff instead of the commit range and requires a passed `verify_merge` task for the same branch. The top-level knobs are:
 
 | Knob | Meaning |
 | --- | --- |
 | `max_input_bytes` | Packet budget in staged bytes (default 120 000 ≈ 30k tokens); over budget the range splits or refuses |
-| `split` | `"commit"` authors one task per commit (also the over-budget fallback); `"none"` keeps one task and refuses over budget |
+| `split` | `"commit"` authors one task per commit (also the over-budget fallback); `"none"` keeps one task and refuses over budget. A commit still over budget on its own splits again, one task per top-level directory of its changed files (`review-<repo>-<sha>-<dir>`, each packet measured before anything is written); a directory that still exceeds the budget is refused with its size, never forced |
+| `paths` | Explicit filter: only changed files under these prefixes are staged, and diff.patch covers only them |
 | `include_docs` | Review docs-only commits too (default: skipped, listed `docs-only, not reviewed`) |
 | `exclude_commits` | Sha prefixes to skip in a split, listed `excluded by operator` |
 | `lanes`, `budget` | The review task's lanes and budget (defaults `["go"]` and the review budget) |
+
+A directory-split brief names the group under review and lists the sibling reviews, so a reviewer knows what it is not seeing; findings outside its group belong to the sibling's packet.
 
 ## Review policy
 
