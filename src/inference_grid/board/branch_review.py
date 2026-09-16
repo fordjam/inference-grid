@@ -416,7 +416,7 @@ def _write_files(files):
 
 
 REQUIRED_BRANCH_KEYS = ("repo", "base", "tip")
-REVIEW_BRANCH_KEYS = REQUIRED_BRANCH_KEYS + ("scope", "paths")
+REVIEW_BRANCH_KEYS = REQUIRED_BRANCH_KEYS + ("scope", "paths", "label")
 BRANCH_SCOPES = (None, "branch")
 
 
@@ -584,12 +584,21 @@ def review_branch(
     unknown = sorted(set(spec) - set(REVIEW_BRANCH_KEYS))
     if unknown:
         raise ValueError(
-            "review_branch accepts only repo, base, tip, scope, paths; unknown keys: "
+            "review_branch accepts only repo, base, tip, scope, paths, label; unknown keys: "
             + ", ".join(unknown)
         )
     scope = spec.get("scope", scope)
     if scope not in BRANCH_SCOPES:
         raise ValueError("scope must be 'branch'")
+    # `label` names a path-filtered packet so two filtered reviews of one tip do not
+    # collide on the id (`review-<repo>-<tip>` is otherwise the whole identity): a
+    # four-commit engine range reviewed as "code" and "report" is two tasks, not one.
+    label = spec.get("label")
+    if label is not None:
+        if not isinstance(label, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,23}", label):
+            raise ValueError("label must be 1-24 chars of [a-z0-9-], starting alphanumeric")
+        if not (spec.get("paths", paths) or []):
+            raise ValueError("label is only meaningful with a paths filter")
     raw_paths = spec.get("paths", paths) or []
     if not isinstance(raw_paths, list) or not all(
         isinstance(entry, str) and entry for entry in raw_paths
@@ -691,10 +700,11 @@ def review_branch(
                 "the requirement it violates." + _packet_notes(oversized, omitted)
             )
             short = re.sub(r"[^a-z0-9-]+", "", tip.lower())[:7]
+            suffix = f"-{label}" if label else ""
             files, created = _plan_task(
                 board_dir,
                 project_root,
-                f"review-{repo_name}-{short}"[:60],
+                f"review-{repo_name}-{short}{suffix}"[:60],
                 family,
                 lanes,
                 budget,

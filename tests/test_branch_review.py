@@ -815,6 +815,31 @@ def test_paths_restrict_staging_and_the_patch(tmp_path):
     assert "src/" in brief and "covers only them" in brief
 
 
+def test_a_label_lets_two_path_filtered_reviews_of_one_tip_coexist(tmp_path):
+    """The id is review-<repo>-<tip>; two filtered packets of the same range collided on it
+    (COT's four engine commits, reviewed as code and as report). A label suffixes the id."""
+    repo, base, _ = reviewed_repo(tmp_path)
+    (repo / "docs").mkdir()
+    (repo / "docs/notes.md").write_text("# notes\n")
+    git(repo, "add", "-A")
+    commit(repo, "note the docs")
+    tip = rev(repo, "HEAD")
+    board, project = board_and_project(tmp_path)
+    spec = {"repo": str(repo), "base": base, "tip": tip}
+    code = branch_review.review_branch(
+        board, project, {**spec, "paths": ["src/"], "label": "code"})
+    docs = branch_review.review_branch(
+        board, project, {**spec, "paths": ["docs/"], "label": "docs"})
+    assert code["id"].endswith("-code") and docs["id"].endswith("-docs")
+    assert code["id"][: -len("-code")] == docs["id"][: -len("-docs")]
+    assert (board / (code["id"] + ".json")).exists() and (board / (docs["id"] + ".json")).exists()
+    with pytest.raises(ValueError, match="label must be"):
+        branch_review.review_branch(
+            board, project, {**spec, "paths": ["src/"], "label": "Code Group!"})
+    with pytest.raises(ValueError, match="only meaningful with a paths filter"):
+        branch_review.review_branch(board, project, {**spec, "label": "whole"})
+
+
 def test_paths_entries_are_validated(tmp_path):
     repo, base, tip = reviewed_repo(tmp_path)
     board, project = board_and_project(tmp_path)
