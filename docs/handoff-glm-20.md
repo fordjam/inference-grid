@@ -106,6 +106,21 @@ argv shape, session id extraction from a recorded stream, and a fake-CLI packet 
 The lane itself is the operator's to add to `lanes.json`; the report says the exact entry.
 - Size: medium.
 
+#### L8. Boards that require hosting and retention guarantees
+`lanes/config.py` admits exactly its required keys, so lane facts that are policy rather than
+transport live in a sidecar the operator keeps beside `lanes.json`: `lanes-meta.json`
+(`{"lanes": {"<lane id>": {"residency": "us|eu|unknown", "retention": "zero|days|unknown",
+"retention_source": "<url or note>"}}}`, missing lanes = unknown). A board's tick config may
+carry `require_lane_meta: {"residency": ["us", "eu"], "retention": ["zero"]}`; `route` drops
+every candidate whose sidecar record does not satisfy every listed key (unknown never
+satisfies) with reason `lane_policy` naming the key, and the dry run shows it. The sidecar
+is read once per tick beside `lanes_path`; a malformed sidecar refuses the whole tick with
+the parse error (fail closed). `inference-grid lane-init` and `docs/LANES.md` document the
+file. Tests: a board requiring us/zero offers only tagged lanes; unknown is dropped with the
+key; a malformed sidecar refuses; no sidecar and no requirement behaves as today.
+- Size: small–medium. Why: COT's board rules require US/EU hosting and zero retention; today
+  that is enforced only by which lanes a task names.
+
 ## Phase M — the grid finds its own work
 
 #### M1. A held attempt drafts its own fix packet

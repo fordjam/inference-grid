@@ -1,0 +1,47 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### L8. Boards that require hosting and retention guarantees
+`lanes/config.py` admits exactly its required keys, so lane facts that are policy rather than
+transport live in a sidecar the operator keeps beside `lanes.json`: `lanes-meta.json`
+(`{"lanes": {"<lane id>": {"residency": "us|eu|unknown", "retention": "zero|days|unknown",
+"retention_source": "<url or note>"}}}`, missing lanes = unknown). A board's tick config may
+carry `require_lane_meta: {"residency": ["us", "eu"], "retention": ["zero"]}`; `route` drops
+every candidate whose sidecar record does not satisfy every listed key (unknown never
+satisfies) with reason `lane_policy` naming the key, and the dry run shows it. The sidecar
+is read once per tick beside `lanes_path`; a malformed sidecar refuses the whole tick with
+the parse error (fail closed). `inference-grid lane-init` and `docs/LANES.md` document the
+file. Tests: a board requiring us/zero offers only tagged lanes; unknown is dropped with the
+key; a malformed sidecar refuses; no sidecar and no requirement behaves as today.
+- Size: small–medium. Why: COT's board rules require US/EU hosting and zero retention; today
+  that is enforced only by which lanes a task names.
+
+---
