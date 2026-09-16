@@ -89,6 +89,23 @@ this id, the report says so with the response, and the lane is marked `explicit_
 `docs/LANES.md`.
 - Size: small–medium.
 
+#### L7. `opencode_cli` runs packets: an implementer lane on the Go plan
+OpenCode Zen documents that all its models are hosted in the US under a zero-retention policy
+(`opencode.ai/docs/zen`), and the Go plan's table marks GLM-5.3-Flash, Kimi K3 and Qwen3.8
+Max "0 days / not used for training" — the only lanes the operator can point at a T1
+repository (COT) that requires US/EU hosting and zero retention. Today the Go lanes are
+`go_http` (reviews only). Add an `OpenCodeAdapter` to `lanes/packet.py` beside
+`CommandCodeAdapter` (`opencode run --model <provider/model> --format json`, non-interactive,
+session id from the JSON stream; `resume` via `--session <id>` where the CLI supports it,
+else a fresh session as `ClineAdapter` does), add `opencode_cli` to `PACKET_KINDS`, the
+sandbox write roots for its state directory (`.opencode/` under the clone), and the
+`lanes/config.py`-compatible lane shape documented in `docs/LANES.md` with a
+`go-opencode` example (`model: opencode/kimi-k3`, `residency: us`, `retention: zero`,
+`retention_source: <url>`). Tests mirror `test_cline_cli_runs_packets_as_fresh_sessions`:
+argv shape, session id extraction from a recorded stream, and a fake-CLI packet round trip.
+The lane itself is the operator's to add to `lanes.json`; the report says the exact entry.
+- Size: medium.
+
 ## Phase M — the grid finds its own work
 
 #### M1. A held attempt drafts its own fix packet
@@ -105,20 +122,43 @@ yields exactly one plan task with the verdict in its ticket; a second identical 
 `auto_dispatch` gates the build.
 - Size: medium.
 
-#### M2. Lane evals as a nightly suite, not a one-off calibration
-`board/calibration.py` scores reviewers on a seeded-defect corpus. Generalise it into
-`inference-grid evals --json {corpus_dir, lanes, board_dir}`: a corpus directory holds
-cases of three kinds — `review` (seeded defects, recall/precision as today), `packet` (a
-small brief with a hidden reference patch and its tests: accepted when the lane's commit
-passes the reference tests without touching them), `plan` (a ticket with a reference packet
-outline: accepted when the drafted packet names the same files and tests). The command
-authors one task per (lane, case) on the board with category `calibration_run`, and
-`board/calibration.py`'s scoring is extended per kind. Results land in the scorecard as
-`(family, model, category=eval:<kind>)` rows that `route`'s blend already reads. The operator's
-private corpus stays where it is (`~/.config/inference-grid/calibration/`); the repository
-ships `calibration/example/` cases for all three kinds. Tests: each kind scores a passing and
-a failing fake lane correctly; the authored tasks validate; scorecard rows carry the kind.
-- Size: large (split at the kind boundary if needed: M2a review+packet, M2b plan+CLI).
+#### M4. Eval cases for review and packet kinds, scored like calibration
+`board/calibration.py` scores reviewers on seeded-defect cases (recall / precision, accepted
+= every seeded defect recalled and no false positive). Generalise the *case* and the *scoring*
+to two kinds, without touching the CLI yet:
+- `calibration/case.py::load_case(dir)` reads `case.json` with `kind: review | packet`.
+  A `review` case is exactly today's shape (seeded defects, brief, inputs). A `packet` case
+  adds `reference/`: a hidden patch (`reference.patch`) and its tests (`reference_tests/`);
+  the lane sees the brief and the repository at `base`, never `reference/`.
+- `calibration/score.py::score(case, attempt_dir)`: review kind as today; packet kind is
+  *accepted* when the lane's commit (the packet branch head) passes every file in
+  `reference_tests/` copied over the lane's tree **and** the lane's diff touches none of the
+  reference test files; *repairs* counts the reference tests that fail. Both kinds return the
+  same record `{kind, accepted, recalled, false_positives, repairs, notes}` so the scorecard
+  row `(family, model, category="eval:<kind>")` is written by the existing outcome path.
+- `calibration/example/` gains one `packet` case (a 30-line function with a bug, a 5-test
+  reference suite) beside the two review cases already there; the operator's private corpus
+  is untouched.
+- Tests: the packet case scores a correct fake fix accepted, a fix that edits the reference
+  tests rejected, a partial fix with `repairs=n`; the review case's score is byte-identical to
+  `board/calibration.py`'s for the two example cases (a regression pin); the scorecard row
+  carries `eval:review` / `eval:packet`.
+- Size: medium — one hour if the review kind is a move, not a rewrite. Why: this is the
+  measurement the grid's whole routing rests on and today it covers reviewers only.
+
+#### M5. `inference-grid evals`: the nightly run, on the board
+Depends on M4. `inference-grid evals --json {corpus_dir, lanes, board_dir, project_root}`
+authors one `calibration_run` task per (lane, case) it has no outcome for in the last 7 days
+(read from the scorecard's `eval:*` rows), so a nightly launchd job keeps every lane's
+evals current without re-running what is fresh. The task carries the case's kind; the
+runner's existing `calibration_run` step calls M2a's `score` and records the outcome.
+`inference-grid digest` gains an *Evals* section: per lane, per kind, accepted / cases and
+the age of the newest result; a lane with no eval in 7 days is listed under *needs-you*.
+`deployments/local/install.py` renders a `com.inference-grid.evals` KeepAlive agent that
+runs the command hourly against the operator's corpus path from config (`evals_corpus`),
+skipping when nothing is due. Tests: the due-set logic (fresh rows skip, stale rows author,
+a new lane authors everything); the digest section; the plist renders with the config path.
+- Size: medium. Why: evals that run only when someone remembers are not evals.
 
 #### M3. The autonomy policy, written and enforced
 `docs/AUTONOMY.md` and `board/policy.py`: what the grid does alone and what waits.

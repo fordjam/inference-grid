@@ -1,0 +1,56 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### M4. Eval cases for review and packet kinds, scored like calibration
+`board/calibration.py` scores reviewers on seeded-defect cases (recall / precision, accepted
+= every seeded defect recalled and no false positive). Generalise the *case* and the *scoring*
+to two kinds, without touching the CLI yet:
+- `calibration/case.py::load_case(dir)` reads `case.json` with `kind: review | packet`.
+  A `review` case is exactly today's shape (seeded defects, brief, inputs). A `packet` case
+  adds `reference/`: a hidden patch (`reference.patch`) and its tests (`reference_tests/`);
+  the lane sees the brief and the repository at `base`, never `reference/`.
+- `calibration/score.py::score(case, attempt_dir)`: review kind as today; packet kind is
+  *accepted* when the lane's commit (the packet branch head) passes every file in
+  `reference_tests/` copied over the lane's tree **and** the lane's diff touches none of the
+  reference test files; *repairs* counts the reference tests that fail. Both kinds return the
+  same record `{kind, accepted, recalled, false_positives, repairs, notes}` so the scorecard
+  row `(family, model, category="eval:<kind>")` is written by the existing outcome path.
+- `calibration/example/` gains one `packet` case (a 30-line function with a bug, a 5-test
+  reference suite) beside the two review cases already there; the operator's private corpus
+  is untouched.
+- Tests: the packet case scores a correct fake fix accepted, a fix that edits the reference
+  tests rejected, a partial fix with `repairs=n`; the review case's score is byte-identical to
+  `board/calibration.py`'s for the two example cases (a regression pin); the scorecard row
+  carries `eval:review` / `eval:packet`.
+- Size: medium — one hour if the review kind is a move, not a rewrite. Why: this is the
+  measurement the grid's whole routing rests on and today it covers reviewers only.
+
+---
