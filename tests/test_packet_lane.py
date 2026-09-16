@@ -136,6 +136,69 @@ class EditingAgent(packet.Adapter):
         return packet._first_match(native_jsonl, r'"sessionId":"([^"]+)"')
 
 
+class SleepingAgent(packet.Adapter):
+    """A fake CLI that prints its session id and then sleeps, touching nothing.
+
+    The stdout flush matters: without it the session line sits in the pipe buffer and the
+    cut round has no session to re-enter — a different failure than the one under test."""
+
+    name = "sleeping"
+
+    def __init__(self, work, sleep_seconds=30):
+        self.work, self.sleep_seconds, self.calls = Path(work), sleep_seconds, []
+
+    def _argv(self, prompt, session):
+        self.calls.append((session, prompt))
+        code = (
+            "import sys, time\n"
+            'sys.stdout.write(\'{"type":"run_start","sessionId":"sess-idle"}\\n\')\n'
+            "sys.stdout.flush()\n"
+            f"time.sleep({self.sleep_seconds})\n"
+        )
+        return [PY, "-c", code]
+
+    def first(self, prompt):
+        return self._argv(prompt, None)
+
+    def resume(self, session_id, prompt):
+        return self._argv(prompt, session_id)
+
+    def session_id(self, native_jsonl):
+        return packet._first_match(native_jsonl, r'"sessionId":"([^"]+)"')
+
+
+class ChattyAgent(packet.Adapter):
+    """A fake CLI that streams lines for longer than the idle window, touching no file."""
+
+    name = "chatty"
+
+    def __init__(self, work, write_seconds=1.5):
+        self.work, self.write_seconds, self.calls = Path(work), write_seconds, []
+
+    def _argv(self, prompt, session):
+        self.calls.append((session, prompt))
+        pad = "x" * 400
+        code = (
+            "import sys, time\n"
+            'sys.stdout.write(\'{"type":"run_start","sessionId":"sess-chatty"}\\n\')\n'
+            f"end = time.time() + {self.write_seconds!r}\n"
+            "while time.time() < end:\n"
+            f'    sys.stdout.write(\'{{"type":"note","pad":"{pad}"}}\\n\')\n'
+            "    sys.stdout.flush()\n"
+            "    time.sleep(0.005)\n"
+        )
+        return [PY, "-c", code]
+
+    def first(self, prompt):
+        return self._argv(prompt, None)
+
+    def resume(self, session_id, prompt):
+        return self._argv(prompt, session_id)
+
+    def session_id(self, native_jsonl):
+        return packet._first_match(native_jsonl, r'"sessionId":"([^"]+)"')
+
+
 class StreamingAgent(packet.Adapter):
     """A fake CLI that streams per-token delta lines the way a JSON transcript does."""
 
@@ -555,3 +618,99 @@ def test_the_verdict_records_the_free_space_the_guard_measured(tmp_path):
     )
     assert verdict["reason"] == "gates_passed"
     assert verdict["disk_free_bytes"] == 6_000_000_000
+
+
+def test_two_sleeping_rounds_are_cut_at_the_idle_window_and_hold_agent_idle(tmp_path):
+    """An idle round is cut early — not at the wall — its gates still run, and two of them
+    settle the verdict `agent_idle` instead of the hour the wall would have spent."""
+    work = _git_repo(tmp_path / "work")
+    agent = SleepingAgent(work)
+    verdict = build_loop(
+        agent,
+        plain,
+        work,
+        dict(os.environ),
+        "the brief",
+        [marker_gate(work)],
+        tmp_path / "attempt",
+        wall_seconds=10,
+        max_rounds=3,
+        min_seconds_for_round=0,
+        idle_seconds=0.4,
+        kill_grace=0.01,
+    )
+    assert verdict["reason"] == "agent_idle"
+    assert [r["agent_reason"] for r in verdict["rounds"]] == ["agent_idle", "agent_idle"]
+    assert len(agent.calls) == 2
+    # Cut at the idle window, well inside the ten-second wall that would otherwise end round 1.
+    assert verdict["rounds"][0]["agent_elapsed_s"] < 5
+    assert verdict["gates_passed"] is False and verdict["idle_seconds"] == 0.4
+    # The second round re-entered the same session and was told why the first was cut.
+    (first_session, first_prompt), (second_session, second_prompt) = agent.calls
+    assert first_session is None and first_prompt == "the brief"
+    assert second_session == "sess-idle"
+    assert second_prompt.startswith("the previous round produced no change in 1 minute")
+    assert "commit what you have or say why" in second_prompt
+    assert "### pytest — exited, exit 1" in second_prompt  # the gates ran as usual
+
+
+def test_a_round_that_keeps_writing_is_not_cut_as_idle(tmp_path):
+    """A round that streams past the 2 KB mark has not been idle: it ends on its own."""
+    work = _git_repo(tmp_path / "work")
+    agent = ChattyAgent(work)
+    verdict = build_loop(
+        agent,
+        plain,
+        work,
+        dict(os.environ),
+        "the brief",
+        [marker_gate(work)],
+        tmp_path / "attempt",
+        wall_seconds=20,
+        max_rounds=1,
+        idle_seconds=0.4,
+        kill_grace=0.01,
+    )
+    assert verdict["rounds"][0]["agent_reason"] != "agent_idle"
+    assert verdict["reason"] != "agent_idle"
+    assert (tmp_path / "attempt" / "native-1.jsonl").stat().st_size > packet.IDLE_TRANSCRIPT_BYTES
+
+
+def test_the_idle_prompt_names_the_window_and_asks_for_a_commit_or_a_reason():
+    from inference_grid.lanes.packet import GateResult
+
+    assert packet.idle_minutes(900) == 15
+    assert packet.idle_minutes(30) == 1
+    text = fix_prompt([GateResult("pytest", False, 1, "3 failed", 1.0)], 2, 3, idle_minutes=15)
+    assert text.startswith("the previous round produced no change in 15 minutes")
+    assert "commit what you have or say why" in text
+    assert "### pytest — exited, exit 1" in text
+
+
+def test_the_idle_watch_needs_a_readable_tree_and_resets_on_activity(tmp_path):
+    """The two conditions the brief names: a readable marker that stood still, and under
+    2 KB of new transcript. Either the tree moving or the transcript growing resets it."""
+    clock = FakeClock()
+    native = tmp_path / "native.jsonl"
+    native.write_text("")
+    # A plain directory is not a worktree: None is not evidence that the tree stood still.
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    watch = packet.IdleWatch(plain_dir, native, 1.0, clock)
+    clock.now += 100
+    assert watch.poll() is False
+
+    repo = _git_repo(tmp_path / "repo")
+    watch = packet.IdleWatch(repo, native, 1.0, clock)
+    clock.now += 0.5
+    assert watch.poll() is False  # under the window
+    native.write_text("x" * (packet.IDLE_TRANSCRIPT_BYTES + 1))
+    clock.now += 0.5
+    assert watch.poll() is False  # the transcript grew: activity
+    clock.now += 0.5
+    assert watch.poll() is False  # reset, still under a full quiet window
+    (repo / "base.txt").write_text("moved\n")
+    clock.now += 1.0
+    assert watch.poll() is False  # the tree moved: activity again
+    clock.now += 1.0
+    assert watch.poll() is True  # a whole quiet window with neither

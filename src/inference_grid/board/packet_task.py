@@ -31,7 +31,14 @@ from ..lanes.brief import (
     mentioned_paths,
     packet_text,
 )
-from ..lanes.packet import ClineAdapter, CommandCodeAdapter, Gate, ZcodeAdapter, build_loop
+from ..lanes.packet import (
+    DEFAULT_IDLE_SECONDS,
+    ClineAdapter,
+    CommandCodeAdapter,
+    Gate,
+    ZcodeAdapter,
+    build_loop,
+)
 from ..lanes.scout import orient
 from .task import validate_task
 
@@ -132,7 +139,7 @@ def validate_packet_task(raw):
         err("spec", "expected a dict")
     required = {"brief", "packet_id", "gates", "base"}
     missing = required - set(spec)
-    unknown = set(spec) - (required | {"max_rounds"})
+    unknown = set(spec) - (required | {"max_rounds", "idle_seconds"})
     if missing:
         err("spec", "missing keys: " + ", ".join(sorted(missing)))
     if unknown:
@@ -147,6 +154,9 @@ def validate_packet_task(raw):
     rounds = spec.get("max_rounds", 3)
     if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= 8:
         err("spec", "max_rounds must be an int in 1..8")
+    idle = spec.get("idle_seconds", DEFAULT_IDLE_SECONDS)
+    if isinstance(idle, bool) or not isinstance(idle, int) or not 1 <= idle <= 3600:
+        err("spec", "idle_seconds must be an int in 1..3600")
     gates = spec["gates"]
     if not isinstance(gates, list) or not gates:
         err("spec", "gates must be a non-empty list")
@@ -188,6 +198,7 @@ def validate_packet_task(raw):
         "gates": [dict(g) for g in gates],
         "base": base,
         "max_rounds": rounds,
+        "idle_seconds": idle,
     }
     if landed is not None:
         out["landed"] = dict(landed)
@@ -423,6 +434,7 @@ def run_packet(ledger, admission):
             attempt_dir,
             wall_seconds=task["budget"]["wall_seconds"],
             max_rounds=spec["max_rounds"],
+            idle_seconds=spec.get("idle_seconds", DEFAULT_IDLE_SECONDS),
         )
     except Exception as exc:
         ledger.hold(aid, "packet attempt: " + type(exc).__name__ + ": " + str(exc)[:300])

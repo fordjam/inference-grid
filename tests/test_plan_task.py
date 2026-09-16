@@ -244,6 +244,7 @@ def test_a_fake_lanes_packet_md_becomes_a_valid_packet_task(world):
         "gates": [{"name": "tests", "argv": ["python", "-m", "pytest", "-q"]}],
         "base": "main",
         "max_rounds": 3,
+        "idle_seconds": 900,  # the idle watchdog's default window, filled in by validation
     }
     # The board loads it through the packet validator.
     assert runner.load_board(world["board"])["packet-k1"][1]["state"] == "ready"
