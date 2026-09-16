@@ -43,7 +43,7 @@ from .guard import check_input
 from .land import land
 from .packet_task import admit_packet, run_packet, validate_board_task
 from .plan_task import DRAFTS_FILE, load_drafts, settle_plan
-from .policy import record_waiver, review_needed
+from .policy import owner_only_prefix, record_waiver, review_needed
 from .task import validate_task
 from .verify_merge import verify_merge
 from ..lanes.route import route
@@ -1641,6 +1641,7 @@ def tick(
     observations=None,
     output_dir=None,
     package_src=None,
+    owner_only=None,
 ):
     """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records.
 
@@ -1678,6 +1679,12 @@ def tick(
     provider's observation file through board_prepare's record builder (`package_src`
     names the deployments/local directory to import it from) and re-classified before it
     is refused; only an observation file that is itself stale refuses, naming its age.
+
+    With `owner_only` (the board config's path prefixes, `[]` by default) a packet task
+    whose declared files fall under one of them is never dispatched: the row names the
+    prefix that matched (`owner_only: <prefix>`), the task stays ready, and the digest
+    lists it under needs-you. That is the one autonomy wait the tick enforces itself
+    (docs/AUTONOMY.md); a dry run plans the refusal the real tick would make.
     """
     now = time.time() if now is None else now
     rows = {}
@@ -2052,6 +2059,20 @@ def tick(
             # auto_dispatch. The default is to draft, not to build.
             rows[index] = {"task": task_id, "lane": None, "attempt": None, "result": "draft"}
             continue
+        if task["category"] == "packet":
+            prefix = owner_only_prefix(task, owner_only)
+            if prefix is not None:
+                # The autonomy policy's one dispatch-time wait (brief 14 M3): a packet
+                # whose declared files fall under an owner-only prefix is the operator's
+                # to release. No attempt exists, nothing is spent, the task stays ready
+                # and the row carries the prefix that matched; the digest lists it.
+                rows[index] = {
+                    "task": task_id,
+                    "lane": None,
+                    "attempt": None,
+                    "result": "owner_only: " + prefix,
+                }
+                continue
         clash = shadowing_names(task)
         if clash:
             if not dry_run:

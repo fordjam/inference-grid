@@ -152,6 +152,49 @@ def test_digest_reports_the_evals_table_and_the_needs_you_lanes(tmp_path):
     assert "eval coverage: `go`" not in text
 
 
+def test_digest_lists_owner_only_packets_under_needs_you(tmp_path):
+    """Brief 14 M3: a packet whose declared files fall under the board config's
+    `owner_only` prefixes is the one wait the runner enforces at dispatch, and the
+    digest names it under needs-you with the prefix that matched — before the
+    operator wonders why the packet never moves."""
+    from test_board_status import write_task  # reuse the fixture
+
+    project = tmp_path / "project"
+    board = project / "grid/board"
+    board.mkdir(parents=True)
+    owned = write_task(board, "owned", "ready")
+    owned["category"] = "packet"
+    owned["artifacts"] = ["docs/research/numbers.md"]
+    owned["spec"] = {
+        "brief": owned["brief"],
+        "packet_id": "A1",
+        "gates": [{"name": "ok", "argv": ["true"]}],
+        "base": "main",
+    }
+    (board / "owned.json").write_text(json.dumps(owned))
+    write_task(board, "plain", "ready")
+    ledger = Ledger("sqlite:///" + str(tmp_path / "ledger.sqlite"))
+    ledger.initialize()
+    boards_dir = tmp_path / "boards"
+    boards_dir.mkdir()
+    (boards_dir / "project.json").write_text(
+        json.dumps(
+            {
+                "board_dir": str(board),
+                "project_root": str(project),
+                "owner_only": ["docs/research"],
+            }
+        )
+    )
+    text = digest(ledger, boards_dir)
+    assert (
+        "- owner-only: `owned` — a declared file is under prefix `docs/research`"
+        " (board project)" in text
+    )
+    assert text.count("- owner-only:") == 1
+    assert "## Needs you" in text
+
+
 def _seed_eval(ledger, aid, family, model, kind, at):
     from sqlalchemy import update
 
