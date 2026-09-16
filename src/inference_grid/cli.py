@@ -88,6 +88,11 @@ def board_new(
     allowed_prefixes=None,
     ticket=None,
     lane=None,
+    from_brief=None,
+    gates=None,
+    base=None,
+    boards_dir=None,
+    dry_run=False,
 ):
     from .board.new import new_task, retry_task
 
@@ -99,6 +104,19 @@ def board_new(
         return plan_task(board_dir, ticket, lane)
     if project_root is None:
         raise ValueError("board-new needs project_root")
+    if from_brief is not None:
+        from .board.from_brief import from_brief as author_from_brief
+
+        return author_from_brief(
+            board_dir,
+            project_root,
+            from_brief,
+            lanes=lanes,
+            gates=gates,
+            base=base,
+            boards_dir=boards_dir,
+            dry_run=dry_run,
+        )
     if qualify is not None:
         from .board.new import qualify_task
 
