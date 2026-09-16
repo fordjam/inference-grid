@@ -110,8 +110,8 @@ def configure(config, ledger):
             1,
             grem,
             gt + GO_VALID,
-            ["glm-5.3-flash", "kimi-k3"],
-            ["go", "go-kimi"],
+            [entry["model"] for entry in go_lanes(config)],
+            [entry["lane"] for entry in go_lanes(config)],
             observed_at=gt,
         )
     except Refused as exc:
@@ -128,8 +128,8 @@ def configure(config, ledger):
         "blocked_until": None,
         "blocker": None,
     }
-    lanes["go"] = go_lane
-    lanes["go-kimi"] = dict(go_lane, provider="go-kimi")
+    for entry in go_lanes(config):
+        lanes[entry["lane"]] = dict(go_lane, provider=entry["lane"])
     for lane, record in lanes.items():
         print(lane, ledger.record_lane(lane, record)["state"])
     configure_goat(config, ledger, now)
@@ -216,6 +216,17 @@ def configure_observation(
             print(account, exc)
     for lane in lane_ids:
         print(lane, ledger.record_lane(lane, dict(record, provider=lane))["state"])
+
+
+GO_LANES_DEFAULT = [{"lane": "go", "model": "glm-5.3-flash"}, {"lane": "go-kimi", "model": "kimi-k3"}]
+
+
+def go_lanes(config):
+    """The Go plan's lanes: `go_lanes` in the config ({lane, model} rows, like `goat_lanes`),
+    or the two the account has always carried. One credential serves every model on the
+    plan, so a new family (go-qwen, 2026-09-16) is a config row, not code."""
+    rows = config.get("go_lanes") or GO_LANES_DEFAULT
+    return [r for r in rows if isinstance(r, dict) and r.get("lane") and r.get("model")]
 
 
 def configure_goat(config, ledger, now=None):

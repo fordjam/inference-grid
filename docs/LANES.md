@@ -98,7 +98,21 @@ values are recorded here — the operator's `lanes.json` carries the credential 
 Reserve for multi-file work; every call carries ~16–25k input tokens of fixed CLI
 overhead, so small jobs are wasted on it.
 
-## Cline
+## Command Code GOAT — a third family on the same account
+
+`goat-qwen` (`qwen/qwen3.8-flash`, family qwen) was added 2026-09-16 beside `goat` (glm) and
+`goat-deepseek`: the plan lists 70 models and the account had used two families while every
+review of its own GLM builds queued on the Go plan. Same credential, same `plan_units`, its
+own canary and review qualification. Hosting and retention unknown, as for the other goat lanes.
+
+## Cline (retired 2026-09-16)
+
+ClinePass was cancelled after five days: 100% weekly and 90% monthly for 4 accepted packets
+and 7 failures. Its metering bills every cached read of an agent loop's context, and the CLI
+cannot resume a session with a prompt in JSON mode, so each fix round rebuilt the context from
+zero (the 5-hour cap fell to two concurrent 50-minute runs). The lane rows are kept in
+`lanes.retired-cline-20260916.json` beside `lanes.json`; the section below stays as the record.
+
 
 ```json
 "cline": {
@@ -198,7 +212,7 @@ say so (`reasoning_effort: unsupported`).
 | `go` | `glm-5.3-flash` | glm | build | The proven route for tightly specified pure functions |
 | `go-kimi` | `kimi-k3` | kimi | review | The proven reviewer; needs `reasoning_effort` (default `max` thinks its output away) |
 | `go-deepseek` | `deepseek-v4-flash` | deepseek | build | Needs "Enable models hosted in China" in the Go console first; then canary |
-| `go-qwen` | `qwen3.8-max` | qwen | build | Third family candidate; canary before use |
+| `go-qwen` | `qwen3.8-flash` | qwen | review | Registered 2026-09-16 as the second non-GLM reviewer (the cross-family rule had put every review of GLM-built work on `go-kimi`); canary and review qualification authored, flash tier because a review is one call |
 | `go-minimax` | `minimax-m3` | minimax | build | Unqualified; canary before use |
 | `go-grok` | `grok-4.6` | grok | build | Refuses the OpenAI-compatible endpoint (protocol fact); re-probe only after the endpoint changes |
 
