@@ -27,7 +27,7 @@ import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 
 from .case import REFERENCE, REFERENCE_PATCH, REFERENCE_TESTS, load_case
 
