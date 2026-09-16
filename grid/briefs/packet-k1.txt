@@ -1,0 +1,49 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### K1. Branch reviews split by path group when commits cannot split them
+`board/branch_review.py::review_branch` gains `paths: [<prefix>, ...]` (an explicit
+filter: only changed files under those prefixes are staged, the diff patch is restricted to
+them) and, when `split` is requested and the range is a single over-budget commit, an
+automatic split into one task per top-level directory of the changed files (`src/`,
+`tests/`, `docs/`, `scripts/`, `migrations/`...), each measured against the budget before
+anything is written and each named `review-<repo>-<sha>-<dir>`. Directories that still
+exceed the budget are refused with their size, never forced. `board-new --json` exposes
+`paths`. The brief text names the group under review and lists the sibling reviews so the
+reviewer knows what it is not seeing.
+- Tests (`tests/test_branch_review.py`): a one-commit range over budget with `split` yields
+  one task per directory, each within budget; `paths` restricts staging and the patch; an
+  over-budget directory is refused with its byte count; sibling reviews are named in the brief.
+- Size: medium. Why: the first whole-repository review the operator authored could not run.
+
+---
+
+---
