@@ -52,6 +52,12 @@ RUNNER = [sys.executable, "-m", "inference_grid.lanes.runner"]
 # How long a model stays excluded from a lane after the endpoint answered 401/403 for it.
 MODEL_REFUSAL_TTL = 24 * 3600
 
+# The tail the ledger appends to a board task id to name an attempt's own task:
+# <board id>-<UTC stamp>-<random>, with an optional -verify on the follow-up of a
+# deadline hold. The board id is recovered by matching this exact tail against a
+# candidate id, because a task id may be a prefix of another (`copy` vs `copy-ok`).
+LEDGER_ATTEMPT = re.compile(r"^\d{8}T\d{6}-[0-9a-f]+(?:-verify)?$")
+
 
 def model_unsupported_until(record, model, now):
     """The instant until which the lane's endpoint has refused this model, else None."""
@@ -1426,6 +1432,70 @@ class Attempt:
         return not self.settled.is_set()
 
 
+def ledger_attempts(ledger, task_id):
+    """Every ledger attempt for one board task, newest first.
+
+    The ledger names an attempt's task `<board id>-<UTC stamp>-<random>`, so a candidate
+    is kept only when that exact tail matches — a bare prefix test would also claim the
+    attempts of a task whose id merely starts with this one (`copy` vs `copy-ok`).
+    """
+    prefix = task_id + "-"
+    with ledger.engine.connect() as con:
+        rows = list(
+            con.execute(
+                select(attempt_records)
+                .where(attempt_records.c.task.like(prefix + "%"))
+                # The last transition orders "newest"; the ledger task id (which carries
+                # the stamp, and a -verify tail on a follow-up) breaks a tie the way the
+                # admissions ran, so the choice is deterministic.
+                .order_by(attempt_records.c.updated.desc(), attempt_records.c.task.desc())
+            ).mappings()
+        )
+    return [r for r in rows if LEDGER_ATTEMPT.match(r["task"][len(prefix) :])]
+
+
+def requeue_dead(path, task, ledger, dry_run=False):
+    """Return a stranded `dispatched` task to `ready`, or report why not (L2).
+
+    A pass marks a task `dispatched` before it admits the attempt and settles the board
+    from the worker, so a runtime that dies in between leaves the task stranded: its
+    newest ledger attempt is terminal and unsuccessful (`failed`/`abandoned`) and no
+    ACTIVE attempt holds it any more, yet `tick` dispatches only `ready` tasks and the
+    task would never run again. Requeue it with a ledger event naming the attempt and its
+    terminal state; the next pass routes it afresh. A terminal *successful* attempt
+    (`completed`/`accepted`) is reported, not touched — the board state is the operator's
+    to settle — and a task with a live or held attempt is left entirely alone. A dry run
+    reports the requeue it would make and writes nothing.
+    """
+    rows = ledger_attempts(ledger, task["id"])
+    if not rows:
+        return None
+    newest = rows[0]
+    if any(r["state"] in ACTIVE for r in rows):
+        return None
+    if newest["state"] in ("completed", "accepted"):
+        return {
+            "task": task["id"],
+            "lane": None,
+            "attempt": newest["id"],
+            "result": "dispatched: attempt " + newest["state"],
+        }
+    if newest["state"] not in ("failed", "abandoned"):
+        return None
+    if not dry_run:
+        save_task(path, task, state="ready", blocked_reason=None)
+        with ledger.tx() as con:
+            ledger.event(
+                con,
+                newest["id"],
+                "requeued",
+                task=task["id"],
+                ledger_task=newest["task"],
+                reason="newest attempt " + newest["state"],
+            )
+    return {"task": task["id"], "lane": None, "attempt": newest["id"], "result": "requeued"}
+
+
 def tick(
     board_dir,
     project_root,
@@ -1799,6 +1869,15 @@ def tick(
                     else "failover: " + authored["reason"]
                 ),
             }
+            continue
+        if task["state"] == "dispatched":
+            # A task the previous pass marked `dispatched` but never settled — its runtime
+            # died, or the operator resolved the attempt without the board catching up —
+            # is stranded, since only `ready` tasks dispatch. Requeue the dead ones (L2);
+            # a live attempt and a terminal successful one are reported, not moved.
+            row = requeue_dead(path, task, ledger, dry_run)
+            if row is not None:
+                rows[index] = row
             continue
         if task["state"] != "ready":
             continue
