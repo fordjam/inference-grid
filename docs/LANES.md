@@ -103,6 +103,16 @@ the window's unit cap, the same shape the zai and go accounts already use — an
 result, with the observation timestamp, is what `configure_account` writes for the
 lane's admission decision.
 
+Because `board_prepare` runs once per pass and a pass can last an hour, the board tick
+itself re-reads a stale lane record's observation file before refusing it: the tick config
+(the `board-tick --json` document) may carry `observations` — a map of provider (or lane)
+id to observation file path — and `output_dir`, the collectors' capacity output directory
+whose `<provider>-observation.json` convention the map defaults to. `package_src` names the
+`deployments/local/` directory the runner imports `board_prepare.py`'s record builder from.
+A lane record older than its `quota_freshness_seconds` is rebuilt from the file, recorded
+back into the ledger and re-classified; only a file that is itself older than the window
+refuses, with the file's age in the reason. Without these keys the tick behaves as before.
+
 ## Codex (OpenAI) — `codex_cli`, pending operator confirmation
 
 ```json

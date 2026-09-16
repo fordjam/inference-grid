@@ -13,6 +13,7 @@ review-<id> task created for it; acceptance itself stays an operator action.
 """
 
 import hashlib
+import importlib
 import json
 import re
 import shutil
@@ -306,6 +307,134 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None, scorecard=None):
             entry["reason"] = "model_refused_recently"
         view[lane_id] = entry
     return view
+
+
+def observation_paths(lanes, observations, output_dir):
+    """The lane id -> observation file map a tick re-reads stale lane records through.
+
+    The tick config's `observations` map names paths by provider (the collectors write
+    `<provider>-observation.json`); a lane id is accepted too, for lane ids that are not
+    provider names. A provider the map does not name falls back to the collectors'
+    convention `<output_dir>/<provider>-observation.json` when the tick config carries
+    `output_dir` — the capacity output directory, where the collectors write.
+    """
+    paths = {}
+    if not observations and not output_dir:
+        return paths
+    for lane_id, lane in lanes.items():
+        provider = lane.get("provider") or lane_id
+        named = (observations or {}).get(provider) or (observations or {}).get(lane_id)
+        if named:
+            paths[lane_id] = Path(named)
+        elif output_dir:
+            paths[lane_id] = Path(output_dir) / (str(provider) + "-observation.json")
+    return paths
+
+
+def _board_prepare(package_src):
+    """The deployments/local board_prepare module, imported through `package_src`.
+
+    The runner shares board_prepare's observation record builder instead of copying it:
+    one observation shape, one policy. None when no source directory is configured or the
+    module cannot be imported — the re-read is best-effort by design, never a tick failure.
+    """
+    if not package_src:
+        return None
+    try:
+        source = str(package_src)
+        if source not in sys.path:
+            sys.path.insert(0, source)
+        return importlib.import_module("board_prepare")
+    except Exception:  # noqa: BLE001 — a missing deployment module is not a tick failure
+        return None
+
+
+def refresh_stale_lanes(
+    ledger,
+    lanes,
+    readiness,
+    observations,
+    now,
+    package_src=None,
+    scorecard=None,
+    accounts_by_lane=None,
+):
+    """Re-read stale lane records from their providers' observation files before refusing.
+
+    board_prepare refreshes the ledger once per pass and a pass can last an hour, so a
+    lane record ages past its freshness window while the collector's observation file
+    behind it is still fresh. Before a stale record refuses a dispatch, the runner re-reads
+    the provider's observation file through board_prepare's record builder (imported
+    through `package_src`, never copied), records the fresh lane record in the ledger and
+    re-classifies. A file that is itself older than the freshness window admits nothing:
+    its age becomes the lane's readiness reason and the tick refuses with it. A lane with
+    no observation path, a missing or unreadable file, a non-ok reading, or no
+    `package_src` configured behaves exactly as before.
+
+    Returns (readiness, stale_files): the re-classified view and, per lane refused on its
+    observation file's age, the reason naming the age.
+    """
+    stale_files = {}
+    if not observations:
+        return readiness, stale_files
+    prepare = _board_prepare(package_src)
+    if prepare is None:
+        return readiness, stale_files
+    refreshed = False
+    for lane_id, entry in readiness.items():
+        if entry.get("state") != "stale":
+            continue
+        record = None
+        with ledger.engine.connect() as con:
+            row = (
+                con.execute(select(lane_records).where(lane_records.c.provider == lane_id))
+                .mappings()
+                .first()
+            )
+            if row is not None:
+                record = row["record"]
+        if not isinstance(record, dict):
+            continue
+        observed_at = record.get("quota_observed_at")
+        valid = record.get("quota_freshness_seconds")
+        if (
+            isinstance(observed_at, bool)
+            or not isinstance(observed_at, (int, float))
+            or isinstance(valid, bool)
+            or not isinstance(valid, (int, float))
+            or valid <= 0
+            or now - observed_at <= valid
+        ):
+            continue
+        path = observations.get(lane_id)
+        if path is None:
+            continue
+        try:
+            obs = json.loads(path.read_text())
+            fresh, observed, _used = prepare.observation_record({}, obs, None, valid)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if observed is None or fresh.get("quota_observed_at") is None:
+            continue
+        if observed + valid > now:
+            merged = dict(fresh, provider=lane_id)
+            if isinstance(record.get("unsupported_until"), dict):
+                merged["unsupported_until"] = record["unsupported_until"]
+            try:
+                ledger.record_lane(lane_id, merged)
+            except Refused:
+                continue
+            refreshed = True
+        else:
+            stale_files[lane_id] = (
+                f"quota stale: observation file {int(now - observed)}s old"
+                f" (freshness window {int(valid)}s)"
+            )
+    if refreshed:
+        readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
+    for lane_id, reason in stale_files.items():
+        readiness[lane_id] = dict(readiness.get(lane_id) or {"state": "stale"}, reason=reason)
+    return readiness, stale_files
 
 
 def calibration_reports(ledger):
@@ -1439,6 +1568,9 @@ def tick(
     dry_run=False,
     auto_land=False,
     auto_dispatch=False,
+    observations=None,
+    output_dir=None,
+    package_src=None,
 ):
     """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records.
 
@@ -1469,6 +1601,13 @@ def tick(
     and returns {"readiness": view, "plan": [...]} instead: the plan a real tick would
     follow, without creating an attempt, writing a task file or touching a packet
     directory.
+
+    With `observations` (the tick config's map, provider or lane id -> observation file
+    path) or `output_dir` (the collectors' capacity output directory the map defaults
+    to), a lane whose ledger record aged past its freshness window is re-read from its
+    provider's observation file through board_prepare's record builder (`package_src`
+    names the deployments/local directory to import it from) and re-classified before it
+    is refused; only an observation file that is itself stale refuses, naming its age.
     """
     now = time.time() if now is None else now
     rows = {}
@@ -1478,6 +1617,19 @@ def tick(
     scorecard = ledger.scorecard()
     calibration = calibration_reports(ledger)
     readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
+    # A stale lane record is re-read from its provider's observation file before it is
+    # allowed to refuse work: the collectors' file is usually fresher than a record a
+    # pass-length-old board_prepare wrote (brief L1).
+    readiness, stale_files = refresh_stale_lanes(
+        ledger,
+        lanes,
+        readiness,
+        observation_paths(lanes, observations, output_dir),
+        now,
+        package_src=package_src,
+        scorecard=scorecard,
+        accounts_by_lane=accounts_by_lane,
+    )
     board = load_board(board_dir)
 
     def settle_attempt(index, lane_id, task_id, task, path, choice, packet_dir, admission):
@@ -1951,6 +2103,15 @@ def tick(
                 # Every remaining candidate is at its concurrency cap; say so instead of
                 # the generic no-ready-lane reason.
                 reason = "lane_busy"
+            else:
+                # A candidate refused on its observation file's age names the age, not the
+                # generic no-ready-lane reason (brief L1).
+                named = next(
+                    (stale_files[c["lane"]] for c in candidates if c["lane"] in stale_files),
+                    None,
+                )
+                if named:
+                    reason = named
             rows[index] = {
                 "task": task_id,
                 "lane": None,
