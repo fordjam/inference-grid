@@ -28,13 +28,19 @@ TRAILER = TRAILERS["glm"]
 
 def family_of(model: str) -> str:
     m = model.lower()
-    for fam in ("deepseek", "kimi", "qwen", "glm"):
+    for fam in ("deepseek", "kimi", "qwen", "minimax", "glm"):
         if fam in m:
             return fam
     return "unknown"
 
 
-VENDOR_DOMAINS = {"glm": "z.ai", "deepseek": "deepseek.com", "kimi": "moonshot.ai", "qwen": "alibabacloud.com"}
+VENDOR_DOMAINS = {
+    "glm": "z.ai",
+    "deepseek": "deepseek.com",
+    "kimi": "moonshot.ai",
+    "qwen": "alibabacloud.com",
+    "minimax": "minimax.io",
+}
 
 
 def trailer_for(model: str) -> str:

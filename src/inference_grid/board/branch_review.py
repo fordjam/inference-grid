@@ -56,6 +56,8 @@ TRAILER_FAMILIES = {
     "GPT": "openai",
     "Kimi": "kimi",
     "DeepSeek": "deepseek",
+    "Qwen": "qwen",
+    "MiniMax": "minimax",
 }
 
 # The packet budget: staged bytes (files under the per-file cap plus the diff), sized to
