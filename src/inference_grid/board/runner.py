@@ -46,6 +46,7 @@ from .plan_task import DRAFTS_FILE, load_drafts, settle_plan
 from .policy import owner_only_prefix, record_waiver, review_needed
 from .task import validate_task
 from .verify_merge import verify_merge
+from ..lanes.meta import load_lane_meta
 from ..lanes.route import route
 
 RUNNER = [sys.executable, "-m", "inference_grid.lanes.runner"]
@@ -1642,6 +1643,7 @@ def tick(
     output_dir=None,
     package_src=None,
     owner_only=None,
+    require_lane_meta=None,
 ):
     """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records.
 
@@ -1651,6 +1653,15 @@ def tick(
     `candidates` (rows naming each offered lane and the max_tokens cap it would run
     under), `dropped` (lanes filtered out with reasons and the two token numbers,
     budget_unfit foremost) and `score`.
+
+    With `require_lane_meta` (the board config's hosting/retention requirement,
+    {"residency": ["us", "eu"], "retention": ["zero"]}) the sidecar `lanes-meta.json` is
+    read once per tick beside `lanes_path` and each lane's record rides its view entry:
+    route drops every candidate whose record does not satisfy every listed key (unknown
+    never satisfies), reason `lane_policy` naming the key. A malformed sidecar refuses
+    the whole tick with the parse error — fail closed — and without the requirement the
+    sidecar is read (a malformed one still refuses) but satisfies nothing and nothing
+    changes.
 
     A packet task the plan node authored waits in the board's drafts list (`draft`) until
     the operator releases it or the pass runs with auto_dispatch; the plan task itself
@@ -1691,6 +1702,17 @@ def tick(
     attempts = []
     drafted = set(load_drafts(board_dir))
     view = lane_view(lanes, now)
+    # The policy sidecar is read once per tick beside lanes.json (brief L8); a malformed
+    # file raises here and refuses the whole pass — fail closed — whatever the board
+    # requires. Tagged lanes carry their record into route on the view, the way tier does.
+    lane_meta = load_lane_meta(lanes_path)
+    if lane_meta:
+        view = {
+            lane_id: dict(lane, lane_meta=dict(lane_meta[lane_id]))
+            if lane_id in lane_meta
+            else lane
+            for lane_id, lane in view.items()
+        }
     scorecard = ledger.scorecard()
     calibration = calibration_reports(ledger)
     readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
@@ -2159,6 +2181,9 @@ def tick(
                     # The budget decides the cap route fits the packet against; without it
                     # every task was measured against the unbudgeted 16 000-token cap.
                     "budget": task.get("budget"),
+                    # The board's hosting/retention requirement; route drops candidates
+                    # whose lanes-meta.json record does not satisfy it (lane_policy).
+                    "require_lane_meta": require_lane_meta,
                 },
                 lanes_view,
                 task_readiness,
