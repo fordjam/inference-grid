@@ -41,6 +41,7 @@ loop = load("capacity_loop")
 tick_boards = load("tick_boards")
 upload = load("upload")
 installer = load("install")
+evals_run = load("evals_run")
 
 
 def iso_ms(ms):
@@ -1058,10 +1059,113 @@ class InstallTests(unittest.TestCase):
     def test_no_rendered_plist_carries_a_start_interval(self):
         tmp = self.enterContext(_TmpDir())
         installer.main(["--out-dir", str(tmp.path), "--python", "/usr/bin/python3"])
-        for name, _script, _log in installer.RUNTIMES:
+        for name in [name for name, _s, _l in installer.RUNTIMES] + [installer.EVALS_RUNTIME[0]]:
             plist = tmp.path / f"com.inference-grid.{name}.plist"
             self.assertNotIn("StartInterval", plistlib.loads(plist.read_bytes()))
             self.assertNotIn("StartInterval", plist.read_text())
+
+    def test_install_renders_the_evals_agent_with_the_config_path(self):
+        # Brief 20, M5: the eval agent is a KeepAlive plist whose program is the hourly
+        # loop, pointed at the operator's config — the file whose `evals_corpus` names the
+        # corpus the runs are authored from.
+        tmp = self.enterContext(_TmpDir())
+        config = tmp.path / "config.json"
+        config.write_text(json.dumps({"evals_corpus": "/operator/eval-corpus"}))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            installer.main(
+                [
+                    "--out-dir",
+                    str(tmp.path / "out"),
+                    "--python",
+                    "/usr/bin/python3",
+                    "--config",
+                    str(config),
+                ]
+            )
+        plist = tmp.path / "out" / "com.inference-grid.evals.plist"
+        data = plistlib.loads(plist.read_bytes())
+        self.assertEqual(data["Label"], "com.inference-grid.evals")
+        self.assertIs(data["KeepAlive"], True)
+        self.assertIs(data["RunAtLoad"], True)
+        self.assertEqual(data["ProcessType"], "Interactive")
+        # The loop is the program; the config and the corpus it names are its arguments.
+        self.assertEqual(data["ProgramArguments"][0], "/usr/bin/python3")
+        self.assertEqual(data["ProgramArguments"][1], str(installer.DEFAULT_DIR / "evals_run.py"))
+        self.assertIn(str(config), data["ProgramArguments"])
+        self.assertIn("/operator/eval-corpus", data["ProgramArguments"])
+        self.assertIn(str(installer.DEFAULT_DIR / "evals.log"), data["StandardOutPath"])
+        self.assertIn(
+            f"launchctl bootstrap gui/{os.getuid()} {plist}",
+            out.getvalue(),
+        )
+
+    def test_evals_corpus_flag_overrides_the_config(self):
+        tmp = self.enterContext(_TmpDir())
+        installer.main(
+            [
+                "--out-dir",
+                str(tmp.path),
+                "--python",
+                "/usr/bin/python3",
+                "--config",
+                str(tmp.path / "absent.json"),
+                "--evals-corpus",
+                "/operator/other-corpus",
+            ]
+        )
+        data = plistlib.loads((tmp.path / "com.inference-grid.evals.plist").read_bytes())
+        self.assertIn("/operator/other-corpus", data["ProgramArguments"])
+
+
+class EvalsRunTests(unittest.TestCase):
+    def config(self, tmp):
+        return {
+            "evals_corpus": str(tmp.path / "corpus"),
+            "lanes_path": str(tmp.path / "lanes.json"),
+            "board_dir": str(tmp.path / "board"),
+            "evals_project_root": str(tmp.path / "project"),
+            "evals_dir": str(tmp.path),
+            "log_path": str(tmp.path / "evals.log"),
+        }
+
+    def test_the_payload_names_every_path_from_the_config(self):
+        tmp = self.enterContext(_TmpDir())
+        payload = evals_run.eval_payload(self.config(tmp))
+        self.assertEqual(payload["corpus_dir"], str(tmp.path / "corpus"))
+        self.assertEqual(payload["lanes"], str(tmp.path / "lanes.json"))
+        self.assertEqual(payload["board_dir"], str(tmp.path / "board"))
+        self.assertEqual(payload["project_root"], str(tmp.path / "project"))
+        # An incomplete config asks for nothing rather than guessing.
+        self.assertIsNone(evals_run.eval_payload({"evals_corpus": "/x"}))
+
+    def test_the_loop_calls_once_per_interval_and_stops_on_its_deadline(self):
+        tmp = self.enterContext(_TmpDir())
+        calls = []
+
+        def spawn(config):
+            calls.append(config)
+
+        sleeps = []
+        clock = FakeClock()
+        evals_run.run(
+            self.config(tmp),
+            spawn,
+            lambda seconds: (sleeps.append(seconds), clock.sleep(seconds))[1],
+            clock=clock.clock,
+            deadline=3 * evals_run.EVAL_SECONDS,
+        )
+        # Immediately at 0, then at 3600 and 7200; the sleep after the third reaches the
+        # deadline, so the loop ends without a fourth call.
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [evals_run.EVAL_SECONDS] * 3)
+
+    def test_a_default_reports_an_incomplete_config_without_spawning(self):
+        tmp = self.enterContext(_TmpDir())
+        config = {"log_path": str(tmp.path / "evals.log")}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(evals_run.default_evals(config))
+        self.assertIn("config incomplete", (tmp.path / "evals.log").read_text())
 
 
 if __name__ == "__main__":

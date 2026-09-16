@@ -13,6 +13,7 @@ recall per lane. Scoring the two kinds is board/calibration/score.py's `score`, 
 outcome path records both as `eval:<kind>` rows.
 """
 
+import hashlib
 import json
 import time
 from datetime import datetime, timezone
@@ -41,8 +42,12 @@ __all__ = [
     "NAME",
     "SEVERITY_WEIGHTS",
     "author_calibration",
+    "author_review_case",
     "calibration_settled",
     "calibration_task",
+    "case_attempt",
+    "case_attempt_dir",
+    "case_task_id",
     "diff_paths",
     "is_calibration_outcome",
     "load_case",
@@ -63,6 +68,9 @@ SETTLED_STATES = ("passed", "blocked")
 # the bare `calibration`); both feed the ledger-side calibration aggregate.
 EVAL_CATEGORY_PREFIX = "eval:"
 LEGACY_CATEGORY = "calibration"
+# The board task id `evals` authors for one (run, case) — the single-case task M5's
+# nightly run steps through (board/evals.py), never the whole-corpus `calib-` tasks.
+CASE_TASK_PREFIX = "eval-"
 
 
 def is_calibration_outcome(category):
@@ -173,8 +181,9 @@ def validate_calibration_run_task(raw):
     if not isinstance(spec, dict):
         err("spec", "expected a dict")
     required = {"corpus_dir", "lanes", "run_id"}
+    optional = {"case"}
     missing = required - set(spec)
-    unknown = set(spec) - required
+    unknown = set(spec) - (required | optional)
     if missing:
         err("spec", "missing keys: " + ", ".join(sorted(missing)))
     if unknown:
@@ -190,6 +199,14 @@ def validate_calibration_run_task(raw):
         or not all(isinstance(lane, str) and NAME.fullmatch(lane) for lane in lanes)
     ):
         err("spec", "lanes must be a non-empty list of lane ids")
+    # A single-case run (`case`, authored by M5's `evals`) measures one lane on one corpus
+    # case, so exactly one lane is named; a whole-corpus run names every lane it measures.
+    case = spec.get("case")
+    if case is not None:
+        if not isinstance(case, str) or not NAME.fullmatch(case):
+            err("spec", "case must match [a-z0-9-]")
+        if len(lanes) != 1:
+            err("spec", "a single-case run names exactly one lane")
     out = {
         k: (dict(v) if k == "budget" else list(v) if isinstance(v, list) else v)
         for k, v in raw.items()
@@ -200,10 +217,12 @@ def validate_calibration_run_task(raw):
         "lanes": list(lanes),
         "run_id": spec["run_id"],
     }
+    if case is not None:
+        out["spec"]["case"] = case
     return out
 
 
-def calibration_task(board_dir, corpus_dir, lanes, run_id):
+def calibration_task(board_dir, corpus_dir, lanes, run_id, case=None):
     """Author the one calibration_run board task for run_id; idempotent per run_id.
 
     The task is a code node: the runner authors the per-case review tasks on the first
@@ -212,6 +231,10 @@ def calibration_task(board_dir, corpus_dir, lanes, run_id):
     artifacts and the brief is documentation. Re-authoring the same run_id returns the
     existing task instead of refusing: the weekly trigger may fire again before the run
     has been scored.
+
+    With `case` (M5's nightly `evals`) the run measures exactly one corpus case on exactly
+    one lane, named in the spec so the runner can score just that case; the case's kind is
+    read from the corpus at dispatch. Without it the run measures the whole review corpus.
     """
     if not isinstance(run_id, str) or not NAME.fullmatch(run_id):
         raise ValueError("run_id must match [a-z0-9-]")
@@ -219,6 +242,11 @@ def calibration_task(board_dir, corpus_dir, lanes, run_id):
         raise ValueError("calibration needs a non-empty list of lanes")
     if not isinstance(corpus_dir, str) or not corpus_dir:
         raise ValueError("corpus_dir must be a non-empty str")
+    if case is not None:
+        if not isinstance(case, str) or not NAME.fullmatch(case):
+            raise ValueError("case must match [a-z0-9-]")
+        if len(lanes) != 1:
+            raise ValueError("a single-case run names exactly one lane")
     board_dir = Path(board_dir)
     task_id = "calibration-" + run_id
     if len(task_id) > 60:
@@ -241,19 +269,33 @@ def calibration_task(board_dir, corpus_dir, lanes, run_id):
         "blocked_reason": None,
         "spec": {"corpus_dir": corpus_dir, "lanes": list(lanes), "run_id": run_id},
     }
+    if case is not None:
+        task["spec"]["case"] = case
     task = validate_calibration_run_task(task)
     board_dir.mkdir(parents=True, exist_ok=True)
     task_path.write_text(json.dumps(task, indent=1) + "\n")
     brief_path = board_dir.parent.parent / brief_rel
     brief_path.parent.mkdir(parents=True, exist_ok=True)
+    if case is None:
+        purpose = (
+            "it authors one independent_review task per corpus case, scores them when "
+            "every case has settled, and settles itself passed with the per-lane recall "
+            "and precision"
+        )
+    else:
+        purpose = (
+            f"it runs corpus case {case} on lane {lanes[0]} — authoring the case's own "
+            "board task, scoring the settled attempt through board/calibration/score.py::"
+            "score, recording an eval:<kind> outcome and settling itself passed"
+        )
     brief_path.write_text(
         "Calibration run "
         + run_id
         + " for lanes "
         + ", ".join(lanes)
-        + ". This is a code node: it authors one independent_review task per corpus "
-        "case, scores them when every case has settled, and settles itself passed with "
-        "the per-lane recall and precision. No lane runs it.\n"
+        + ". This is a code node: "
+        + purpose
+        + ". No lane runs it.\n"
     )
     return {
         "id": task_id,
@@ -262,6 +304,78 @@ def calibration_task(board_dir, corpus_dir, lanes, run_id):
         "run_id": run_id,
         "existing": False,
     }
+
+
+def case_task_id(run_id, case):
+    """The board task id for one (run, case): deterministic, bounded, `[a-z0-9-]`.
+
+    A long case name would push the id past the board's 60-char ceiling, so the name is
+    replaced by a digest of itself when it does not fit; the id stays a pure function of
+    (run_id, case), which is what makes re-authoring the same run a no-op.
+    """
+    stem = run_id + "-" + case
+    if len(CASE_TASK_PREFIX) + len(stem) > 60:
+        stem = run_id + "-" + hashlib.sha1(case.encode("utf-8")).hexdigest()[:12]
+    return CASE_TASK_PREFIX + stem
+
+
+def author_review_case(board_dir, project_root, case, run_id, lanes):
+    """One review case as an `independent_review` task — the M5 single-case review path.
+
+    Exactly the staging `author_calibration` does for one case (the same planning path), so
+    a nightly eval task is the same shape a whole-corpus run authors; only the ids differ
+    (`eval-<run>-<case>` rather than `calib-<run>-<case>`). Returns the authored summary.
+    """
+    task_id = case_task_id(run_id, case["case"])
+    staged_bytes = sum(len(data) for _, data in case["files"]) + len(case["diff"].encode())
+    files, summary = _plan_task(
+        board_dir,
+        project_root,
+        task_id,
+        AUTHOR_FAMILY,
+        lanes,
+        None,
+        case["brief"].strip(),
+        case["files"],
+        case["diff"],
+        staged_bytes,
+    )
+    _write_files(files)
+    return dict(summary, case=case["case"], task_id=task_id)
+
+
+def case_attempt(ledger, task_id):
+    """The newest ledger attempt id for a single-case task, or None.
+
+    The id is what an eval outcome attaches to; the attempt directory (below) is where the
+    lane's work is. Looking the id up in the ledger rather than on disk means an attempt
+    that settled without a readable artifact is still scored — a review case with no reply
+    is a lane failure worth recording, not a reason to leave the run unscoreable.
+    """
+    from sqlalchemy import select
+
+    from ...ledger import attempts as attempt_records
+
+    with ledger.engine.connect() as con:
+        row = con.execute(
+            select(attempt_records.c.id)
+            .where(attempt_records.c.task.like(task_id + "-%"))
+            .order_by(attempt_records.c.updated.desc())
+        ).first()
+    return row[0] if row else None
+
+
+def case_attempt_dir(packets_root, task_id, aid):
+    """The attempt directory `score` grades for a single-case task, or None.
+
+    A review case's attempt holds `artifacts/reply.txt`; a packet case's holds the lane's
+    tree at `work/`. Both live under <packets_root>/<task id>/<stamp>/attempts/<aid>/ — the
+    runner's layout — so the ledger's attempt id locates the directory.
+    """
+    if aid is None:
+        return None
+    matches = sorted((Path(packets_root) / task_id).glob(f"*/attempts/{aid}"))
+    return matches[-1] if matches else None
 
 
 def calibration_settled(board_dir, run_id):

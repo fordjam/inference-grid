@@ -1037,7 +1037,257 @@ def settle_verify_merge(path, task, project_root, packets_root):
     }
 
 
-def step_calibration_run(path, task, board_dir, project_root, ledger, packets_root, dry_run=False):
+# The eval packet's shape (M5): a bounded build whose hidden grade is the case's reference
+# suite, run by score.py after the attempt. The loop's own gate is only the tree's syntax
+# plus the commit gate, so no reference test ever reaches the lane's context.
+EVAL_BUDGET = {"wall_seconds": 1800, "output_bytes": 2000000, "thinking_tokens": 6000}
+EVAL_MAX_ROUNDS = 3
+EVAL_PACKET_ID = "E1"
+EVAL_ARTIFACT = "report.md"
+EVAL_COMPILE_GATE = (
+    "import compileall,sys;sys.exit(0 if compileall.compile_dir('.', quiet=1) else 1)"
+)
+
+
+def eval_brief(case, brief_rel):
+    """The brief document one eval build runs under: hard rules, heading, the case's brief.
+
+    A packet task's brief is a document the shared prompt machinery cuts by heading
+    (lanes/brief.py); the case's own brief.txt is the packet section, and the hard rules
+    section is what `hard_rules` requires of every brief.
+    """
+    return (
+        "## 1. Hard rules\n\n"
+        "- Work only inside this checkout; commit on its current branch.\n"
+        "- Finish with exactly one commit and a clean working tree.\n\n"
+        "---\n\n"
+        f"#### {EVAL_PACKET_ID}. {case['case']}\n\n" + case["brief"].strip() + "\n"
+    )
+
+
+def materialize_case_repo(case, root, brief_rel, brief):
+    """A one-commit git repository of the case's `base/` under root; returns its path.
+
+    A packet case's `base/` is a plain tree; the packet loop builds in a clone of a
+    *repository*, so the eval makes one — the base files and the brief committed once, that
+    commit the branch point. Only `base/` and the brief are written; the case's hidden
+    `reference/` never touches the disk a lane can read.
+    """
+    repo = Path(root) / "repo"
+    if (repo / ".git").exists():
+        return repo
+    repo.mkdir(parents=True, exist_ok=True)
+    for relative, data in case["base"]:
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    brief_path = repo / brief_rel
+    brief_path.parent.mkdir(parents=True, exist_ok=True)
+    brief_path.write_text(brief)
+    for argv in (
+        ["git", "init", "-q", str(repo)],
+        ["git", "-C", str(repo), "add", "-A"],
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            # A synthetic identity, no address: the commit exists only to be a base ref.
+            "user.email=evals",
+            "-c",
+            "user.name=evals",
+            "commit",
+            "-q",
+            "--no-gpg-sign",
+            "-m",
+            "eval base",
+        ],
+    ):
+        done = subprocess.run(argv, capture_output=True)
+        if done.returncode != 0:
+            raise RuntimeError(
+                "eval repository: " + done.stderr.decode("utf-8", "replace").strip()[:200]
+            )
+    return repo
+
+
+def case_packet_task(case, lane_id, task_id, brief_rel):
+    """The in-memory packet task one packet eval builds (M5); validated before dispatch."""
+    from .packet_task import validate_packet_task
+
+    return validate_packet_task(
+        {
+            "id": task_id,
+            "category": "packet",
+            "brief": brief_rel,
+            "inputs": [brief_rel],
+            "tests": [],
+            "artifacts": [EVAL_ARTIFACT],
+            "lanes": [lane_id],
+            "author_family": None,
+            "budget": dict(EVAL_BUDGET),
+            "state": "ready",
+            "blocked_reason": None,
+            "spec": {
+                "brief": brief_rel,
+                "packet_id": EVAL_PACKET_ID,
+                "gates": [{"name": "compile", "argv": [sys.executable, "-c", EVAL_COMPILE_GATE]}],
+                "base": "HEAD",
+                "max_rounds": EVAL_MAX_ROUNDS,
+            },
+        }
+    )
+
+
+def step_eval_case(
+    path,
+    task,
+    board_dir,
+    project_root,
+    ledger,
+    packets_root,
+    lanes,
+    lanes_path,
+    accounts_by_lane,
+    dispatch_fn,
+):
+    """One pass of an M5 single-case eval run: author the case's task, then score it.
+
+    A review case becomes an ordinary independent_review task on its one lane and the run
+    waits for it, exactly as the whole-corpus run does (author_calibration). A packet case
+    is not a review packet: the run materializes a one-commit repository of the case's
+    `base/` and dispatches the build through the runner's own packet path, then grades the
+    lane's tree with score.py. Either way the settled attempt gets one `eval:<kind>` outcome
+    — the scorecard row the digest and the due-check read — and the run settles `passed`.
+    """
+    from .calibration import (
+        SETTLED_STATES,
+        author_review_case,
+        case_attempt,
+        case_attempt_dir,
+        case_task_id,
+        load_case,
+        record_outcome,
+        score,
+    )
+
+    spec = task["spec"]
+    run_id = spec["run_id"]
+    lane_id = spec["lanes"][0]
+    case = load_case(Path(spec["corpus_dir"]) / spec["case"])
+    task_id = case_task_id(run_id, case["case"])
+
+    def settle(state, result, reason=None, **extra):
+        save_task(path, task, state=state, blocked_reason=reason)
+        return {"task": task["id"], "lane": None, "attempt": None, "result": result, **extra}
+
+    if case["kind"] == "packet":
+        if task["state"] != "ready":
+            return settle("blocked", "blocked", "packet eval run left a non-ready state")
+        brief_rel = str(Path("grid") / "briefs" / (task_id + ".txt"))
+        try:
+            repo = materialize_case_repo(
+                case,
+                Path(board_dir) / "calibration" / run_id / case["case"],
+                brief_rel,
+                eval_brief(case, brief_rel),
+            )
+            packet_task = case_packet_task(case, lane_id, task_id, brief_rel)
+            packet_dir = (
+                Path(packets_root)
+                / task_id
+                / time.strftime("%Y%m%dT%H%M%S", time.gmtime(time.time()))
+            )
+            aid, state, attempt_dir = (dispatch_fn or dispatch)(
+                ledger,
+                lanes,
+                lanes_path,
+                lane_id,
+                packet_task,
+                repo,
+                packet_dir,
+                accounts_by_lane[lane_id],
+            )
+        except Exception as exc:  # noqa: BLE001 — a bad case blocks the run, not the tick
+            return settle("blocked", "blocked", ("eval packet: " + str(exc))[:300])
+        if state != "completed":
+            # A held attempt is ACTIVE: no outcome can attach, so the operator resolves it
+            # and the next nightly run picks the case up again.
+            return settle(
+                "blocked",
+                "blocked",
+                f"eval packet attempt {aid} {state}; resolve with evidence",
+            )
+        try:
+            record = score(case, attempt_dir)
+            record_outcome(ledger, aid, record)
+        except Exception as exc:  # noqa: BLE001
+            return settle("blocked", "blocked", ("eval packet score: " + str(exc))[:300])
+        save_task(path, task, state="passed", blocked_reason=None)
+        return {
+            "task": task["id"],
+            "lane": None,
+            "attempt": aid,
+            "result": "passed",
+            "accepted": record["accepted"],
+            "repairs": record["repairs"],
+        }
+
+    if task["state"] == "ready":
+        try:
+            author_review_case(board_dir, project_root, case, run_id, [lane_id])
+        except FileExistsError:
+            # A crashed tick staged the task but never saved the wait state; the wait below
+            # picks it up rather than authoring a second copy.
+            pass
+        except Exception as exc:  # noqa: BLE001
+            return settle("blocked", "blocked", ("eval review: " + str(exc))[:300])
+        return settle("review_pending", "authored")
+    try:
+        case_state = json.loads((Path(board_dir) / (task_id + ".json")).read_text()).get("state")
+    except (OSError, ValueError, AttributeError):
+        case_state = None
+    if case_state not in SETTLED_STATES:
+        return {
+            "task": task["id"],
+            "lane": None,
+            "attempt": None,
+            "result": f"waiting on {case['case']}",
+        }
+    aid = case_attempt(ledger, task_id)
+    if aid is None:
+        return settle(
+            "blocked", "blocked", f"eval case {case['case']} settled with no ledger attempt"
+        )
+    try:
+        record = score(case, case_attempt_dir(packets_root, task_id, aid))
+        record_outcome(ledger, aid, record)
+    except Exception as exc:  # noqa: BLE001
+        return settle("blocked", "blocked", ("eval review score: " + str(exc))[:300])
+    save_task(path, task, state="passed", blocked_reason=None)
+    return {
+        "task": task["id"],
+        "lane": None,
+        "attempt": aid,
+        "result": "passed",
+        "accepted": record["accepted"],
+        "repairs": record["repairs"],
+    }
+
+
+def step_calibration_run(
+    path,
+    task,
+    board_dir,
+    project_root,
+    ledger,
+    packets_root,
+    dry_run=False,
+    lanes=None,
+    lanes_path=None,
+    accounts_by_lane=None,
+    dispatch_fn=None,
+):
     """Drive the calibration_run code node one pass: author, wait, then score and pass.
 
     No lane, no ledger attempt, no quota. The first pass authors one independent_review
@@ -1046,6 +1296,11 @@ def step_calibration_run(path, task, board_dir, project_root, ledger, packets_ro
     the run `passed` with the per-lane recall and precision in the result. A dry run plans
     without authoring or scoring. A corpus that cannot be authored or scored blocks the
     run with the reason, never the tick.
+
+    A run whose spec carries `case` (M5's nightly `evals`) measures one case on one lane
+    instead: step_eval_case authors the case's task and scores the settled attempt through
+    score.py, recording the `eval:<kind>` outcome. The `lanes`, `lanes_path` and
+    `accounts_by_lane` are only needed there (a packet case dispatches its own build).
     """
     from .calibration import author_calibration, calibration_settled, score_calibration
 
@@ -1053,6 +1308,19 @@ def step_calibration_run(path, task, board_dir, project_root, ledger, packets_ro
     run_id = spec["run_id"]
     if dry_run:
         return {"task": task["id"], "lane": None, "attempt": None, "result": "calibration_run"}
+    if spec.get("case") is not None:
+        return step_eval_case(
+            path,
+            task,
+            board_dir,
+            project_root,
+            ledger,
+            packets_root,
+            lanes or {},
+            lanes_path,
+            accounts_by_lane or {},
+            dispatch_fn,
+        )
     if task["state"] == "ready":
         try:
             author_calibration(
@@ -1480,7 +1748,16 @@ def tick(
             # author the per-case reviews, wait for them to settle, then score and pass.
             # It is read before the ready gate because a waiting run sits in review_pending.
             rows[index] = step_calibration_run(
-                path, task, board_dir, project_root, ledger, packets_root, dry_run
+                path,
+                task,
+                board_dir,
+                project_root,
+                ledger,
+                packets_root,
+                dry_run,
+                lanes=lanes,
+                lanes_path=lanes_path,
+                accounts_by_lane=accounts_by_lane,
             )
             continue
         if task["category"] == "packet" and task["state"] == "blocked":

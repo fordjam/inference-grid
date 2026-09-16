@@ -43,6 +43,14 @@ RUNTIMES = (
     ("tick-boards", "tick_boards.py", "tick-boards.log"),
 )
 
+# The nightly eval agent (brief 20, M5): its own KeepAlive plist, because it runs on every
+# board's behalf and outlives any single tick. It is not part of RUNTIMES — that tuple is
+# the capacity layer's four runtimes — so the evals plist is rendered beside them, from the
+# same template and the same ExitTimeOut, and its program is the hourly eval loop.
+EVALS_RUNTIME = ("evals", "evals_run.py", "evals.log")
+# The capacity layer's own config: evals_run.py reads `evals_corpus` and the board keys from it.
+DEFAULT_CONFIG = Path.home() / ".local/share/inference-grid-capacity/config.json"
+
 PLIST_TEMPLATE = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -95,11 +103,41 @@ def exit_timeout(lanes=None):
     return (max(walls) if walls else LANE_WALL_CAP) + 60
 
 
-def render(label, python, script, log, timeout):
-    """The plist for one runtime: label, interpreter, script, log paths and ExitTimeOut."""
+def render(label, python, script, log, timeout, extra=()):
+    """The plist for one runtime: label, interpreter, script, log paths and ExitTimeOut.
+
+    `extra` are the arguments after the interpreter and the script — the config path the
+    evals loop reads its corpus from, for instance.
+    """
     return PLIST_TEMPLATE.format(
-        label=label, arguments=_arguments([python, script]), log=log, exit_timeout=timeout
+        label=label,
+        arguments=_arguments([python, script, *extra]),
+        log=log,
+        exit_timeout=timeout,
     )
+
+
+def evals_extra(config, corpus=None):
+    """The evals agent's arguments after its script: the config it reads and the corpus.
+
+    The corpus normally comes from the config's `evals_corpus`; naming it explicitly (beside
+    the config) leaves the operator's path visible in the plist launchd loaded.
+    """
+    extra = [str(config)] if config else []
+    if corpus:
+        extra += ["--corpus", str(corpus)]
+    return extra
+
+
+def configured_corpus(config_path):
+    """`evals_corpus` from the operator's config, or None when there is no readable one."""
+    if not config_path:
+        return None
+    try:
+        config = json.loads(Path(config_path).expanduser().read_text())
+    except (OSError, ValueError):
+        return None
+    return config.get("evals_corpus") if isinstance(config, dict) else None
 
 
 def bootstrap_command(plist_path):
@@ -117,6 +155,28 @@ def main(argv=None):
         default=None,
         help="operator lanes.json; ExitTimeOut comes from its longest wall_seconds "
         "(default: the 3600 cap) plus a minute",
+    )
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG),
+        help="the capacity config evals_run.py reads (its `evals_corpus` is the eval corpus)",
+    )
+    parser.add_argument(
+        "--evals-corpus",
+        default=None,
+        help="the eval corpus path; default: the config's `evals_corpus`",
+    )
+    parser.add_argument(
+        "--evals-script",
+        dest="evals_script",
+        default=str(DEFAULT_DIR / EVALS_RUNTIME[1]),
+        help="the hourly eval loop script",
+    )
+    parser.add_argument(
+        "--evals-log",
+        dest="evals_log",
+        default=str(DEFAULT_DIR / EVALS_RUNTIME[2]),
+        help="the eval loop's log (stdout and stderr)",
     )
     for name, script, log in RUNTIMES:
         key = name.replace("-", "_")
@@ -147,6 +207,25 @@ def main(argv=None):
         )
         print(f"wrote {plist_path}")
         print(bootstrap_command(plist_path))
+
+    # The eval agent beside the capacity layer: kept alive, running `evals` hourly against
+    # the corpus the config names, so a lane's evals stay current without an operator.
+    name, _script, _log = EVALS_RUNTIME
+    label = f"{DOMAIN}.{name}"
+    plist_path = out_dir / (label + ".plist")
+    corpus = args.evals_corpus or configured_corpus(args.config)
+    plist_path.write_text(
+        render(
+            label,
+            args.python,
+            args.evals_script,
+            args.evals_log,
+            timeout,
+            extra=evals_extra(args.config, corpus),
+        )
+    )
+    print(f"wrote {plist_path}")
+    print(bootstrap_command(plist_path))
 
 
 if __name__ == "__main__":

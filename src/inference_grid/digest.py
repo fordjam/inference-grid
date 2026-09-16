@@ -50,7 +50,8 @@ def digest(ledger, boards_dir, now=None):
     suggestions = []
     inbox = []
     seen = set()
-    for config in ordered_configs(boards_dir):
+    configs = ordered_configs(boards_dir)
+    for config in configs:
         name = Path(config["project_root"]).name
         # One entry per board name: a config directory holding duplicates (two files for
         # one board) would otherwise list the board twice with the same counts.
@@ -125,4 +126,21 @@ def digest(ledger, boards_dir, now=None):
         lines.append(f"| {account} | {entry['attempts']} | {entry['held']} | {entry['refused']} |")
     if not by_account:
         lines.append("| (no attempts) | 0 | 0 | 0 |")
+    from .board.evals import EVAL_EVERY_DAYS, eval_markdown, eval_summary, lanes_from_configs
+
+    lanes = lanes_from_configs(configs)
+    summary = eval_summary(ledger, lanes, now=now) if lanes else None
+    lines += ["", "## Evals", ""]
+    if summary is None:
+        lines.append("- no lanes configured (a board config names the lanes file)")
+    else:
+        lines += eval_markdown(summary)
+    lines += ["", "## Needs you", ""]
+    if summary is not None and summary["needs_you"]:
+        for row in summary["needs_you"]:
+            lines.append(f"- eval coverage: `{row['lane']}` — {row['reason']}")
+    elif summary is not None:
+        lines.append(f"- none; every lane has an eval result inside {EVAL_EVERY_DAYS} days")
+    else:
+        lines.append("- none")
     return "\n".join(lines) + "\n"

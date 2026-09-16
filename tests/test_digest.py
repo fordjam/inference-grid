@@ -80,6 +80,111 @@ def test_digest_survives_the_drafts_sidecar(tmp_path):
     assert "oldest ready task: waiting" in text
 
 
+def test_digest_reports_the_evals_table_and_the_needs_you_lanes(tmp_path):
+    """The Evals section (brief 20, M5): per lane, per kind, accepted / cases and the
+    newest result's age; a lane with no eval inside the window is a needs-you row."""
+    from test_board_status import write_task  # reuse the fixture
+
+    project = tmp_path / "project"
+    board = project / "grid/board"
+    board.mkdir(parents=True)
+    write_task(board, "waiting", "ready")
+    lanes_path = tmp_path / "lanes.json"
+    lanes_path.write_text(
+        json.dumps(
+            {
+                "lanes": {
+                    "go": {
+                        "provider": "opencode",
+                        "family": "glm",
+                        "model": "glm-5.3-flash",
+                        "kind": "go_http",
+                        "credential_path": None,
+                        "executable": None,
+                        "plan_units": {},
+                        "window": None,
+                        "max_concurrency": 1,
+                        "wall_seconds": 60,
+                        "categories": ["independent_review"],
+                    },
+                    "kimi": {
+                        "provider": "opencode",
+                        "family": "kimi",
+                        "model": "kimi-k3",
+                        "kind": "go_http",
+                        "credential_path": None,
+                        "executable": None,
+                        "plan_units": {},
+                        "window": None,
+                        "max_concurrency": 1,
+                        "wall_seconds": 60,
+                        "categories": ["independent_review"],
+                    },
+                }
+            }
+        )
+    )
+    boards_dir = tmp_path / "boards"
+    boards_dir.mkdir()
+    (boards_dir / "project.json").write_text(
+        json.dumps(
+            {
+                "board_dir": str(board),
+                "project_root": str(project),
+                "lanes_path": str(lanes_path),
+            }
+        )
+    )
+    now = time.time()
+    ledger = Ledger("sqlite:///" + str(tmp_path / "ledger.sqlite"))
+    ledger.initialize()
+    _seed_eval(
+        ledger, "11111111-2222-3333-4444-eeeeeeeeeeee", "glm", "glm-5.3-flash", "review", now
+    )
+
+    text = digest(ledger, boards_dir, now=now)
+    assert "## Evals" in text
+    assert "| go | review | 1 / 1 | 0.0 d |" in text
+    assert "| go | packet | 0 / 0 | never |" in text
+    assert "| kimi | review | 0 / 0 | never |" in text
+    assert "## Needs you" in text
+    assert "eval coverage: `kimi` — no eval ever recorded" in text
+    assert "eval coverage: `go`" not in text
+
+
+def _seed_eval(ledger, aid, family, model, kind, at):
+    from sqlalchemy import update
+
+    from inference_grid.ledger import attempts as attempts_t, events, tasks as tasks_t
+
+    with ledger.engine.begin() as con:
+        con.execute(
+            tasks_t.insert().values(
+                id="t-" + aid, project="p", spec={"family": family, "model": model}
+            )
+        )
+        con.execute(
+            attempts_t.insert().values(
+                id=aid,
+                task="t-" + aid,
+                account="a",
+                generation=1,
+                state="completed",
+                estimate={},
+                workspace="/w",
+                receipt={},
+                updated=0.0,
+            )
+        )
+    ledger.record_outcome(aid, "eval:" + kind, True, note="eval")
+    with ledger.engine.begin() as con:
+        con.execute(
+            update(events)
+            .where(events.c.attempt == aid, events.c.kind == "outcome_recorded")
+            .values(at=at)
+        )
+
+
 def uuid_hex():
     import uuid
 
