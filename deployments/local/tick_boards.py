@@ -1,19 +1,21 @@
 """The board tick loop, rewritten in Python from tick-boards.sh.
 
-Ticks each board named in the config's ``boards`` list, in turn, until the config's
-``deadline`` (epoch seconds). The ledger is refreshed (board-prepare) before every board:
-a board with several serial reviews outlasts the 15-minute validity of the Go reading, and
-stale accounts refuse the rest of the pass. After each pass the loop logs the ready count
-across boards and sleeps the idle interval when nothing is ready, the busy one otherwise.
-Same ledger as the monarch loop; Kimi is serialised by it.
+Ticks each board named in the config's ``boards`` list, every pass, until the config's
+``deadline`` (epoch seconds). Each board's tick runs in its own thread and the pass joins
+them before it sleeps, so a long packet on one board never delays the reviews on another;
+the ready count is summed after the joins. The ledger is refreshed (board-prepare) before
+every board: a board with several serial reviews outlasts the 15-minute validity of the Go
+reading, and stale accounts refuse the rest of the pass. After each pass the loop logs the
+ready count across boards and sleeps the idle interval when nothing is ready, the busy one
+otherwise. Same ledger as the monarch loop; Kimi is serialised by it.
 
 A ``calibration`` block in the config (``corpus_dir``, ``lanes``, ``every_days``) makes the
 loop author a calibration run once the newest scored run is older than ``every_days``: the
 ledger's own calibration outcomes are the clock, so a run in flight does not stop it. The
 run is a board task the board-tick steps through; no lane runs the calibration itself.
 
-A SIGTERM or SIGINT starts a drain: the board tick in flight (the packet loop's rounds
-included) finishes, the remaining boards of the pass are skipped and the loop exits; a
+A SIGTERM or SIGINT starts a drain: the board ticks in flight (the packet loop's rounds
+included) finish, the remaining boards of the pass are not started and the loop exits; a
 second signal within 30 s exits at once. While draining the loop writes ``draining`` to a
 state file beside the log, so the operator can see why the restart is slow.
 """
@@ -23,6 +25,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -219,21 +222,43 @@ def run(
 ):
     """Prepare before every board; the ready count decides the sleep. Returns the last count.
 
+    Each board's tick runs in its own thread and the pass joins them at its end (brief J6),
+    so a board whose packet runs for an hour no longer delays the reviews on the next one:
+    the loop moves on as soon as a board's tick has been started, not when it has settled.
+    The ready count is summed after the joins, and the pass never starts a board once a
+    drain is running — the ticks already in flight still finish.
+
     ``calibrate`` (optional) runs once per pass before the boards: the weekly calibration
     author is idempotent per run, so a pass that finds a run in flight authors nothing.
-    ``drain`` (optional) ends the loop after the board tick in flight: the pass's remaining
+    ``drain`` (optional) ends the loop after the board ticks in flight: the pass's remaining
     boards are skipped and no further pass or sleep is started.
     """
     ready = 0
     while clock() < deadline and not (drain and drain.draining):
         if calibrate:
             calibrate()
-        ready = 0
+        counts = []
+        failures = []
+
+        def one(board):
+            try:
+                counts.append(tick(board))
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the loop's own thread
+                failures.append(exc)
+
+        threads = []
         for board in boards:
             if drain and drain.draining:
                 break
             prepare()
-            ready += tick(board)
+            thread = threading.Thread(target=one, args=(board,), daemon=True)
+            threads.append(thread)
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if failures:
+            raise failures[0]
+        ready = sum(counts)
         if drain and drain.draining:
             break
         print(time.strftime("%FT%TZ", time.gmtime()), "ready tasks left across boards:", ready)

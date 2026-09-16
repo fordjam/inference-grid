@@ -18,14 +18,17 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
+from functools import partial
 from pathlib import Path
 
 from ..flash_window import flash_window
 from ..lane_readiness import lane_readiness
 from ..ledger import ACTIVE, Refused, classifier_view, digest, lanes as lane_records, select
-from ..ledger import aliases as alias_records, attempts as attempt_records
+from ..ledger import accounts as account_records, aliases as alias_records
+from ..ledger import attempts as attempt_records
 from ..ledger import events as ledger_events, tasks as task_records
 from ..worker import execute
 from .failover import (
@@ -36,7 +39,7 @@ from .failover import (
 )
 from .guard import check_input
 from .land import land
-from .packet_task import dispatch_packet, validate_board_task
+from .packet_task import admit_packet, run_packet, validate_board_task
 from .plan_task import DRAFTS_FILE, load_drafts, settle_plan
 from .policy import record_waiver, review_needed
 from .task import validate_task
@@ -425,7 +428,7 @@ def run_tests(project_root, task, artifact_dir, scratch):
     return proc.returncode == 0, summary[0][:300]
 
 
-def dispatch(
+def admit(
     ledger,
     lanes,
     lanes_path,
@@ -436,13 +439,21 @@ def dispatch(
     account_alias,
     input_dir=None,
 ):
-    """Submit, claim and execute one attempt for the task on the lane; returns (aid, state, output_dir)."""
+    """Submit and claim one attempt for the task without running it (J6).
+
+    Admission is the half of `dispatch` that must stay on the pass loop: it is what the
+    ledger records, so the next route in the same pass sees this attempt occupying its
+    account slot. It returns the admission record `dispatch` executes — a flag saying
+    whether the packet loop opens its own lease, the attempt id and generation, and where
+    the artifacts will land. Packet tasks admit through `admit_packet` (their own lease,
+    their own brief parsing); the rest stage the packet here and claim on the lane account.
+    """
     lane = lanes[lane_id]
     if task["category"] == "packet":
-        # The build→gate→re-enter loop: admission first, the loop inside this process.
-        return dispatch_packet(
-            ledger, lanes, lane_id, task, project_root, packet_dir, account_alias
-        )
+        return {
+            "packet": True,
+            **admit_packet(ledger, lanes, lane_id, task, project_root, packet_dir, account_alias),
+        }
     if input_dir is None:
         input_dir, manifest = stage_packet(project_root, task, packet_dir)
     else:
@@ -492,8 +503,50 @@ def dispatch(
         )
     estimate = {window: 0.01 for window in acct["windows"]}
     aid, generation = ledger.claim(task_id, account_alias, estimate)
-    state = execute(ledger, aid, generation)
-    return aid, state, workspace / aid / "artifacts"
+    return {
+        "packet": False,
+        "aid": aid,
+        "generation": generation,
+        "output_dir": workspace / aid / "artifacts",
+    }
+
+
+def dispatch(
+    ledger,
+    lanes,
+    lanes_path,
+    lane_id,
+    task,
+    project_root,
+    packet_dir,
+    account_alias,
+    input_dir=None,
+    admission=None,
+):
+    """Execute one attempt for the task on the lane; returns (aid, state, output_dir).
+
+    With `admission` (the tick's own admitted attempt, brief J6) it only runs and settles
+    what was already claimed; without it, it admits and runs, the way it always did. The
+    split lets a tick admit on its pass loop — where the ledger, and so the next route,
+    sees the attempt — and run the long part in a worker thread.
+    """
+    if admission is None:
+        admission = admit(
+            ledger,
+            lanes,
+            lanes_path,
+            lane_id,
+            task,
+            project_root,
+            packet_dir,
+            account_alias,
+            input_dir=input_dir,
+        )
+    if admission["packet"]:
+        # The build→gate→re-enter loop: admission happened above, the loop runs here.
+        return run_packet(ledger, admission)
+    state = execute(ledger, admission["aid"], admission["generation"])
+    return admission["aid"], state, admission["output_dir"]
 
 
 def deadline_hold(ledger, packet_dir, aid):
@@ -841,6 +894,11 @@ def receipt_of(ledger, aid):
     return None
 
 
+# One inbox worktree per project is shared by every attempt that settles in this process;
+# with attempts concurrent (J6) two acceptances must not stage and commit it at once.
+INBOX_LOCK = threading.Lock()
+
+
 def land_in_inbox(project_root, task, artifact_dir, record):
     """Commit accepted artifacts and their record to the project's grid/inbox branch.
 
@@ -848,6 +906,11 @@ def land_in_inbox(project_root, task, artifact_dir, record):
     Tree tasks land at their project paths; flat tasks under grid/inbox/<task-id>/. Nothing is
     pushed or merged; returns a short note.
     """
+    with INBOX_LOCK:
+        return _land_in_inbox(project_root, task, artifact_dir, record)
+
+
+def _land_in_inbox(project_root, task, artifact_dir, record):
     project_root = Path(project_root)
     if not (project_root / ".git").exists():
         return "project is not a git repository; artifacts left in the packet"
@@ -1029,6 +1092,68 @@ def step_calibration_run(path, task, board_dir, project_root, ledger, packets_ro
     }
 
 
+def account_slots(ledger, account):
+    """Free attempt slots on one account: its capacity minus its ACTIVE attempts (J6).
+
+    Read at admission time, this is the bound a tick admits against. A lane at capacity
+    whose capacity is held by this tick's own attempt is not refused: the task waits for
+    that attempt to settle and is routed again.
+    """
+    with ledger.engine.connect() as con:
+        acct = (
+            con.execute(select(account_records).where(account_records.c.id == account))
+            .mappings()
+            .first()
+        )
+        if acct is None:
+            return 0
+        active = list(
+            con.execute(
+                select(attempt_records.c.id).where(
+                    attempt_records.c.account == account,
+                    attempt_records.c.state.in_(ACTIVE),
+                )
+            )
+        )
+    return max(0, acct["capacity"] - len(active))
+
+
+class Attempt:
+    """One admitted attempt running in its own thread (J6).
+
+    The pass starts one per dispatch and joins them: an attempt holding the last slot of
+    its account is waited on before the next task is admitted, and every attempt is joined
+    before the pass returns, so `board-tick` settles everything it started. Settling writes
+    the task file and the result row from the worker; the pass only reads the ledger. An
+    unexpected failure in a worker — a bug, not a held attempt, which `execute` reports as
+    a state — is kept and re-raised on the pass loop when it is joined, exactly as a serial
+    pass would have raised it.
+    """
+
+    def __init__(self, account, run):
+        self.account = account
+        self.settled = threading.Event()
+        self.error = None
+        self.thread = threading.Thread(target=self._guard, args=(run,), daemon=True)
+
+    def _guard(self, run):
+        try:
+            run()
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the pass loop
+            self.error = exc
+        finally:
+            self.settled.set()
+
+    def start(self):
+        self.thread.start()
+
+    def join(self):
+        self.thread.join()
+
+    def live(self):
+        return not self.settled.is_set()
+
+
 def tick(
     board_dir,
     project_root,
@@ -1056,6 +1181,14 @@ def tick(
     the operator releases it or the pass runs with auto_dispatch; the plan task itself
     runs only on a lane marked tier `plan`.
 
+    Admission stays on this loop and the long part runs in a worker thread (brief J6):
+    routing and `admit` happen here, so the ledger — and therefore the very next route —
+    already counts the attempt just admitted, and each attempt runs in its own thread
+    bounded by its account's free capacity as the ledger reports it at admission time.
+    The pass joins every worker before it returns (and before it lands anything), so it
+    settles exactly the attempts it started, and the rows keep the board's own order no
+    matter which attempt finished first.
+
     With auto_land the pass ends by landing every `passed` packet task through
     board.land (one landing at a time per base, a lock under packets_root); the pass's
     own `passed` settlements included, since the board is re-read afterwards. With
@@ -1066,213 +1199,17 @@ def tick(
     directory.
     """
     now = time.time() if now is None else now
-    results = []
+    rows = {}
+    attempts = []
     drafted = set(load_drafts(board_dir))
     view = lane_view(lanes, now)
     scorecard = ledger.scorecard()
     calibration = calibration_reports(ledger)
     readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
     board = load_board(board_dir)
-    for task_id, (path, task) in board.items():
-        if task["category"] == "calibration_run" and task["state"] in ("ready", "review_pending"):
-            # The calibration run is a code node the runner steps through across passes:
-            # author the per-case reviews, wait for them to settle, then score and pass.
-            # It is read before the ready gate because a waiting run sits in review_pending.
-            results.append(
-                step_calibration_run(
-                    path, task, board_dir, project_root, ledger, packets_root, dry_run
-                )
-            )
-            continue
-        if failover_candidate(task, board):
-            # J4: a packet that settled with an exhaustion or transport reason is due one
-            # different-family retry. A dry run names the pending swap without writing;
-            # a real tick authors it here (a blocked task never reaches the dispatch
-            # path, so settlement-time authoring alone would leave it pending forever).
-            if dry_run:
-                results.append(
-                    {
-                        "task": task_id,
-                        "lane": None,
-                        "attempt": None,
-                        "result": pending_failover_note(ledger, task, lanes),
-                    }
-                )
-                continue
-            family = failed_family(ledger, task["blocked_reason"])
-            authored = author_failover(
-                board_dir, project_root, ledger, path, task, family, lanes, board
-            )
-            if authored is None:
-                continue
-            results.append(
-                {
-                    "task": task_id,
-                    "lane": None,
-                    "attempt": None,
-                    "result": (
-                        "failover: " + authored["task"]
-                        if authored.get("authored")
-                        else "failover: " + authored["reason"]
-                    ),
-                }
-            )
-            continue
-        if task["state"] != "ready":
-            continue
-        if task["category"] == "verify_merge":
-            # The merge proof is a code node in a scratch worktree: no lane, no
-            # ledger attempt, no quota. It settles by itself.
-            if dry_run:
-                results.append(
-                    {"task": task_id, "lane": None, "attempt": None, "result": "verify_merge"}
-                )
-                continue
-            results.append(settle_verify_merge(path, task, project_root, packets_root))
-            continue
-        if task["category"] == "packet" and task_id in drafted and not auto_dispatch:
-            # The plan node drafts a packet task and records it here: nothing is
-            # dispatched to build until the operator releases it or the board sets
-            # auto_dispatch. The default is to draft, not to build.
-            results.append({"task": task_id, "lane": None, "attempt": None, "result": "draft"})
-            continue
-        clash = shadowing_names(task)
-        if clash:
-            if not dry_run:
-                save_task(
-                    path,
-                    task,
-                    state="blocked",
-                    blocked_reason=("task file names collide: " + clash)[:300],
-                )
-            results.append(
-                {
-                    "task": task_id,
-                    "lane": None,
-                    "attempt": None,
-                    "result": "blocked: name collision",
-                }
-            )
-            continue
-        # route restricts an explicit `lanes` list itself and defaults an absent/empty
-        # one to every lane declaring the category (minus explicit_only families), so
-        # the whole view is presented; readiness is classified per lane below either way.
-        lanes_view = view
-        if task["category"] == "canary":
-            # The canary is the only task allowed on a lane still earning its evidence:
-            # unverified (auth unknown) and unqualified (qualification pending) lanes are
-            # presented as ready for it — but never a lane whose model the endpoint refused
-            # recently, which no packet can fix by re-probing. A canary is also implicitly in
-            # every lane's categories: registering a lane costs nothing until it earns rows.
-            lanes_view = {
-                lane_id: dict(lane, categories=list(lane.get("categories") or []) + ["canary"])
-                for lane_id, lane in view.items()
-            }
-        elif task["category"] == "plan":
-            # Category plan is declared by the lanes the operator marks tier: plan (J2).
-            # Planning on any other tier is refused before selection, and only the
-            # plan-tier lanes are offered (with `plan` implicitly among their categories,
-            # the way a canary is).
-            wrong = sorted(
-                lane_id
-                for lane_id in task["lanes"]
-                if (lanes.get(lane_id) or {}).get("tier") != "plan"
-            )
-            if wrong:
-                results.append(
-                    {
-                        "task": task_id,
-                        "lane": None,
-                        "attempt": None,
-                        "result": "plan_requires_tier_plan: " + ", ".join(wrong),
-                    }
-                )
-                continue
-            lanes_view = {
-                lane_id: dict(lane, categories=list(lane.get("categories") or []) + ["plan"])
-                for lane_id, lane in view.items()
-                if lane.get("tier") == "plan"
-            }
-        task_readiness = {}
-        for lane_id in view:
-            entry = dict(readiness[lane_id])
-            # A packet, like a canary, may run on an unverified or unqualified lane: it
-            # names its lanes explicitly, and no packet could ever run to earn the
-            # qualification rows in the first place. A recently model-refused lane stays
-            # closed — no packet fixes a 401 by re-probing it. A plan task is the same:
-            # the lane is named by the operator and no category rows exist to earn.
-            if (
-                task["category"] in ("canary", "packet", "plan")
-                and entry.get("state") in ("unverified", "unqualified")
-                and entry.get("reason") != "model_refused_recently"
-            ):
-                entry["state"] = "ready"
-            if (
-                task["category"] not in ("canary", "packet", "plan")
-                and entry.get("state") == "ready"
-                and task["category"] not in entry.get("qualified_for", [])
-            ):
-                entry["state"] = "unqualified"
-                entry["reason"] = "not_qualified_for_category"
-            task_readiness[lane_id] = entry
-        choice = route(
-            {
-                "category": task["category"],
-                "author_family": task["author_family"],
-                "lanes": list(task["lanes"]),
-                # The budget decides the cap route fits the packet against; without it
-                # every task was measured against the unbudgeted 16 000-token cap.
-                "budget": task.get("budget"),
-            },
-            lanes_view,
-            task_readiness,
-            scorecard,
-            calibration,
-            now,
-            packet_bytes(project_root, task),
-        )
-        if choice["lane"] is None:
-            reason = choice["reason"]
-            candidates = choice["candidates"]
-            if candidates and all(readiness[c["lane"]]["state"] == "busy" for c in candidates):
-                # Every remaining candidate is at its concurrency cap; say so instead of
-                # the generic no-ready-lane reason.
-                reason = "lane_busy"
-            results.append(
-                {
-                    "task": task_id,
-                    "lane": None,
-                    "attempt": None,
-                    "result": reason,
-                    "candidates": candidates,
-                    "dropped": choice["dropped"],
-                    "score": choice["score"],
-                }
-            )
-            continue
-        lane_id = choice["lane"]
-        if dry_run:
-            # The plan stops here: no dispatched state, no packet, no attempt.
-            results.append(
-                {
-                    "task": task_id,
-                    "lane": lane_id,
-                    "attempt": None,
-                    "result": choice["reason"],
-                    "candidates": choice["candidates"],
-                    "dropped": choice["dropped"],
-                    "score": choice["score"],
-                }
-            )
-            continue
-        packet_dir = Path(packets_root) / task_id / time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
-        if prepare_argv:
-            # Refresh account observations right before the claim; a long tick outlives them.
-            subprocess.run(prepare_argv, capture_output=True, timeout=120)
-        # Mark the task dispatched before any dispatch so an overlapping or later tick can
-        # never submit a second attempt for it; a crashed tick leaves this state behind for
-        # the operator to resolve together with the ledger attempt.
-        save_task(path, task, state="dispatched", blocked_reason=None)
+
+    def settle_attempt(index, lane_id, task_id, task, path, choice, packet_dir, admission):
+        """Run one admitted attempt and settle its task; the board's row lands in `rows`."""
         aid = None
         try:
             aid, state, output_dir = dispatch(
@@ -1284,6 +1221,7 @@ def tick(
                 project_root,
                 packet_dir,
                 accounts_by_lane[lane_id],
+                admission=admission,
             )
             if state != "completed" and deadline_hold(ledger, packet_dir, aid):
                 followup = verify_followup(task, packet_dir, Path(packet_dir) / "attempts" / aid)
@@ -1315,9 +1253,6 @@ def tick(
                         input_dir=followup,
                     )
         except Refused as exc:
-            # A claim refused late still leaves its queued attempt occupying the account;
-            # the next task must see the busy lane, not the pre-dispatch view.
-            readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
             reason = "refused: " + str(exc)[:200]
             if aid is None:
                 # Staging or admission refused before any attempt existed; the task stays ready.
@@ -1329,12 +1264,8 @@ def tick(
                     state="blocked",
                     blocked_reason=("attempt " + aid + " " + reason)[:300],
                 )
-            results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": reason})
-            continue
-        # The attempt now occupies its account slot (a hold stays ACTIVE), so re-evaluate
-        # the busy count before the next task in this tick is selected — dispatching on a
-        # stale view collided with a refused 'account busy' attempt. One query.
-        readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
+            rows[index] = {"task": task_id, "lane": lane_id, "attempt": aid, "result": reason}
+            return
         if state != "completed":
             # The attempt is held in the ledger; outcomes attach after the operator resolves
             # it, so the board only records the block with the hold reason. A transport
@@ -1376,15 +1307,15 @@ def tick(
                 row = {"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"}
                 if authored and authored.get("authored"):
                     row["failover"] = authored["task"]
-                results.append(row)
-                continue
+                rows[index] = row
+                return
             note_model_refusal(ledger, lanes, lane_id, packet_dir, aid)
             reason = hold_block_reason(aid, read_verdict(packet_dir, aid), state) or (
                 f"attempt {aid} {state}; resolve with evidence"
             )
             save_task(path, task, state="blocked", blocked_reason=reason)
-            results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"})
-            continue
+            rows[index] = {"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"}
+            return
         if task["category"] == "plan":
             # The plan node settles by code: the lane's packet.md becomes a drafted
             # packet task, or the task blocks with the validation error. No review task
@@ -1394,25 +1325,26 @@ def tick(
             except (OSError, ValueError, FileExistsError) as exc:
                 ledger.record_outcome(aid, "plan", False, note=str(exc)[:300])
                 save_task(path, task, state="blocked", blocked_reason=("plan: " + str(exc))[:300])
-                results.append(
-                    {"task": task_id, "lane": lane_id, "attempt": aid, "result": "blocked"}
-                )
-                continue
-            ledger.record_outcome(aid, "plan", True, note=f"drafted {created['id']}")
-            save_task(path, task, state="passed", blocked_reason=None)
-            results.append(
-                {
+                rows[index] = {
                     "task": task_id,
                     "lane": lane_id,
                     "attempt": aid,
-                    "result": "passed",
-                    "drafted": created["id"],
-                    "candidates": choice["candidates"],
-                    "dropped": choice["dropped"],
-                    "score": choice["score"],
+                    "result": "blocked",
                 }
-            )
-            continue
+                return
+            ledger.record_outcome(aid, "plan", True, note=f"drafted {created['id']}")
+            save_task(path, task, state="passed", blocked_reason=None)
+            rows[index] = {
+                "task": task_id,
+                "lane": lane_id,
+                "attempt": aid,
+                "result": "passed",
+                "drafted": created["id"],
+                "candidates": choice["candidates"],
+                "dropped": choice["dropped"],
+                "score": choice["score"],
+            }
+            return
         if task["category"] == "packet":
             # The loop's gates ran as code inside the attempt (its outcome is already
             # recorded with the verdict's repairs); the branch is the deliverable and no
@@ -1424,8 +1356,8 @@ def tick(
             if not needed:
                 record_waiver(board_dir, task, reason, ledger=ledger, attempt=aid)
             save_task(path, task, state="passed", blocked_reason=None)
-            results.append({"task": task_id, "lane": lane_id, "attempt": aid, "result": "passed"})
-            continue
+            rows[index] = {"task": task_id, "lane": lane_id, "attempt": aid, "result": "passed"}
+            return
         try:
             passed, summary = run_tests(project_root, task, output_dir, packet_dir / "scratch")
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -1440,10 +1372,8 @@ def tick(
                 state="blocked",
                 blocked_reason=("attempt " + aid + " " + summary)[:300],
             )
-            results.append(
-                {"task": task_id, "lane": lane_id, "attempt": aid, "result": "test_error"}
-            )
-            continue
+            rows[index] = {"task": task_id, "lane": lane_id, "attempt": aid, "result": "test_error"}
+            return
         result = "passed" if passed else "failed_tests"
         if passed and task["author_family"] is not None:
             # A review task passes only on an approved verdict; the schema test alone never
@@ -1512,17 +1442,286 @@ def tick(
                 state="blocked",
                 blocked_reason=("attempt " + aid + " " + summary)[:300],
             )
-        results.append(
-            {
+        rows[index] = {
+            "task": task_id,
+            "lane": lane_id,
+            "attempt": aid,
+            "result": result,
+            "candidates": choice["candidates"],
+            "dropped": choice["dropped"],
+            "score": choice["score"],
+        }
+
+    for index, (task_id, (path, task)) in enumerate(board.items()):
+        if task["category"] == "calibration_run" and task["state"] in ("ready", "review_pending"):
+            # The calibration run is a code node the runner steps through across passes:
+            # author the per-case reviews, wait for them to settle, then score and pass.
+            # It is read before the ready gate because a waiting run sits in review_pending.
+            rows[index] = step_calibration_run(
+                path, task, board_dir, project_root, ledger, packets_root, dry_run
+            )
+            continue
+        if failover_candidate(task, board):
+            # J4: a packet that settled with an exhaustion or transport reason is due one
+            # different-family retry. A dry run names the pending swap without writing;
+            # a real tick authors it here (a blocked task never reaches the dispatch
+            # path, so settlement-time authoring alone would leave it pending forever).
+            if dry_run:
+                rows[index] = {
+                    "task": task_id,
+                    "lane": None,
+                    "attempt": None,
+                    "result": pending_failover_note(ledger, task, lanes),
+                }
+                continue
+            family = failed_family(ledger, task["blocked_reason"])
+            authored = author_failover(
+                board_dir, project_root, ledger, path, task, family, lanes, board
+            )
+            if authored is None:
+                continue
+            rows[index] = {
+                "task": task_id,
+                "lane": None,
+                "attempt": None,
+                "result": (
+                    "failover: " + authored["task"]
+                    if authored.get("authored")
+                    else "failover: " + authored["reason"]
+                ),
+            }
+            continue
+        if task["state"] != "ready":
+            continue
+        if task["category"] == "verify_merge":
+            # The merge proof is a code node in a scratch worktree: no lane, no
+            # ledger attempt, no quota. It settles by itself.
+            if dry_run:
+                rows[index] = {
+                    "task": task_id,
+                    "lane": None,
+                    "attempt": None,
+                    "result": "verify_merge",
+                }
+                continue
+            rows[index] = settle_verify_merge(path, task, project_root, packets_root)
+            continue
+        if task["category"] == "packet" and task_id in drafted and not auto_dispatch:
+            # The plan node drafts a packet task and records it here: nothing is
+            # dispatched to build until the operator releases it or the board sets
+            # auto_dispatch. The default is to draft, not to build.
+            rows[index] = {"task": task_id, "lane": None, "attempt": None, "result": "draft"}
+            continue
+        clash = shadowing_names(task)
+        if clash:
+            if not dry_run:
+                save_task(
+                    path,
+                    task,
+                    state="blocked",
+                    blocked_reason=("task file names collide: " + clash)[:300],
+                )
+            rows[index] = {
+                "task": task_id,
+                "lane": None,
+                "attempt": None,
+                "result": "blocked: name collision",
+            }
+            continue
+        # route restricts an explicit `lanes` list itself and defaults an absent/empty
+        # one to every lane declaring the category (minus explicit_only families), so
+        # the whole view is presented; readiness is classified per lane below either way.
+        lanes_view = view
+        if task["category"] == "canary":
+            # The canary is the only task allowed on a lane still earning its evidence:
+            # unverified (auth unknown) and unqualified (qualification pending) lanes are
+            # presented as ready for it — but never a lane whose model the endpoint refused
+            # recently, which no packet can fix by re-probing. A canary is also implicitly in
+            # every lane's categories: registering a lane costs nothing until it earns rows.
+            lanes_view = {
+                lane_id: dict(lane, categories=list(lane.get("categories") or []) + ["canary"])
+                for lane_id, lane in view.items()
+            }
+        elif task["category"] == "plan":
+            # Category plan is declared by the lanes the operator marks tier: plan (J2).
+            # Planning on any other tier is refused before selection, and only the
+            # plan-tier lanes are offered (with `plan` implicitly among their categories,
+            # the way a canary is).
+            wrong = sorted(
+                lane_id
+                for lane_id in task["lanes"]
+                if (lanes.get(lane_id) or {}).get("tier") != "plan"
+            )
+            if wrong:
+                rows[index] = {
+                    "task": task_id,
+                    "lane": None,
+                    "attempt": None,
+                    "result": "plan_requires_tier_plan: " + ", ".join(wrong),
+                }
+                continue
+            lanes_view = {
+                lane_id: dict(lane, categories=list(lane.get("categories") or []) + ["plan"])
+                for lane_id, lane in view.items()
+                if lane.get("tier") == "plan"
+            }
+
+        def route_now(current):
+            """route over the readiness view as it stands now (a settled worker moves it)."""
+            task_readiness = {}
+            for lane_id in view:
+                entry = dict(current[lane_id])
+                # A packet, like a canary, may run on an unverified or unqualified lane: it
+                # names its lanes explicitly, and no packet could ever run to earn the
+                # qualification rows in the first place. A recently model-refused lane stays
+                # closed — no packet fixes a 401 by re-probing it. A plan task is the same:
+                # the lane is named by the operator and no category rows exist to earn.
+                if (
+                    task["category"] in ("canary", "packet", "plan")
+                    and entry.get("state") in ("unverified", "unqualified")
+                    and entry.get("reason") != "model_refused_recently"
+                ):
+                    entry["state"] = "ready"
+                if (
+                    task["category"] not in ("canary", "packet", "plan")
+                    and entry.get("state") == "ready"
+                    and task["category"] not in entry.get("qualified_for", [])
+                ):
+                    entry["state"] = "unqualified"
+                    entry["reason"] = "not_qualified_for_category"
+                task_readiness[lane_id] = entry
+            return route(
+                {
+                    "category": task["category"],
+                    "author_family": task["author_family"],
+                    "lanes": list(task["lanes"]),
+                    # The budget decides the cap route fits the packet against; without it
+                    # every task was measured against the unbudgeted 16 000-token cap.
+                    "budget": task.get("budget"),
+                },
+                lanes_view,
+                task_readiness,
+                scorecard,
+                calibration,
+                now,
+                packet_bytes(project_root, task),
+            )
+
+        choice = route_now(readiness)
+        # A lane at capacity only because of an attempt this tick started is not refused:
+        # wait for that attempt to settle, re-read the ledger and route again. Capacity the
+        # ledger reports as taken by anything else is a real refusal, and route names it.
+        # The dry run admits nothing, so it plans from the single readiness view it was given.
+        while not dry_run:
+            lane_id = choice["lane"]
+            account = (accounts_by_lane or {}).get(lane_id) if lane_id is not None else None
+            if lane_id is not None and account is not None and account_slots(ledger, account) > 0:
+                break
+            wanted = {
+                (accounts_by_lane or {}).get(c)
+                for c in (
+                    [lane_id]
+                    if lane_id is not None
+                    else [c["lane"] for c in choice.get("candidates", [])]
+                )
+            } - {None, account}
+            victim = next((a for a in attempts if a.live() and a.account in wanted), None)
+            if victim is None:
+                break
+            victim.join()
+            attempts.remove(victim)
+            if victim.error is not None:
+                # An unexpected worker failure takes the pass down, as a serial one did.
+                raise victim.error
+            readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
+            choice = route_now(readiness)
+        if choice["lane"] is None:
+            reason = choice["reason"]
+            candidates = choice["candidates"]
+            if candidates and all(readiness[c["lane"]]["state"] == "busy" for c in candidates):
+                # Every remaining candidate is at its concurrency cap; say so instead of
+                # the generic no-ready-lane reason.
+                reason = "lane_busy"
+            rows[index] = {
+                "task": task_id,
+                "lane": None,
+                "attempt": None,
+                "result": reason,
+                "candidates": candidates,
+                "dropped": choice["dropped"],
+                "score": choice["score"],
+            }
+            continue
+        lane_id = choice["lane"]
+        if dry_run:
+            # The plan stops here: no dispatched state, no packet, no attempt.
+            rows[index] = {
                 "task": task_id,
                 "lane": lane_id,
-                "attempt": aid,
-                "result": result,
+                "attempt": None,
+                "result": choice["reason"],
                 "candidates": choice["candidates"],
                 "dropped": choice["dropped"],
                 "score": choice["score"],
             }
+            continue
+        packet_dir = Path(packets_root) / task_id / time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
+        if prepare_argv:
+            # Refresh account observations right before the claim; a long tick outlives them.
+            subprocess.run(prepare_argv, capture_output=True, timeout=120)
+        # Mark the task dispatched before any dispatch so an overlapping or later tick can
+        # never submit a second attempt for it; a crashed tick leaves this state behind for
+        # the operator to resolve together with the ledger attempt.
+        save_task(path, task, state="dispatched", blocked_reason=None)
+        try:
+            admission = admit(
+                ledger,
+                lanes,
+                lanes_path,
+                lane_id,
+                task,
+                project_root,
+                packet_dir,
+                accounts_by_lane[lane_id],
+            )
+        except Refused as exc:
+            # Refused before any attempt existed: the task stays ready for the next tick.
+            readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
+            reason = "refused: " + str(exc)[:200]
+            save_task(path, task, state="ready", blocked_reason=None)
+            rows[index] = {"task": task_id, "lane": lane_id, "attempt": None, "result": reason}
+            continue
+        attempt = Attempt(
+            accounts_by_lane[lane_id],
+            # partial snapshots this task's values: the loop rebinds them next iteration.
+            partial(
+                settle_attempt,
+                index,
+                lane_id,
+                task_id,
+                task,
+                path,
+                choice,
+                packet_dir,
+                admission,
+            ),
         )
+        attempts.append(attempt)
+        attempt.start()
+        # The attempt now occupies its account slot (a hold stays ACTIVE), so re-evaluate
+        # the busy count before the next task in this tick is selected — dispatching on a
+        # stale view collided with a refused 'account busy' attempt. One query.
+        readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
+    for attempt in attempts:
+        attempt.join()
+    for attempt in attempts:
+        if attempt.error is not None:
+            # Every attempt is joined first, then the unexpected failure is raised on the
+            # pass loop — the caller sees what a serial pass would have raised.
+            raise attempt.error
+    # Board order, not finish order: the rows a print or a listener reads are the ones a
+    # serial pass produced, whatever order the workers settled in.
+    ordered = [rows[i] for i in sorted(rows)]
     if auto_land and not dry_run:
         # The board is re-read so the pass's own `passed` settlements land in this pass.
         for task_id, (path, task) in load_board(board_dir).items():
@@ -1534,11 +1733,11 @@ def tick(
                 )
             except Exception as exc:
                 save_task(path, task, state="blocked", blocked_reason=("land: " + str(exc))[:300])
-                results.append(
+                ordered.append(
                     {"task": task_id, "lane": None, "attempt": None, "result": "land_error"}
                 )
                 continue
-            results.append(
+            ordered.append(
                 {
                     "task": task_id,
                     "lane": None,
@@ -1560,7 +1759,7 @@ def tick(
                     "dropped": r.get("dropped", []),
                     "score": r.get("score"),
                 }
-                for r in results
+                for r in ordered
             ],
         }
-    return results
+    return ordered
