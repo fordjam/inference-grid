@@ -32,6 +32,12 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 TAIL_CHARS = 6000
 DEFAULT_MIN_FREE_BYTES = 5 * 1024**3
+# An agent round that neither moves the tree nor writes to its transcript for this long is
+# idle; the round is cut and the loop re-enters (J4 on cline-deepseek and the first Q5 each
+# burned an hour at the wall before anything named the silence).
+DEFAULT_IDLE_SECONDS = 900
+IDLE_TRANSCRIPT_BYTES = 2048
+IDLE_POLL_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -390,6 +396,93 @@ def worktree_fingerprint(work: Path) -> Optional[str]:
     return digest.hexdigest()
 
 
+def tree_marker(work: Path) -> Optional[bytes]:
+    """HEAD plus `git status --porcelain`: the cheap pair the idle watchdog polls.
+
+    Deliberately weaker than `worktree_fingerprint` — it does not hash untracked file
+    *contents* — because it is read every few seconds while the agent runs. A directory
+    that is not a git worktree, or a git command that fails, has no answer: None, which
+    is never read as "unchanged"."""
+    head = _git(work, ["rev-parse", "HEAD"])
+    status = _git(work, ["status", "--porcelain"])
+    if head is None or status is None:
+        return None
+    return head + b"\0" + status
+
+
+def _size_of(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+class IdleWatch:
+    """When a running round has gone idle: the tree stood still and the transcript is quiet.
+
+    `poll` is called between short waits on the agent. The tree marker and the transcript
+    size are read at construction and re-read on every poll; either a moved tree or
+    `IDLE_TRANSCRIPT_BYTES` of new transcript is activity and resets the window. `poll`
+    returns True once the tree marker has stood still and the transcript has grown by
+    fewer than `IDLE_TRANSCRIPT_BYTES` for a whole `idle_seconds`. An unreadable marker
+    never reads as "unchanged", so a non-worktree round always runs to the wall."""
+
+    def __init__(self, work: Path, native: Path, idle_seconds: float, clock=time):
+        self.work, self.native, self.idle_seconds, self.clock = work, native, idle_seconds, clock
+        self.marker = tree_marker(work)
+        self.size = _size_of(native)
+        self.since = clock.monotonic()
+
+    def poll(self) -> bool:
+        now = self.clock.monotonic()
+        marker = tree_marker(self.work)
+        size = _size_of(self.native)
+        if (marker is not None and marker != self.marker) or (
+            size - self.size >= IDLE_TRANSCRIPT_BYTES
+        ):
+            self.marker, self.size, self.since = marker, size, now
+        return marker is not None and (now - self.since) >= self.idle_seconds
+
+
+def _poll_seconds(idle_seconds: float) -> float:
+    """How often the watchdog looks: often enough to cut near the window, never a busy loop."""
+    return min(IDLE_POLL_SECONDS, max(0.05, idle_seconds / 4))
+
+
+def idle_minutes(idle_seconds: float) -> int:
+    """The window as whole minutes for the re-entry prompt, never below one."""
+    return max(1, int(round(idle_seconds / 60.0)))
+
+
+def _kill_and_reap(proc: subprocess.Popen, grace: float) -> int:
+    _kill(proc, grace)
+    return proc.wait()
+
+
+def _wait_for_round(
+    proc: subprocess.Popen,
+    deadline: float,
+    clock,
+    watch: Optional[IdleWatch],
+    poll: Optional[float],
+    grace: float,
+) -> tuple:
+    """Block until the agent exits, the wall passes, or the round has gone idle.
+
+    Returns `(agent_reason, returncode)`; a round cut at the wall or on idleness is killed
+    as a process group and reaped, so the caller sees the signal it died on."""
+    while True:
+        remaining = deadline - clock.monotonic()
+        if remaining <= 0:
+            return "wall_deadline", _kill_and_reap(proc, grace)
+        step = remaining if poll is None else min(remaining, poll)
+        try:
+            return "process_exited", proc.wait(timeout=max(0.01, step))
+        except subprocess.TimeoutExpired:
+            if watch is not None and watch.poll():
+                return "agent_idle", _kill_and_reap(proc, grace)
+
+
 def terminal_corroboration(native: Path) -> Optional[Dict]:
     """What the CLI said about its own ending, for the record — never the decision.
 
@@ -477,16 +570,27 @@ def fix_prompt(
     round_no: int,
     max_rounds: int,
     stopped_early: bool = False,
+    idle_minutes: Optional[int] = None,
 ) -> str:
     """Deterministic text: which gates failed, their tails, and the rules of the round.
 
     The rules repeat what the brief already said because the model is being
     re-entered mid-session and a short, exact instruction beats a reference. When the
     previous round moved nothing, that is the first line: a session that answered
-    without working has to be told plainly that the answer was not the work."""
+    without working has to be told plainly that the answer was not the work. A round the
+    idle watchdog cut is told the same way, but it is told to commit or explain rather
+    than to start from nothing — the cut may have fallen early in a slow turn."""
     failed = [r for r in results if not r.ok]
     lines = []
-    if stopped_early:
+    if idle_minutes is not None:
+        unit = "minute" if idle_minutes == 1 else "minutes"
+        lines += [
+            f"the previous round produced no change in {idle_minutes} {unit}; commit what you "
+            "have or say why. The worktree and the transcript both stood still, so the harness "
+            "cut the round short — finish the packet in this session, on this branch.",
+            "",
+        ]
+    elif stopped_early:
         lines += [
             "your previous session ended without changing anything: the worktree and every "
             "gate result are identical to the round before, so that round was not the work. "
@@ -524,6 +628,8 @@ def build_loop(
     operator_gates: Sequence[str] = (),
     min_seconds_for_round: int = 600,
     min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
+    idle_seconds: Optional[int] = DEFAULT_IDLE_SECONDS,
+    kill_grace: float = 5.0,
     free_bytes: Callable[[Path], int] = free_disk_bytes,
     clock=time,
 ) -> Dict:
@@ -535,7 +641,14 @@ def build_loop(
     stdout is filtered as it arrives (`stream_transcript`), so the native
     transcript never holds a per-token delta line. No round starts while the
     packets root's filesystem is short of `min_free_bytes`: that verdict is
-    `disk_low`, and the free space the guard measured rides in the verdict."""
+    `disk_low`, and the free space the guard measured rides in the verdict.
+
+    A round whose tree (`HEAD` plus `git status --porcelain`) stands still and
+    whose transcript grows by fewer than `IDLE_TRANSCRIPT_BYTES` for
+    `idle_seconds` is cut with `agent_reason: agent_idle` instead of running to
+    the wall; its gates run as usual and the next round is told the round was
+    idle. Two idle rounds in one attempt — or a single idle round with no round
+    or session left to continue on — settle the verdict `agent_idle`."""
     attempt_dir.mkdir(parents=True, exist_ok=True)
     deadline = clock.monotonic() + wall_seconds
     rounds: List[Dict] = []
@@ -543,6 +656,9 @@ def build_loop(
     reason = "gates_passed"
     started_all = clock.monotonic()
     disk_free: Optional[int] = None
+    idle_rounds = 0
+    watching = bool(idle_seconds) and idle_seconds > 0
+    poll = _poll_seconds(idle_seconds) if watching else None
     for round_no in range(1, max_rounds + 1):
         disk_free = free_bytes(attempt_dir)
         if disk_free < min_free_bytes:
@@ -561,6 +677,9 @@ def build_loop(
                 round_no,
                 max_rounds,
                 stopped_early=previous["agent_reason"] == "agent_stopped_early",
+                idle_minutes=(
+                    idle_minutes(idle_seconds) if previous["agent_reason"] == "agent_idle" else None
+                ),
             )
         argv = adapter.first(text) if round_no == 1 else adapter.resume(session, text)
         native = attempt_dir / f"native-{round_no}.jsonl"
@@ -582,13 +701,8 @@ def build_loop(
                 target=stream_transcript, args=(proc.stdout, native), daemon=True
             )
             reader.start()
-            try:
-                code = proc.wait(timeout=max(1, int(remaining)))
-                agent_reason = "process_exited"
-            except subprocess.TimeoutExpired:
-                _kill(proc)
-                code = proc.wait()
-                agent_reason = "wall_deadline"
+            watch = IdleWatch(work, native, idle_seconds, clock) if watching else None
+            agent_reason, code = _wait_for_round(proc, deadline, clock, watch, poll, kill_grace)
             reader.join(timeout=30)
         after = worktree_fingerprint(work)
         if session is None:
@@ -607,6 +721,8 @@ def build_loop(
         )
         if stopped_early:
             agent_reason = "agent_stopped_early"
+        if agent_reason == "agent_idle":
+            idle_rounds += 1
         rounds.append(
             {
                 "round": round_no,
@@ -622,6 +738,13 @@ def build_loop(
             break
         if all(r.ok for r in results):
             reason = "gates_passed"
+            break
+        if agent_reason == "agent_idle" and (
+            idle_rounds >= 2 or round_no == max_rounds or session is None
+        ):
+            # Two idle rounds, or an idle round with nothing left to re-enter, is the
+            # operator's to see: hold it now instead of burning the rest of the wall.
+            reason = "agent_idle"
             break
         if session is None:
             reason = "no_session_to_resume"
@@ -640,17 +763,18 @@ def build_loop(
         "verified_in_lane": bool(final) and all(r.ok for r in final) and not operator_gates,
         "min_free_bytes": min_free_bytes,
         "disk_free_bytes": disk_free,
+        "idle_seconds": idle_seconds,
     }
     (attempt_dir / "verdict.json").write_text(json.dumps(verdict, indent=2))
     return verdict
 
 
-def _kill(proc: subprocess.Popen) -> None:
+def _kill(proc: subprocess.Popen, grace: float = 5.0) -> None:
     try:
         os.killpg(proc.pid, 15)
     except ProcessLookupError:
         return
-    time.sleep(5)
+    time.sleep(grace)
     if proc.poll() is None:
         try:
             os.killpg(proc.pid, 9)

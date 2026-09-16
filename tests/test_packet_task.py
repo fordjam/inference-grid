@@ -123,6 +123,7 @@ def test_validate_board_task_routes_by_category():
     assert packet_task.validate_board_task(plain)["category"] == "pure_function"
     validated = packet_task.validate_board_task(make_packet_task())
     assert validated["spec"]["max_rounds"] == 3  # the default, filled in
+    assert validated["spec"]["idle_seconds"] == 900  # the idle watchdog's default window
     assert validated["spec"]["packet_id"] == "A1"
 
 
@@ -139,6 +140,9 @@ def test_validation_rejects_bad_packet_specs():
         ("base with a space", lambda t: t["spec"].update(base="main branch")),
         ("zero rounds", lambda t: t["spec"].update(max_rounds=0)),
         ("rounds as bool", lambda t: t["spec"].update(max_rounds=True)),
+        ("zero idle window", lambda t: t["spec"].update(idle_seconds=0)),
+        ("idle window as bool", lambda t: t["spec"].update(idle_seconds=True)),
+        ("idle window unbounded", lambda t: t["spec"].update(idle_seconds=3601)),
         ("empty gates", lambda t: t["spec"].update(gates=[])),
         ("gate without argv", lambda t: t["spec"].update(gates=[{"name": "x"}])),
         (
@@ -410,3 +414,22 @@ def test_the_commit_gate_and_the_prompt_carry_the_lanes_own_trailer(world):
     message = git(world["project"], "log", "-1", "--format=%B", "packet/d1-packet")
     assert "Co-Authored-By: Deepseek-V4.1-Flash <noreply@deepseek.com>" in message
     assert "GLM" not in message
+
+
+def test_the_task_specs_idle_window_reaches_the_loop(world, monkeypatch):
+    """The idle watchdog's window is a task-spec knob, not a harness constant."""
+    task_path = world["board"] / "d1-packet.json"
+    raw = json.loads(task_path.read_text())
+    raw["spec"]["idle_seconds"] = 1200
+    task_path.write_text(json.dumps(raw, indent=1) + "\n")
+    seen = {}
+    real = packet_task.build_loop
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(packet_task, "build_loop", spy)
+    results = tick(world)
+    assert [r["result"] for r in results] == ["passed"]
+    assert seen["idle_seconds"] == 1200
