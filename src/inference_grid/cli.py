@@ -1,5 +1,6 @@
 import argparse
 import json
+import time
 import os
 from pathlib import Path
 
@@ -57,6 +58,9 @@ def board_tick(
                             "package_src",
                             "owner_only",
                             "require_lane_meta",
+                            "value_routing",
+                            "explore",
+                            "benchmarks_path",
                         )
                         if key in config
                     },
@@ -198,6 +202,10 @@ def main():
             "board-status",
             "inbox-integrate",
             "lane-init",
+            "catalogue-record",
+            "catalogue",
+            "deals",
+            "quality",
             "board-init",
             "calibrate",
             "calibration-score",
@@ -323,6 +331,10 @@ def main():
             kw["project_root"], kw["task_id"], dry_run=kw.get("dry_run", True)
         ),
         "land": lambda **kw: land_command(ledger, **kw),
+        "catalogue-record": lambda **kw: catalogue_record(ledger, **kw),
+        "catalogue": lambda **kw: ledger.catalogue(**kw),
+        "deals": lambda **kw: deals_command(ledger, **kw),
+        "quality": lambda **kw: quality_command(ledger, **kw),
     }
     report = commands[args.command](**data)
     if args.command == "land":
@@ -405,6 +417,60 @@ def tick_all(ledger, boards_dir, log_path=None, prepare=None, dry_run=False):
     from .tick_all import tick_all as run_all
 
     return run_all(ledger, boards_dir, log_path=log_path, prepare=prepare, dry_run=dry_run)
+
+
+def catalogue_record(ledger, provider, path=None, rows=None, observed_at=None):
+    """Record one plan's catalogue reading: `rows` inline or a JSON file of rows."""
+    from .catalogue import normalise
+
+    if rows is None:
+        if not path:
+            raise ValueError("catalogue-record needs rows or a path")
+        with open(path) as handle:
+            document = json.load(handle)
+        rows = document.get("rows", document) if isinstance(document, dict) else document
+        observed_at = observed_at or (
+            document.get("observed_at") if isinstance(document, dict) else None
+        )
+    if isinstance(observed_at, str):
+        from datetime import datetime
+
+        observed_at = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).timestamp()
+    normalised = [normalise(r) for r in rows]
+    return {
+        "provider": provider,
+        "recorded": ledger.record_catalogue(provider, normalised, observed_at),
+    }
+
+
+def deals_command(ledger, lanes_path=None, ending_within_days=3):
+    """Promos and free models across the recorded catalogues, with what using them takes."""
+    from .catalogue import deals, deals_lines
+
+    lanes = {}
+    if lanes_path:
+        from .lanes.config import validate_lane_config
+
+        with open(lanes_path) as handle:
+            lanes = validate_lane_config(json.load(handle))["lanes"]
+    readiness = {}
+    try:
+        from .board.runner import readiness_view
+
+        readiness = (
+            readiness_view(ledger, lanes, time.time(), None, ledger.scorecard()) if lanes else {}
+        )
+    except Exception:  # noqa: BLE001 — readiness is a refinement of the report, not its condition
+        readiness = {}
+    rows = deals(ledger.catalogue(), lanes, readiness, ending_within_days=ending_within_days)
+    return {"deals": rows, "lines": deals_lines(rows)}
+
+
+def quality_command(ledger, benchmarks_path=None, category=None):
+    """Quality estimates per (model, category): prior, evidence and posterior with sources."""
+    from .board.priors import quality_table
+
+    return quality_table(ledger, benchmarks_path=benchmarks_path, category=category)
 
 
 def digest(ledger, boards_dir, since=None):

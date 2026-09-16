@@ -31,6 +31,72 @@ ENDPOINTS = {
 }
 ENDPOINT = ENDPOINTS["opencode"]
 DEFAULT_PROVIDER = "opencode"
+# The Go plan serves some models on the Anthropic Messages protocol, not chat completions
+# (the docs' model-id table, read into the catalogue 2026-09-16: every Qwen, MiniMax and
+# Union Alpha at /v1/messages; Grok, GPT 5.6 Luna and Muse at /v1/responses, which this
+# lane does not speak). The request is built for the model's protocol and the reply is
+# read back into the chat-completions shape the rest of this module — and the receipt —
+# expects, so a Messages model is one more model, not a second adapter.
+MESSAGES_ENDPOINT = "https://opencode.ai/zen/go/v1/messages"
+MESSAGES_MODEL_PREFIXES = ("qwen", "minimax", "union-alpha")
+RESPONSES_MODEL_PREFIXES = ("grok", "gpt-", "muse")
+ANTHROPIC_VERSION = "2023-06-01"
+
+
+def protocol_for(model):
+    """'chat', 'messages' or 'responses' for a Go-plan model id, by the documented table."""
+    bare = str(model or "").rsplit("/", 1)[-1].lower()
+    if bare.startswith(MESSAGES_MODEL_PREFIXES):
+        return "messages"
+    if bare.startswith(RESPONSES_MODEL_PREFIXES):
+        return "responses"
+    return "chat"
+
+
+def messages_body(chat_body):
+    """The Messages-API request for a chat-completions body: same model, prompt, cap."""
+    return {
+        "model": chat_body["model"],
+        "max_tokens": chat_body["max_tokens"],
+        "messages": [{"role": m["role"], "content": m["content"]} for m in chat_body["messages"]],
+    }
+
+
+def chat_from_messages(response):
+    """A Messages-API reply as the chat-completions document the qualifier reads.
+
+    stop_reason end_turn -> finish_reason stop; max_tokens -> length; the text parts are
+    joined; usage input/output tokens become prompt/completion tokens. Anything else is
+    returned as-is so the qualifier's own refusal names it."""
+    if not isinstance(response, dict) or "content" not in response:
+        return response
+    parts = response.get("content")
+    text = (
+        "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text")
+        if isinstance(parts, list)
+        else (parts if isinstance(parts, str) else "")
+    )
+    stop = response.get("stop_reason")
+    finish = {"end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length"}.get(stop, stop)
+    usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+    return {
+        "id": response.get("id"),
+        "model": response.get("model"),
+        "provider": response.get("provider"),
+        "choices": [
+            {"index": 0, "finish_reason": finish, "message": {"role": "assistant", "content": text}}
+        ],
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens"),
+            "completion_tokens": usage.get("output_tokens"),
+            "total_tokens": (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0),
+            "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
+        },
+        "native_protocol": "messages",
+        "native_stop_reason": stop,
+    }
+
+
 USER_AGENT = "inference-grid-lane/1.0"
 MAX_BODY = 4 * 1024 * 1024
 MAX_CONTENT = 40000
@@ -161,17 +227,27 @@ def expected_artifact(work):
     return names[0], None
 
 
-def http_send(body, key, session, timeout, endpoint=ENDPOINT):
-    """POST one chat completion to endpoint; return the parsed JSON document."""
+def http_send(body, key, session, timeout, endpoint=ENDPOINT, protocol="chat"):
+    """POST one request to endpoint; return the parsed JSON document.
+
+    A Messages-protocol request goes to the Messages endpoint with the Anthropic headers
+    (x-api-key, anthropic-version) beside the bearer, and its reply comes back reshaped
+    into the chat-completions document (chat_from_messages)."""
+    headers = {
+        "Authorization": "Bearer " + key,
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+        "x-opencode-session": session,
+    }
+    if protocol == "messages":
+        headers["x-api-key"] = key
+        headers["anthropic-version"] = ANTHROPIC_VERSION
+        body = messages_body(body)
+        endpoint = endpoint.replace("/chat/completions", "/messages")
     request = urllib.request.Request(
         endpoint,
         data=json.dumps(body).encode(),
-        headers={
-            "Authorization": "Bearer " + key,
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
-            "x-opencode-session": session,
-        },
+        headers=headers,
         method="POST",
     )
     opener = urllib.request.build_opener(RefusedRedirects())
@@ -179,7 +255,8 @@ def http_send(body, key, session, timeout, endpoint=ENDPOINT):
         raw = stream.read(MAX_BODY + 1)
     if len(raw) > MAX_BODY:
         raise ResponseTooLarge("native response exceeds 4 MiB")
-    return json.loads(raw)
+    document = json.loads(raw)
+    return chat_from_messages(document) if protocol == "messages" else document
 
 
 def qualify(response, model, aliases=()):
@@ -394,11 +471,16 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
         verdict["reasoning_effort"] = "unsupported"
         if verdict.get("thinking_tokens") is not None:
             verdict["reasoning_budget"] = "unsupported"
+    protocol = protocol_for(sent_model) if provider == "opencode" else "chat"
+    verdict["protocol"] = protocol
+    if protocol == "responses":
+        verdict["refusal"] = "protocol_unsupported: this model is served on /v1/responses"
+        return None, verdict
     try:
         if send is not None:
             response = send(body, key, session, transport_timeout)
         else:
-            response = http_send(body, key, session, transport_timeout, endpoint)
+            response = http_send(body, key, session, transport_timeout, endpoint, protocol)
     except urllib.error.HTTPError as exc:
         # The status code and a fixed reason only; the error body is read solely to
         # classify a hosting opt-in 403 and is never recorded.

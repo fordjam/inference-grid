@@ -145,7 +145,28 @@ def digest(ledger, boards_dir, now=None):
         lines.append("- no lanes configured (a board config names the lanes file)")
     else:
         lines += eval_markdown(summary)
+    # O1: what is cheap this week on the plans, and what using it would take.
+    deal_rows = []
+    try:
+        from .catalogue import deals, deals_lines
+
+        catalogue = ledger.catalogue()
+        if catalogue:
+            deal_rows = deals(catalogue, lanes or {}, ending_within_days=3)
+    except Exception:  # noqa: BLE001 — a legacy ledger without the table has no deals to list
+        deal_rows = []
+    lines += ["", "## Deals", ""]
+    if deal_rows:
+        lines += [f"- {line}" for line in deals_lines(deal_rows)]
+    else:
+        lines.append("- none recorded (run deployments/local/collect_catalogue.py)")
     lines += ["", "## Needs you", ""]
+    for d in deal_rows:
+        if d["ending_soon"] and d["state"] != "qualified":
+            lines.append(
+                f"- deal ending: `{d['provider']}/{d['model']}` {d['deal']} ends in "
+                f"{d['days_left']}d and is {d['state']}"
+            )
     for board_name, task_id, prefix in owner_only_rows:
         lines.append(
             f"- owner-only: `{task_id}` — a declared file is under prefix `{prefix}`"

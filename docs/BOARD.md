@@ -246,3 +246,24 @@ Board inputs are sent to third-party models, so only files a task lists are stag
 ## Attested readings
 
 Providers without a usage API (the Z.ai Coding Plan) are admitted from an operator-attested console reading kept in a private file with its true observation time. Policy, not measurement: such a reading stays valid for 24 hours for admission and lane readiness; ZCode consumes no plan quota inside the campaign window. Every other lane uses a collector reading no older than 15 minutes, refreshed by the board's prepare step before each dispatch.
+
+## Routing on quality per dollar (brief 21 O1–O3)
+
+With a recorded model catalogue (`deployments/local/collect_catalogue.py`; `inference-grid
+catalogue`, `deals`) the route ranks every candidate that passes the hard constraints —
+category, the cross-family rule for reviews, tier/lane policy, readiness, window — by
+
+    value = quality(model, category) / expected_cost(lane, task)
+
+`quality` is a Beta posterior (`board/priors.py`): a published benchmark prior from
+`~/.config/inference-grid/benchmarks.json` (8 pseudo-outcomes; flat without one) overridden
+by the grid's own outcomes — the scorecard for builds, calibration recall for reviewers,
+never "the review completed". `expected_cost` prices the task's expected tokens on the
+catalogue row (promo multiplier and free applied). A trusted lane (3+ outcomes) below the
+category's quality floor (`lanes/value.py::QUALITY_FLOOR`, reviews 0.6) is not a candidate
+however cheap; an untrusted lane is explored with a Thompson draw, and with probability
+`explore` (0.1) the whole choice is a draw. Every plan and tick row carries `value_rows`
+(quality, evidence_n, cost, value, chosen_by). A board turns it off with
+`"value_routing": false`; without a catalogue the legacy Laplace score routes as before.
+`inference-grid quality` prints the estimates with their sources.
+

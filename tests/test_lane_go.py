@@ -780,3 +780,56 @@ def test_read_key_accepts_the_grid_credential_shape(tmp_path):
     assert read_key(f) == ("abc", None)
     f.write_text(json.dumps({"api_key": ""}))
     assert read_key(f)[0] is None
+
+
+def test_messages_protocol_models_are_reshaped_into_chat_documents():
+    """Qwen, MiniMax and Union Alpha are served on /v1/messages on the Go plan (the docs'
+    model-id table); the request is built for that protocol and the reply is read back
+    into the chat-completions shape the qualifier and the receipt expect."""
+    from inference_grid.lanes import go
+
+    assert go.protocol_for("qwen3.8-flash") == "messages"
+    assert (
+        go.protocol_for("minimax-m3") == "messages" and go.protocol_for("union-alpha") == "messages"
+    )
+    assert go.protocol_for("kimi-k3") == "chat" and go.protocol_for("deepseek-v4.1-flash") == "chat"
+    assert (
+        go.protocol_for("grok-4.6") == "responses"
+        and go.protocol_for("gpt-5.6-luna") == "responses"
+    )
+    body = {
+        "model": "qwen3.8-flash",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+        "max_tokens": 5000,
+        "reasoning_effort": "high",
+    }
+    m = go.messages_body(body)
+    assert m == {
+        "model": "qwen3.8-flash",
+        "max_tokens": 5000,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    reply = {
+        "id": "msg_1",
+        "model": "qwen3.8-flash",
+        "stop_reason": "end_turn",
+        "content": [
+            {"type": "text", "text": '{"verdict":'},
+            {"type": "text", "text": ' "approved"}'},
+        ],
+        "usage": {"input_tokens": 120, "output_tokens": 9},
+    }
+    chat = go.chat_from_messages(reply)
+    assert chat["choices"][0]["finish_reason"] == "stop"
+    assert chat["choices"][0]["message"]["content"] == '{"verdict": "approved"}'
+    assert chat["usage"]["prompt_tokens"] == 120 and chat["usage"]["completion_tokens"] == 9
+    assert go.qualify(chat, "qwen3.8-flash") is None
+    cut = go.chat_from_messages({**reply, "stop_reason": "max_tokens"})
+    assert cut["choices"][0]["finish_reason"] == "length"
+    # A chat document passes through untouched.
+    plain = {
+        "model": "kimi-k3",
+        "choices": [{"finish_reason": "stop", "message": {"content": "x"}}],
+    }
+    assert go.chat_from_messages(plain) is plain

@@ -91,7 +91,13 @@ def default_tick(board, config):
             results = []
         for r in results if isinstance(results, list) else []:
             if isinstance(r, dict) and r.get("lane"):
-                line = f"  {r['task']} {r['lane']} {str(r.get('result', ''))[:80]}\n"
+                why = ""
+                if r.get("chosen_by"):
+                    why = f" [{r['chosen_by']}"
+                    if r.get("cost") is not None:
+                        why += f" ${r['cost']:.4f}"
+                    why += "]"
+                line = f"  {r['task']} {r['lane']} {str(r.get('result', ''))[:80]}{why}\n"
                 log.write(line)
                 print(line, end="")
     try:

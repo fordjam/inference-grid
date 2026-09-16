@@ -190,7 +190,7 @@ def blended_row(lane, category, scorecard, calibration):
     }
 
 
-def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
+def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes, pricing=None):
     """Prepare select_lane's inputs and return its answer with the drop report.
 
     Returns select_lane's dict with `candidates` replaced by the post-budget candidate
@@ -304,6 +304,37 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
             if lane_tier(lanes[row["lane"]]) != tier
         )
         kept = matching
+    if pricing is not None:
+        # O2: quality per dollar over the same constrained set (lanes/value.py). The
+        # legacy Laplace-score path below stays for a board without a catalogue.
+        from .value import select_by_value
+
+        choice = select_by_value(
+            {"category": cat, "author_family": task.get("author_family")},
+            {lid: lanes[lid] for lid in (row["lane"] for row in kept)},
+            readiness,
+            scorecard,
+            calibration,
+            pricing.get("catalogue") or [],
+            benchmarks=pricing.get("benchmarks"),
+            inputs_bytes=inputs_bytes,
+            rng=pricing.get("rng"),
+            explore=pricing.get("explore", 0.1),
+            at=pricing.get("at"),
+            usage_medians=pricing.get("usage_medians"),
+        )
+        return {
+            "lane": choice["lane"],
+            "score": choice["score"],
+            "reason": choice["reason"],
+            "candidates": sorted(kept, key=lambda row: row["lane"]),
+            "dropped": dropped,
+            "tier": tier,
+            "value_rows": choice.get("rows", []),
+            "chosen_by": choice.get("chosen_by"),
+            "cost": choice.get("cost"),
+            "value": choice.get("value"),
+        }
     rows = []
     for lid in sorted(row["lane"] for row in kept):
         row = blended_row(lanes[lid], cat, scorecard, calibration)

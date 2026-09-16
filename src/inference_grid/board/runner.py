@@ -455,6 +455,50 @@ def refresh_stale_lanes(
     return readiness, stale_files
 
 
+def priced_fields(choice, plan=False):
+    """The value route's fields for a row, or nothing when the legacy route decided —
+    a row never says `cost: None` for a board that was not routing on cost."""
+    if not choice.get("chosen_by"):
+        return {}
+    out = {"chosen_by": choice.get("chosen_by"), "cost": choice.get("cost")}
+    if plan:
+        out["value_rows"] = choice.get("value_rows", [])
+        out["value"] = choice.get("value")
+    return out
+
+
+def pricing_context(ledger, value_routing=True, explore=0.1, benchmarks_path=None):
+    """The catalogue, priors and RNG the value route reads, or None to keep the legacy
+    score. None when the board turns it off, when the ledger holds no catalogue, or when
+    the benchmarks file is malformed — the tick then says so in its log rather than
+    routing on a broken prior."""
+    if not value_routing:
+        return None
+    try:
+        catalogue = ledger.catalogue()
+    except Exception:  # noqa: BLE001 — a ledger without the table is a legacy ledger
+        catalogue = []
+    if not catalogue:
+        return None
+    import random
+    from datetime import date as _date
+
+    from .priors import load_benchmarks
+
+    try:
+        benchmarks = load_benchmarks(benchmarks_path)
+    except ValueError as exc:
+        print(f"benchmarks file refused: {exc}; routing without priors", file=sys.stderr)
+        benchmarks = {"models": {}, "aliases": {}}
+    return {
+        "catalogue": catalogue,
+        "benchmarks": benchmarks,
+        "rng": random.Random(),
+        "explore": float(explore),
+        "at": _date.today(),
+    }
+
+
 def calibration_reports(ledger):
     """Per (family, model) aggregate of the ledger's calibration/eval outcomes.
 
@@ -1655,6 +1699,9 @@ def tick(
     package_src=None,
     owner_only=None,
     require_lane_meta=None,
+    value_routing=True,
+    explore=0.1,
+    benchmarks_path=None,
 ):
     """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records.
 
@@ -1727,6 +1774,9 @@ def tick(
     scorecard = ledger.scorecard()
     calibration = calibration_reports(ledger)
     readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
+    # O2: with a recorded catalogue the route is quality per dollar; without one the
+    # legacy score decides, and the row says nothing about money because nothing is known.
+    pricing = pricing_context(ledger, value_routing, explore, benchmarks_path)
     # A stale lane record is re-read from its provider's observation file before it is
     # allowed to refuse work: the collectors' file is usually fresher than a record a
     # pass-length-old board_prepare wrote (brief L1).
@@ -1908,7 +1958,13 @@ def tick(
             if not needed:
                 record_waiver(board_dir, task, reason, ledger=ledger, attempt=aid)
             save_task(path, task, state="passed", blocked_reason=None)
-            rows[index] = {"task": task_id, "lane": lane_id, "attempt": aid, "result": "passed"}
+            rows[index] = {
+                "task": task_id,
+                "lane": lane_id,
+                "attempt": aid,
+                "result": "passed",
+                **priced_fields(choice),
+            }
             return
         try:
             passed, summary = run_tests(project_root, task, output_dir, packet_dir / "scratch")
@@ -2002,6 +2058,7 @@ def tick(
             "candidates": choice["candidates"],
             "dropped": choice["dropped"],
             "score": choice["score"],
+            **priced_fields(choice),
         }
 
     for index, (task_id, (path, task)) in enumerate(board.items()):
@@ -2214,6 +2271,7 @@ def tick(
                 calibration,
                 now,
                 packet_bytes(project_root, task),
+                pricing=pricing,
             )
 
         choice = route_now(readiness)
@@ -2281,6 +2339,8 @@ def tick(
                 "candidates": choice["candidates"],
                 "dropped": choice["dropped"],
                 "score": choice["score"],
+                # O2: the priced, scored candidates and why the winner won.
+                **priced_fields(choice, plan=True),
             }
             continue
         packet_dir = Path(packets_root) / task_id / time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
@@ -2376,6 +2436,7 @@ def tick(
                     "candidates": r.get("candidates", []),
                     "dropped": r.get("dropped", []),
                     "score": r.get("score"),
+                    **{k: r[k] for k in ("value_rows", "chosen_by", "cost", "value") if k in r},
                 }
                 for r in ordered
             ],
