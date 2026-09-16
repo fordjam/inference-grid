@@ -358,6 +358,42 @@ def test_build_overlay_carries_reviewer_recall(tmp_path):
     ]
 
 
+# --- operator: drafted fix packets waiting for a release ---
+
+
+def test_drafted_fix_packets_are_needs_you_rows(tmp_path):
+    ledger = make_ledger(tmp_path)
+    project = tmp_path / "project"
+    board = project / "grid/board"
+    briefs = project / "grid/briefs"
+    board.mkdir(parents=True)
+    briefs.mkdir(parents=True)
+    (briefs / "packet-k1.txt").write_text(
+        "## 1. Hard rules\n\n---\n\n#### K1. Retry budget on the worker\n\nbody\n"
+    )
+    (board / "packet-k1.json").write_text(
+        json.dumps({"id": "packet-k1", "brief": "grid/briefs/packet-k1.txt"})
+    )
+    (board / "drafts.json").write_text(json.dumps({"drafts": ["packet-k1", "gone"]}))
+
+    drafts = [r for r in operator_rows(ledger, board_dirs=[board]) if r["kind"] == "draft"]
+    assert [(r["id"], r["reason"]) for r in drafts] == [
+        ("gone", "gone"),  # an unreadable brief is the id, never an invented title
+        ("packet-k1", "Retry budget on the worker"),
+    ]
+    assert all(r["since"] for r in drafts)
+    datetime.fromisoformat(drafts[0]["since"])
+    # The overlay and the dashboard sanitizers keep the row, and the shell labels it.
+    assert build_overlay(ledger, board_dirs=[board])["operator"] == drafts
+    assert clean_operator(drafts)[0]["kind"] == "draft"
+
+
+def test_the_needs_you_label_maps_the_draft_kind():
+    root = Path(__file__).resolve().parents[1]
+    for rel in ("deployments/capacity/web", "src/inference_grid/capacity_web"):
+        assert "draft:'Drafted fix'" in (root / rel / "app.js").read_text()
+
+
 # --- the sanitizers capacity.project consumes ---
 
 

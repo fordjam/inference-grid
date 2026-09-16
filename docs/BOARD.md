@@ -31,6 +31,8 @@ Retries are new tasks with a recorded change; the predecessor's `blocked_reason`
 
 Failover (J4) is the runner's own retry, on failure rather than on a race: when a packet task settles blocked with `rounds_exhausted`, `agent_stopped_early` or a transport refusal in its reason, and the task carries `"failover": true` (the packet default; the operator turns it off per task with `false`), the runner authors exactly one successor task whose `lanes` name only lanes of a *different* family that declare the packet category. The link is recorded on both sides — `failover_from` on the successor, the `superseded:` reason on the predecessor — and a `failover` ledger event names the family swap. No second attempt is ever authored on the failed family by this path, and a failover task never fails over again. A dry run reports a pending failover (`failover pending: <family> -> <families>`) instead of authoring it; a real tick authors it.
 
+A `dispatched` task whose attempt is dead is requeued (L2). A pass marks a task `dispatched` before it admits the attempt and settles the board from the worker, so a runtime that dies in between leaves it stranded — `tick` dispatches only `ready` tasks and the task would never run again. Each pass reads such a task's newest ledger attempt (matched against the ledger's `<board id>-<stamp>-<hex>` id shape); when it is terminal and unsuccessful (`failed`/`abandoned`) and no ACTIVE attempt holds the task, the task returns to `ready` with a `requeued` ledger event naming the attempt and its state, and the row reports `requeued`. A terminal *successful* attempt is reported (`dispatched: attempt completed`) and left for the operator; a live or held attempt leaves the task alone. The dry run reports what it would requeue and writes nothing.
+
 Nothing merges automatically. Held attempts wait for `resolve` with evidence, with one exception the runner applies itself: an attempt held at its wall deadline whose expected files all exist in its workspace is resolved `consumed` and followed by a single verify-only attempt (a new ledger task id, a changed brief that only runs the tests, both recorded); anything else stays held.
 
 ## Coordinator schedule
@@ -120,7 +122,19 @@ task with the validation error; no packet task is written.
 That task is a **draft, not a build**: its id is recorded in the board's `drafts.json`,
 and the tick reports `draft` and dispatches nothing until the operator releases it
 (removing the id) or the board config carries `"auto_dispatch": true`. The default is to
-draft, not to build.
+draft, not to build. A draft is listed under the dashboard's *needs-you* list
+(`kind: draft`) with the title its brief carries.
+
+The plan node also answers itself. When a `packet` attempt settles held or blocked for a
+reason the operator owes nothing for — `wall_deadline`, the L3 idle watchdog's
+`agent_idle`, `rounds_exhausted`, a gate that ended every round identically, a transport
+refusal — the runner authors **one** plan task for it (`board/fix_packet.py`) whose
+ticket is built from the verdict: the task's packet section, the last round's gate
+tails, the last 4 KB of the transcript, and the question *what change to the packet, the
+gates or the harness would let this land?* The drafted packet waits in `drafts.json` as
+above. The plan task's id is derived from the (failed task, reason) pair, so the same
+task settling the same way a second time drafts nothing; the pass loop recovers a draft
+a crashed tick never wrote, and names it in a dry run as `fix pending: <plan id>`.
 
 ## Landing
 
@@ -149,15 +163,18 @@ task after the dispatch pass.
 
 `board-new --json {task: …}` writes one validated task file with its empty brief (handoff-1 B4); `{retry, change, budget?, lanes?, author_family?}` authors the authorised retry — a new task with a `superseded:` predecessor, the source link moved for board-work reviews (handoff-5/7).
 
-`{review_branch: {repo, base, tip, scope?}}` authors independent_review task(s) from a git range, staging the changed files plus a generated `diff.patch` under `grid/board/review/<task-id>/`. The keys inside `review_branch` are exactly `repo`, `base`, `tip` and the optional `scope` — anything else is refused. `scope: "branch"` (see Review policy) stages the merged tree's diff instead of the commit range and requires a passed `verify_merge` task for the same branch. The top-level knobs are:
+`{review_branch: {repo, base, tip, scope?, paths?}}` authors independent_review task(s) from a git range, staging the changed files plus a generated `diff.patch` under `grid/board/review/<task-id>/`. The keys inside `review_branch` are exactly `repo`, `base`, `tip` and the optional `scope` and `paths` — anything else is refused. `scope: "branch"` (see Review policy) stages the merged tree's diff instead of the commit range and requires a passed `verify_merge` task for the same branch. The top-level knobs are:
 
 | Knob | Meaning |
 | --- | --- |
 | `max_input_bytes` | Packet budget in staged bytes (default 120 000 ≈ 30k tokens); over budget the range splits or refuses |
-| `split` | `"commit"` authors one task per commit (also the over-budget fallback); `"none"` keeps one task and refuses over budget |
+| `split` | `"commit"` authors one task per commit (also the over-budget fallback); `"none"` keeps one task and refuses over budget. A commit still over budget on its own splits again, one task per top-level directory of its changed files (`review-<repo>-<sha>-<dir>`, each packet measured before anything is written); a directory that still exceeds the budget is refused with its size, never forced |
+| `paths` | Explicit filter: only changed files under these prefixes are staged, and diff.patch covers only them |
 | `include_docs` | Review docs-only commits too (default: skipped, listed `docs-only, not reviewed`) |
 | `exclude_commits` | Sha prefixes to skip in a split, listed `excluded by operator` |
 | `lanes`, `budget` | The review task's lanes and budget (defaults `["go"]` and the review budget) |
+
+A directory-split brief names the group under review and lists the sibling reviews, so a reviewer knows what it is not seeing; findings outside its group belong to the sibling's packet.
 
 ## Review policy
 

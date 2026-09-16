@@ -33,10 +33,12 @@ from ..lanes.brief import (
     packet_text,
 )
 from ..lanes.packet import (
+    DEFAULT_IDLE_SECONDS,
     DEFAULT_MIN_FREE_BYTES,
     ClineAdapter,
     CommandCodeAdapter,
     Gate,
+    OpencodeAdapter,
     ZcodeAdapter,
     build_loop,
     free_disk_bytes,
@@ -44,11 +46,12 @@ from ..lanes.packet import (
 from ..lanes.scout import orient
 from .task import validate_task
 
-# Lane kinds a packet task can run. Command Code and ZCode re-enter the same session on a
-# fix round; the ClinePass CLI cannot (`--id` refuses a prompt in JSON mode), so its rounds
-# are fresh sessions on the fix prompt — the branch and the gate output carry the context,
-# exactly as the operator's driver does it. Kinds outside this set are refused with a reason.
-PACKET_KINDS = ("goat_cli", "zcode_cli", "cline_cli")
+# Lane kinds a packet task can run. Command Code, ZCode and OpenCode re-enter the same
+# session on a fix round (`opencode run --session <id>`); the ClinePass CLI cannot (`--id`
+# refuses a prompt in JSON mode), so its rounds are fresh sessions on the fix prompt — the
+# branch and the gate output carry the context, exactly as the operator's driver does it.
+# Kinds outside this set are refused with a reason.
+PACKET_KINDS = ("goat_cli", "zcode_cli", "cline_cli", "opencode_cli")
 UNSUPPORTED_ADAPTERS = {}
 
 PACKET_ID = re.compile(r"[A-Z]\d{1,3}")
@@ -141,7 +144,7 @@ def validate_packet_task(raw):
         err("spec", "expected a dict")
     required = {"brief", "packet_id", "gates", "base"}
     missing = required - set(spec)
-    unknown = set(spec) - (required | {"max_rounds"})
+    unknown = set(spec) - (required | {"max_rounds", "idle_seconds"})
     if missing:
         err("spec", "missing keys: " + ", ".join(sorted(missing)))
     if unknown:
@@ -156,6 +159,9 @@ def validate_packet_task(raw):
     rounds = spec.get("max_rounds", 3)
     if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= 8:
         err("spec", "max_rounds must be an int in 1..8")
+    idle = spec.get("idle_seconds", DEFAULT_IDLE_SECONDS)
+    if isinstance(idle, bool) or not isinstance(idle, int) or not 1 <= idle <= 3600:
+        err("spec", "idle_seconds must be an int in 1..3600")
     gates = spec["gates"]
     if not isinstance(gates, list) or not gates:
         err("spec", "gates must be a non-empty list")
@@ -197,6 +203,7 @@ def validate_packet_task(raw):
         "gates": [dict(g) for g in gates],
         "base": base,
         "max_rounds": rounds,
+        "idle_seconds": idle,
     }
     if landed is not None:
         out["landed"] = dict(landed)
@@ -226,6 +233,11 @@ def packet_adapter(kind, lane, work, attempt_dir, session_name):
             data_dir=Path.home() / ".cline" / "data",
             binary=lane["executable"],
         )
+    if kind == "opencode_cli":
+        # The Go plan's login is the CLI's own (`~/.local/share/opencode/auth.json`,
+        # read-only under the sandbox); the session id comes from the JSON stream and a
+        # fix round resumes it with `--session`.
+        return OpencodeAdapter(lane["model"], work=work, binary=lane["executable"])
     raise Refused("lane kind " + kind + " does not run packet tasks")
 
 
@@ -234,7 +246,13 @@ def build_sandbox(kind, work, attempt_dir):
     from ..lanes import sandbox
 
     home = Path.home()
-    extra = home / {"goat_cli": ".commandcode", "cline_cli": ".cline"}.get(kind, ".zcode")
+    # OpenCode keeps its state directory (.opencode/) under the clone, inside the
+    # workspace's own write root — it is the one CLI kind that needs no home root.
+    extra = {
+        "goat_cli": home / ".commandcode",
+        "cline_cli": home / ".cline",
+        "zcode_cli": home / ".zcode",
+    }.get(kind)
     # The agent writes only in its clone, its CLI's own state and a scratch tmp/ under the
     # attempt; the attempt directory itself is the harness's (transcripts, gates), written
     # from outside the sandbox. Granting all of it would put the clone's parent inside a
@@ -244,11 +262,24 @@ def build_sandbox(kind, work, attempt_dir):
     profile = sandbox.write_profile(
         work,
         Path(attempt_dir) / "packet.sb",
-        extra_write_roots=[extra, tmp],
+        extra_write_roots=[extra, tmp] if extra else [tmp],
         deny_read_roots=sandbox.deny_read_roots(),
     )
     sandbox.probe(profile, work)
     return lambda argv: sandbox.command(profile, argv)
+
+
+def packet_wall_seconds(task):
+    """The attempt's wall: the agent's budget plus the gates' own timeouts plus a minute
+    of re-entry overhead per round — the agent's hour is the agent's, the gates and the
+    re-entry are not charged to it. Gates keep `lanes/packet.py`'s default timeout when
+    they declare none, the same figure `_gates_for` runs them under."""
+    spec = task["spec"]
+    return (
+        task["budget"]["wall_seconds"]
+        + sum(g.get("timeout", 1800) for g in spec["gates"])
+        + 60 * spec["max_rounds"]
+    )
 
 
 def _git(repo, *args, check=True):
@@ -313,6 +344,16 @@ def admit_packet(ledger, lanes, lane_id, task, project_root, packet_dir, account
         raise Refused("packet lane kind " + kind + " unsupported: " + UNSUPPORTED_ADAPTERS[kind])
     if kind not in PACKET_KINDS:
         raise Refused("lane kind " + kind + " does not run packet tasks")
+    if kind == "opencode_cli":
+        # The one policy gate the one-shot opencode lane enforces, at admission: when the
+        # operator's deny-read list covers the CLI's auth file, nothing spawns — the digest
+        # discipline proves a readable key was not modified, never that it was not read.
+        from ..lanes import sandbox
+        from ..lanes.opencode import credential_denied
+
+        denied = credential_denied(Path.home(), sandbox.deny_read_roots())
+        if denied is not None:
+            raise Refused("credential_denied_by_policy: the deny-read list covers " + str(denied))
     spec = task["spec"]
     project_root = Path(project_root)
     branch = "packet/" + task["id"]
@@ -345,7 +386,7 @@ def admit_packet(ledger, lanes, lane_id, task, project_root, packet_dir, account
         # Descriptive: the loop builds one argv per round from the adapter.
         "argv": ["packet-loop:" + kind, spec["packet_id"], task["id"]],
         "workspace": str(workspace),
-        "timeout": min(task["budget"]["wall_seconds"] + 40, 3600),
+        "timeout": packet_wall_seconds(task),
         "output_bytes": task["budget"]["output_bytes"],
         "inputs": {},
         "manifest_sha256": digest({}),
@@ -513,8 +554,9 @@ def run_packet(ledger, admission, *, min_free_bytes=DEFAULT_MIN_FREE_BYTES, free
             prompt,
             _gates_for(spec, base_rev, attempt_dir, trailer_for(lane["model"])),
             attempt_dir,
-            wall_seconds=task["budget"]["wall_seconds"],
+            wall_seconds=packet_wall_seconds(task),
             max_rounds=spec["max_rounds"],
+            idle_seconds=spec.get("idle_seconds", DEFAULT_IDLE_SECONDS),
         )
     except Exception as exc:
         if reservation is not None:

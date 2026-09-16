@@ -43,9 +43,14 @@ def board_counts(board_dir):
     if not path.is_dir():
         return {"missing": 1}
     from .board.packet_task import validate_board_task
+    from .board.plan_task import DRAFTS_FILE
 
     counts = {}
     for file in sorted(path.glob("*.json")):
+        if file.name == DRAFTS_FILE:
+            # The plan node's drafts list is board-owned state (brief J1), not a task
+            # file, and must not be counted as an unreadable task.
+            continue
         try:
             task = validate_board_task(json.loads(file.read_text()))
         except Exception:

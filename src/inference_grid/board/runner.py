@@ -13,6 +13,7 @@ review-<id> task created for it; acceptance itself stays an operator action.
 """
 
 import hashlib
+import importlib
 import json
 import re
 import shutil
@@ -37,19 +38,27 @@ from .failover import (
     failed_family,
     pending_failover_note,
 )
+from .fix_packet import author_fix_plan, fix_reason, recover_fix
 from .guard import check_input
 from .land import land
 from .packet_task import admit_packet, run_packet, validate_board_task
 from .plan_task import DRAFTS_FILE, load_drafts, settle_plan
-from .policy import record_waiver, review_needed
+from .policy import owner_only_prefix, record_waiver, review_needed
 from .task import validate_task
 from .verify_merge import verify_merge
+from ..lanes.meta import load_lane_meta
 from ..lanes.route import route
 
 RUNNER = [sys.executable, "-m", "inference_grid.lanes.runner"]
 
 # How long a model stays excluded from a lane after the endpoint answered 401/403 for it.
 MODEL_REFUSAL_TTL = 24 * 3600
+
+# The tail the ledger appends to a board task id to name an attempt's own task:
+# <board id>-<UTC stamp>-<random>, with an optional -verify on the follow-up of a
+# deadline hold. The board id is recovered by matching this exact tail against a
+# candidate id, because a task id may be a prefix of another (`copy` vs `copy-ok`).
+LEDGER_ATTEMPT = re.compile(r"^\d{8}T\d{6}-[0-9a-f]+(?:-verify)?$")
 
 
 def model_unsupported_until(record, model, now):
@@ -307,15 +316,146 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None, scorecard=None):
     return view
 
 
-def calibration_reports(ledger):
-    """Per (family, model) aggregate of the ledger's calibration outcomes.
+def observation_paths(lanes, observations, output_dir):
+    """The lane id -> observation file map a tick re-reads stale lane records through.
 
-    score_calibration records one outcome per calibration case with category
-    "calibration" and accepted = all defects recalled and no false positives
-    (board/calibration.py), so a lane's acceptance rate over those outcomes is the
-    strict recall the calibration gate measured. route blends that rate into the
-    selection score; the rows match a scorecard row's identity minus the category.
+    The tick config's `observations` map names paths by provider (the collectors write
+    `<provider>-observation.json`); a lane id is accepted too, for lane ids that are not
+    provider names. A provider the map does not name falls back to the collectors'
+    convention `<output_dir>/<provider>-observation.json` when the tick config carries
+    `output_dir` — the capacity output directory, where the collectors write.
     """
+    paths = {}
+    if not observations and not output_dir:
+        return paths
+    for lane_id, lane in lanes.items():
+        provider = lane.get("provider") or lane_id
+        named = (observations or {}).get(provider) or (observations or {}).get(lane_id)
+        if named:
+            paths[lane_id] = Path(named)
+        elif output_dir:
+            paths[lane_id] = Path(output_dir) / (str(provider) + "-observation.json")
+    return paths
+
+
+def _board_prepare(package_src):
+    """The deployments/local board_prepare module, imported through `package_src`.
+
+    The runner shares board_prepare's observation record builder instead of copying it:
+    one observation shape, one policy. None when no source directory is configured or the
+    module cannot be imported — the re-read is best-effort by design, never a tick failure.
+    """
+    if not package_src:
+        return None
+    try:
+        source = str(package_src)
+        if source not in sys.path:
+            sys.path.insert(0, source)
+        return importlib.import_module("board_prepare")
+    except Exception:  # noqa: BLE001 — a missing deployment module is not a tick failure
+        return None
+
+
+def refresh_stale_lanes(
+    ledger,
+    lanes,
+    readiness,
+    observations,
+    now,
+    package_src=None,
+    scorecard=None,
+    accounts_by_lane=None,
+):
+    """Re-read stale lane records from their providers' observation files before refusing.
+
+    board_prepare refreshes the ledger once per pass and a pass can last an hour, so a
+    lane record ages past its freshness window while the collector's observation file
+    behind it is still fresh. Before a stale record refuses a dispatch, the runner re-reads
+    the provider's observation file through board_prepare's record builder (imported
+    through `package_src`, never copied), records the fresh lane record in the ledger and
+    re-classifies. A file that is itself older than the freshness window admits nothing:
+    its age becomes the lane's readiness reason and the tick refuses with it. A lane with
+    no observation path, a missing or unreadable file, a non-ok reading, or no
+    `package_src` configured behaves exactly as before.
+
+    Returns (readiness, stale_files): the re-classified view and, per lane refused on its
+    observation file's age, the reason naming the age.
+    """
+    stale_files = {}
+    if not observations:
+        return readiness, stale_files
+    prepare = _board_prepare(package_src)
+    if prepare is None:
+        return readiness, stale_files
+    refreshed = False
+    for lane_id, entry in readiness.items():
+        if entry.get("state") != "stale":
+            continue
+        record = None
+        with ledger.engine.connect() as con:
+            row = (
+                con.execute(select(lane_records).where(lane_records.c.provider == lane_id))
+                .mappings()
+                .first()
+            )
+            if row is not None:
+                record = row["record"]
+        if not isinstance(record, dict):
+            continue
+        observed_at = record.get("quota_observed_at")
+        valid = record.get("quota_freshness_seconds")
+        if (
+            isinstance(observed_at, bool)
+            or not isinstance(observed_at, (int, float))
+            or isinstance(valid, bool)
+            or not isinstance(valid, (int, float))
+            or valid <= 0
+            or now - observed_at <= valid
+        ):
+            continue
+        path = observations.get(lane_id)
+        if path is None:
+            continue
+        try:
+            obs = json.loads(path.read_text())
+            fresh, observed, _used = prepare.observation_record({}, obs, None, valid)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if observed is None or fresh.get("quota_observed_at") is None:
+            continue
+        if observed + valid > now:
+            merged = dict(fresh, provider=lane_id)
+            if isinstance(record.get("unsupported_until"), dict):
+                merged["unsupported_until"] = record["unsupported_until"]
+            try:
+                ledger.record_lane(lane_id, merged)
+            except Refused:
+                continue
+            refreshed = True
+        else:
+            stale_files[lane_id] = (
+                f"quota stale: observation file {int(now - observed)}s old"
+                f" (freshness window {int(valid)}s)"
+            )
+    if refreshed:
+        readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
+    for lane_id, reason in stale_files.items():
+        readiness[lane_id] = dict(readiness.get(lane_id) or {"state": "stale"}, reason=reason)
+    return readiness, stale_files
+
+
+def calibration_reports(ledger):
+    """Per (family, model) aggregate of the ledger's calibration/eval outcomes.
+
+    score_calibration records one outcome per case, category `eval:review` (the legacy
+    `calibration` still counts; board/calibration/score.py) and accepted = all defects
+    recalled and no false positives, so a lane's acceptance rate over those outcomes is
+    the strict recall the calibration gate measured. A packet case's `eval:packet`
+    outcome counts the same way. route blends that rate into the selection score; the
+    rows match a scorecard row's identity minus the category.
+    """
+    from .calibration import is_calibration_outcome
+
     with ledger.engine.connect() as con:
         specs = {t["id"]: t["spec"] for t in con.execute(select(task_records)).mappings()}
         rows = list(con.execute(select(attempt_records)).mappings())
@@ -324,7 +464,7 @@ def calibration_reports(ledger):
             select(ledger_events).where(ledger_events.c.kind == "outcome_recorded")
         ).mappings():
             detail = e["detail"]
-            if isinstance(detail, dict) and detail.get("category") == "calibration":
+            if isinstance(detail, dict) and is_calibration_outcome(detail.get("category")):
                 outcomes[e["attempt"]] = detail
     agg = {}
     for row in rows:
@@ -1033,7 +1173,257 @@ def settle_verify_merge(path, task, project_root, packets_root):
     }
 
 
-def step_calibration_run(path, task, board_dir, project_root, ledger, packets_root, dry_run=False):
+# The eval packet's shape (M5): a bounded build whose hidden grade is the case's reference
+# suite, run by score.py after the attempt. The loop's own gate is only the tree's syntax
+# plus the commit gate, so no reference test ever reaches the lane's context.
+EVAL_BUDGET = {"wall_seconds": 1800, "output_bytes": 2000000, "thinking_tokens": 6000}
+EVAL_MAX_ROUNDS = 3
+EVAL_PACKET_ID = "E1"
+EVAL_ARTIFACT = "report.md"
+EVAL_COMPILE_GATE = (
+    "import compileall,sys;sys.exit(0 if compileall.compile_dir('.', quiet=1) else 1)"
+)
+
+
+def eval_brief(case, brief_rel):
+    """The brief document one eval build runs under: hard rules, heading, the case's brief.
+
+    A packet task's brief is a document the shared prompt machinery cuts by heading
+    (lanes/brief.py); the case's own brief.txt is the packet section, and the hard rules
+    section is what `hard_rules` requires of every brief.
+    """
+    return (
+        "## 1. Hard rules\n\n"
+        "- Work only inside this checkout; commit on its current branch.\n"
+        "- Finish with exactly one commit and a clean working tree.\n\n"
+        "---\n\n"
+        f"#### {EVAL_PACKET_ID}. {case['case']}\n\n" + case["brief"].strip() + "\n"
+    )
+
+
+def materialize_case_repo(case, root, brief_rel, brief):
+    """A one-commit git repository of the case's `base/` under root; returns its path.
+
+    A packet case's `base/` is a plain tree; the packet loop builds in a clone of a
+    *repository*, so the eval makes one — the base files and the brief committed once, that
+    commit the branch point. Only `base/` and the brief are written; the case's hidden
+    `reference/` never touches the disk a lane can read.
+    """
+    repo = Path(root) / "repo"
+    if (repo / ".git").exists():
+        return repo
+    repo.mkdir(parents=True, exist_ok=True)
+    for relative, data in case["base"]:
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    brief_path = repo / brief_rel
+    brief_path.parent.mkdir(parents=True, exist_ok=True)
+    brief_path.write_text(brief)
+    for argv in (
+        ["git", "init", "-q", str(repo)],
+        ["git", "-C", str(repo), "add", "-A"],
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            # A synthetic identity, no address: the commit exists only to be a base ref.
+            "user.email=evals",
+            "-c",
+            "user.name=evals",
+            "commit",
+            "-q",
+            "--no-gpg-sign",
+            "-m",
+            "eval base",
+        ],
+    ):
+        done = subprocess.run(argv, capture_output=True)
+        if done.returncode != 0:
+            raise RuntimeError(
+                "eval repository: " + done.stderr.decode("utf-8", "replace").strip()[:200]
+            )
+    return repo
+
+
+def case_packet_task(case, lane_id, task_id, brief_rel):
+    """The in-memory packet task one packet eval builds (M5); validated before dispatch."""
+    from .packet_task import validate_packet_task
+
+    return validate_packet_task(
+        {
+            "id": task_id,
+            "category": "packet",
+            "brief": brief_rel,
+            "inputs": [brief_rel],
+            "tests": [],
+            "artifacts": [EVAL_ARTIFACT],
+            "lanes": [lane_id],
+            "author_family": None,
+            "budget": dict(EVAL_BUDGET),
+            "state": "ready",
+            "blocked_reason": None,
+            "spec": {
+                "brief": brief_rel,
+                "packet_id": EVAL_PACKET_ID,
+                "gates": [{"name": "compile", "argv": [sys.executable, "-c", EVAL_COMPILE_GATE]}],
+                "base": "HEAD",
+                "max_rounds": EVAL_MAX_ROUNDS,
+            },
+        }
+    )
+
+
+def step_eval_case(
+    path,
+    task,
+    board_dir,
+    project_root,
+    ledger,
+    packets_root,
+    lanes,
+    lanes_path,
+    accounts_by_lane,
+    dispatch_fn,
+):
+    """One pass of an M5 single-case eval run: author the case's task, then score it.
+
+    A review case becomes an ordinary independent_review task on its one lane and the run
+    waits for it, exactly as the whole-corpus run does (author_calibration). A packet case
+    is not a review packet: the run materializes a one-commit repository of the case's
+    `base/` and dispatches the build through the runner's own packet path, then grades the
+    lane's tree with score.py. Either way the settled attempt gets one `eval:<kind>` outcome
+    — the scorecard row the digest and the due-check read — and the run settles `passed`.
+    """
+    from .calibration import (
+        SETTLED_STATES,
+        author_review_case,
+        case_attempt,
+        case_attempt_dir,
+        case_task_id,
+        load_case,
+        record_outcome,
+        score,
+    )
+
+    spec = task["spec"]
+    run_id = spec["run_id"]
+    lane_id = spec["lanes"][0]
+    case = load_case(Path(spec["corpus_dir"]) / spec["case"])
+    task_id = case_task_id(run_id, case["case"])
+
+    def settle(state, result, reason=None, **extra):
+        save_task(path, task, state=state, blocked_reason=reason)
+        return {"task": task["id"], "lane": None, "attempt": None, "result": result, **extra}
+
+    if case["kind"] == "packet":
+        if task["state"] != "ready":
+            return settle("blocked", "blocked", "packet eval run left a non-ready state")
+        brief_rel = str(Path("grid") / "briefs" / (task_id + ".txt"))
+        try:
+            repo = materialize_case_repo(
+                case,
+                Path(board_dir) / "calibration" / run_id / case["case"],
+                brief_rel,
+                eval_brief(case, brief_rel),
+            )
+            packet_task = case_packet_task(case, lane_id, task_id, brief_rel)
+            packet_dir = (
+                Path(packets_root)
+                / task_id
+                / time.strftime("%Y%m%dT%H%M%S", time.gmtime(time.time()))
+            )
+            aid, state, attempt_dir = (dispatch_fn or dispatch)(
+                ledger,
+                lanes,
+                lanes_path,
+                lane_id,
+                packet_task,
+                repo,
+                packet_dir,
+                accounts_by_lane[lane_id],
+            )
+        except Exception as exc:  # noqa: BLE001 — a bad case blocks the run, not the tick
+            return settle("blocked", "blocked", ("eval packet: " + str(exc))[:300])
+        if state != "completed":
+            # A held attempt is ACTIVE: no outcome can attach, so the operator resolves it
+            # and the next nightly run picks the case up again.
+            return settle(
+                "blocked",
+                "blocked",
+                f"eval packet attempt {aid} {state}; resolve with evidence",
+            )
+        try:
+            record = score(case, attempt_dir)
+            record_outcome(ledger, aid, record)
+        except Exception as exc:  # noqa: BLE001
+            return settle("blocked", "blocked", ("eval packet score: " + str(exc))[:300])
+        save_task(path, task, state="passed", blocked_reason=None)
+        return {
+            "task": task["id"],
+            "lane": None,
+            "attempt": aid,
+            "result": "passed",
+            "accepted": record["accepted"],
+            "repairs": record["repairs"],
+        }
+
+    if task["state"] == "ready":
+        try:
+            author_review_case(board_dir, project_root, case, run_id, [lane_id])
+        except FileExistsError:
+            # A crashed tick staged the task but never saved the wait state; the wait below
+            # picks it up rather than authoring a second copy.
+            pass
+        except Exception as exc:  # noqa: BLE001
+            return settle("blocked", "blocked", ("eval review: " + str(exc))[:300])
+        return settle("review_pending", "authored")
+    try:
+        case_state = json.loads((Path(board_dir) / (task_id + ".json")).read_text()).get("state")
+    except (OSError, ValueError, AttributeError):
+        case_state = None
+    if case_state not in SETTLED_STATES:
+        return {
+            "task": task["id"],
+            "lane": None,
+            "attempt": None,
+            "result": f"waiting on {case['case']}",
+        }
+    aid = case_attempt(ledger, task_id)
+    if aid is None:
+        return settle(
+            "blocked", "blocked", f"eval case {case['case']} settled with no ledger attempt"
+        )
+    try:
+        record = score(case, case_attempt_dir(packets_root, task_id, aid))
+        record_outcome(ledger, aid, record)
+    except Exception as exc:  # noqa: BLE001
+        return settle("blocked", "blocked", ("eval review score: " + str(exc))[:300])
+    save_task(path, task, state="passed", blocked_reason=None)
+    return {
+        "task": task["id"],
+        "lane": None,
+        "attempt": aid,
+        "result": "passed",
+        "accepted": record["accepted"],
+        "repairs": record["repairs"],
+    }
+
+
+def step_calibration_run(
+    path,
+    task,
+    board_dir,
+    project_root,
+    ledger,
+    packets_root,
+    dry_run=False,
+    lanes=None,
+    lanes_path=None,
+    accounts_by_lane=None,
+    dispatch_fn=None,
+):
     """Drive the calibration_run code node one pass: author, wait, then score and pass.
 
     No lane, no ledger attempt, no quota. The first pass authors one independent_review
@@ -1042,6 +1432,11 @@ def step_calibration_run(path, task, board_dir, project_root, ledger, packets_ro
     the run `passed` with the per-lane recall and precision in the result. A dry run plans
     without authoring or scoring. A corpus that cannot be authored or scored blocks the
     run with the reason, never the tick.
+
+    A run whose spec carries `case` (M5's nightly `evals`) measures one case on one lane
+    instead: step_eval_case authors the case's task and scores the settled attempt through
+    score.py, recording the `eval:<kind>` outcome. The `lanes`, `lanes_path` and
+    `accounts_by_lane` are only needed there (a packet case dispatches its own build).
     """
     from .calibration import author_calibration, calibration_settled, score_calibration
 
@@ -1049,6 +1444,19 @@ def step_calibration_run(path, task, board_dir, project_root, ledger, packets_ro
     run_id = spec["run_id"]
     if dry_run:
         return {"task": task["id"], "lane": None, "attempt": None, "result": "calibration_run"}
+    if spec.get("case") is not None:
+        return step_eval_case(
+            path,
+            task,
+            board_dir,
+            project_root,
+            ledger,
+            packets_root,
+            lanes or {},
+            lanes_path,
+            accounts_by_lane or {},
+            dispatch_fn,
+        )
     if task["state"] == "ready":
         try:
             author_calibration(
@@ -1154,6 +1562,70 @@ class Attempt:
         return not self.settled.is_set()
 
 
+def ledger_attempts(ledger, task_id):
+    """Every ledger attempt for one board task, newest first.
+
+    The ledger names an attempt's task `<board id>-<UTC stamp>-<random>`, so a candidate
+    is kept only when that exact tail matches — a bare prefix test would also claim the
+    attempts of a task whose id merely starts with this one (`copy` vs `copy-ok`).
+    """
+    prefix = task_id + "-"
+    with ledger.engine.connect() as con:
+        rows = list(
+            con.execute(
+                select(attempt_records)
+                .where(attempt_records.c.task.like(prefix + "%"))
+                # The last transition orders "newest"; the ledger task id (which carries
+                # the stamp, and a -verify tail on a follow-up) breaks a tie the way the
+                # admissions ran, so the choice is deterministic.
+                .order_by(attempt_records.c.updated.desc(), attempt_records.c.task.desc())
+            ).mappings()
+        )
+    return [r for r in rows if LEDGER_ATTEMPT.match(r["task"][len(prefix) :])]
+
+
+def requeue_dead(path, task, ledger, dry_run=False):
+    """Return a stranded `dispatched` task to `ready`, or report why not (L2).
+
+    A pass marks a task `dispatched` before it admits the attempt and settles the board
+    from the worker, so a runtime that dies in between leaves the task stranded: its
+    newest ledger attempt is terminal and unsuccessful (`failed`/`abandoned`) and no
+    ACTIVE attempt holds it any more, yet `tick` dispatches only `ready` tasks and the
+    task would never run again. Requeue it with a ledger event naming the attempt and its
+    terminal state; the next pass routes it afresh. A terminal *successful* attempt
+    (`completed`/`accepted`) is reported, not touched — the board state is the operator's
+    to settle — and a task with a live or held attempt is left entirely alone. A dry run
+    reports the requeue it would make and writes nothing.
+    """
+    rows = ledger_attempts(ledger, task["id"])
+    if not rows:
+        return None
+    newest = rows[0]
+    if any(r["state"] in ACTIVE for r in rows):
+        return None
+    if newest["state"] in ("completed", "accepted"):
+        return {
+            "task": task["id"],
+            "lane": None,
+            "attempt": newest["id"],
+            "result": "dispatched: attempt " + newest["state"],
+        }
+    if newest["state"] not in ("failed", "abandoned"):
+        return None
+    if not dry_run:
+        save_task(path, task, state="ready", blocked_reason=None)
+        with ledger.tx() as con:
+            ledger.event(
+                con,
+                newest["id"],
+                "requeued",
+                task=task["id"],
+                ledger_task=newest["task"],
+                reason="newest attempt " + newest["state"],
+            )
+    return {"task": task["id"], "lane": None, "attempt": newest["id"], "result": "requeued"}
+
+
 def tick(
     board_dir,
     project_root,
@@ -1167,6 +1639,11 @@ def tick(
     dry_run=False,
     auto_land=False,
     auto_dispatch=False,
+    observations=None,
+    output_dir=None,
+    package_src=None,
+    owner_only=None,
+    require_lane_meta=None,
 ):
     """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records.
 
@@ -1176,6 +1653,15 @@ def tick(
     `candidates` (rows naming each offered lane and the max_tokens cap it would run
     under), `dropped` (lanes filtered out with reasons and the two token numbers,
     budget_unfit foremost) and `score`.
+
+    With `require_lane_meta` (the board config's hosting/retention requirement,
+    {"residency": ["us", "eu"], "retention": ["zero"]}) the sidecar `lanes-meta.json` is
+    read once per tick beside `lanes_path` and each lane's record rides its view entry:
+    route drops every candidate whose record does not satisfy every listed key (unknown
+    never satisfies), reason `lane_policy` naming the key. A malformed sidecar refuses
+    the whole tick with the parse error — fail closed — and without the requirement the
+    sidecar is read (a malformed one still refuses) but satisfies nothing and nothing
+    changes.
 
     A packet task the plan node authored waits in the board's drafts list (`draft`) until
     the operator releases it or the pass runs with auto_dispatch; the plan task itself
@@ -1197,15 +1683,52 @@ def tick(
     and returns {"readiness": view, "plan": [...]} instead: the plan a real tick would
     follow, without creating an attempt, writing a task file or touching a packet
     directory.
+
+    With `observations` (the tick config's map, provider or lane id -> observation file
+    path) or `output_dir` (the collectors' capacity output directory the map defaults
+    to), a lane whose ledger record aged past its freshness window is re-read from its
+    provider's observation file through board_prepare's record builder (`package_src`
+    names the deployments/local directory to import it from) and re-classified before it
+    is refused; only an observation file that is itself stale refuses, naming its age.
+
+    With `owner_only` (the board config's path prefixes, `[]` by default) a packet task
+    whose declared files fall under one of them is never dispatched: the row names the
+    prefix that matched (`owner_only: <prefix>`), the task stays ready, and the digest
+    lists it under needs-you. That is the one autonomy wait the tick enforces itself
+    (docs/AUTONOMY.md); a dry run plans the refusal the real tick would make.
     """
     now = time.time() if now is None else now
     rows = {}
     attempts = []
     drafted = set(load_drafts(board_dir))
     view = lane_view(lanes, now)
+    # The policy sidecar is read once per tick beside lanes.json (brief L8); a malformed
+    # file raises here and refuses the whole pass — fail closed — whatever the board
+    # requires. Tagged lanes carry their record into route on the view, the way tier does.
+    lane_meta = load_lane_meta(lanes_path)
+    if lane_meta:
+        view = {
+            lane_id: dict(lane, lane_meta=dict(lane_meta[lane_id]))
+            if lane_id in lane_meta
+            else lane
+            for lane_id, lane in view.items()
+        }
     scorecard = ledger.scorecard()
     calibration = calibration_reports(ledger)
     readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
+    # A stale lane record is re-read from its provider's observation file before it is
+    # allowed to refuse work: the collectors' file is usually fresher than a record a
+    # pass-length-old board_prepare wrote (brief L1).
+    readiness, stale_files = refresh_stale_lanes(
+        ledger,
+        lanes,
+        readiness,
+        observation_paths(lanes, observations, output_dir),
+        now,
+        package_src=package_src,
+        scorecard=scorecard,
+        accounts_by_lane=accounts_by_lane,
+    )
     board = load_board(board_dir)
 
     def settle_attempt(index, lane_id, task_id, task, path, choice, packet_dir, admission):
@@ -1291,6 +1814,25 @@ def tick(
                         :300
                     ],
                 )
+                row = {"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"}
+                # M1: a hold the operator owes nothing for drafts its own fix packet —
+                # one plan task per (task, reason), whose id makes a second draft a
+                # no-op. Authored before the failover so a crash between the two still
+                # leaves the plan recorded.
+                reason = fix_reason(verdict, task["blocked_reason"], ledger_reason)
+                if reason:
+                    fix = author_fix_plan(
+                        board_dir,
+                        project_root,
+                        task,
+                        verdict,
+                        Path(packet_dir) / "attempts" / aid,
+                        reason,
+                        lanes,
+                        note=f"{task['blocked_reason']}; ledger reason: {ledger_reason}",
+                    )
+                    if fix and fix.get("authored"):
+                        row["fix"] = fix["plan"]
                 # J4: one retry on a different family, authored here where the failed
                 # family is known; the block reason above is what makes it eligible.
                 authored = author_failover(
@@ -1304,7 +1846,6 @@ def tick(
                     board,
                     texts=(verdict.get("reason"), verdict.get("refusal"), ledger_reason),
                 )
-                row = {"task": task_id, "lane": lane_id, "attempt": aid, "result": "held"}
                 if authored and authored.get("authored"):
                     row["failover"] = authored["task"]
                 rows[index] = row
@@ -1458,9 +1999,28 @@ def tick(
             # author the per-case reviews, wait for them to settle, then score and pass.
             # It is read before the ready gate because a waiting run sits in review_pending.
             rows[index] = step_calibration_run(
-                path, task, board_dir, project_root, ledger, packets_root, dry_run
+                path,
+                task,
+                board_dir,
+                project_root,
+                ledger,
+                packets_root,
+                dry_run,
+                lanes=lanes,
+                lanes_path=lanes_path,
+                accounts_by_lane=accounts_by_lane,
             )
             continue
+        if task["category"] == "packet" and task["state"] == "blocked":
+            # M1: a packet that settled blocked for a reason the operator owes nothing
+            # for drafts its fix packet. The settlement authors it; this recovers one a
+            # crashed tick never wrote, or one whose plan lane the operator configured
+            # afterwards. The deterministic plan id is the guard, so a task that already
+            # has its plan falls through to the failover hook below.
+            fix_note = recover_fix(board_dir, project_root, task, lanes, packets_root, dry_run)
+            if fix_note is not None:
+                rows[index] = {"task": task_id, "lane": None, "attempt": None, "result": fix_note}
+                continue
         if failover_candidate(task, board):
             # J4: a packet that settled with an exhaustion or transport reason is due one
             # different-family retry. A dry run names the pending swap without writing;
@@ -1491,6 +2051,15 @@ def tick(
                 ),
             }
             continue
+        if task["state"] == "dispatched":
+            # A task the previous pass marked `dispatched` but never settled — its runtime
+            # died, or the operator resolved the attempt without the board catching up —
+            # is stranded, since only `ready` tasks dispatch. Requeue the dead ones (L2);
+            # a live attempt and a terminal successful one are reported, not moved.
+            row = requeue_dead(path, task, ledger, dry_run)
+            if row is not None:
+                rows[index] = row
+            continue
         if task["state"] != "ready":
             continue
         if task["category"] == "verify_merge":
@@ -1512,6 +2081,20 @@ def tick(
             # auto_dispatch. The default is to draft, not to build.
             rows[index] = {"task": task_id, "lane": None, "attempt": None, "result": "draft"}
             continue
+        if task["category"] == "packet":
+            prefix = owner_only_prefix(task, owner_only)
+            if prefix is not None:
+                # The autonomy policy's one dispatch-time wait (brief 14 M3): a packet
+                # whose declared files fall under an owner-only prefix is the operator's
+                # to release. No attempt exists, nothing is spent, the task stays ready
+                # and the row carries the prefix that matched; the digest lists it.
+                rows[index] = {
+                    "task": task_id,
+                    "lane": None,
+                    "attempt": None,
+                    "result": "owner_only: " + prefix,
+                }
+                continue
         clash = shadowing_names(task)
         if clash:
             if not dry_run:
@@ -1598,6 +2181,9 @@ def tick(
                     # The budget decides the cap route fits the packet against; without it
                     # every task was measured against the unbudgeted 16 000-token cap.
                     "budget": task.get("budget"),
+                    # The board's hosting/retention requirement; route drops candidates
+                    # whose lanes-meta.json record does not satisfy it (lane_policy).
+                    "require_lane_meta": require_lane_meta,
                 },
                 lanes_view,
                 task_readiness,
@@ -1642,6 +2228,15 @@ def tick(
                 # Every remaining candidate is at its concurrency cap; say so instead of
                 # the generic no-ready-lane reason.
                 reason = "lane_busy"
+            else:
+                # A candidate refused on its observation file's age names the age, not the
+                # generic no-ready-lane reason (brief L1).
+                named = next(
+                    (stale_files[c["lane"]] for c in candidates if c["lane"] in stale_files),
+                    None,
+                )
+                if named:
+                    reason = named
             rows[index] = {
                 "task": task_id,
                 "lane": None,

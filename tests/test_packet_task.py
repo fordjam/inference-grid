@@ -19,7 +19,8 @@ import pytest
 
 from inference_grid.board import packet_task, runner
 from inference_grid.lanes import packet
-from inference_grid.ledger import Ledger
+from inference_grid.ledger import Ledger, attempts, tasks
+from sqlalchemy import select
 
 TRAILER = "Co-Authored-By: GLM-5.3-Flash <noreply@z.ai>"
 
@@ -123,6 +124,7 @@ def test_validate_board_task_routes_by_category():
     assert packet_task.validate_board_task(plain)["category"] == "pure_function"
     validated = packet_task.validate_board_task(make_packet_task())
     assert validated["spec"]["max_rounds"] == 3  # the default, filled in
+    assert validated["spec"]["idle_seconds"] == 900  # the idle watchdog's default window
     assert validated["spec"]["packet_id"] == "A1"
 
 
@@ -139,6 +141,9 @@ def test_validation_rejects_bad_packet_specs():
         ("base with a space", lambda t: t["spec"].update(base="main branch")),
         ("zero rounds", lambda t: t["spec"].update(max_rounds=0)),
         ("rounds as bool", lambda t: t["spec"].update(max_rounds=True)),
+        ("zero idle window", lambda t: t["spec"].update(idle_seconds=0)),
+        ("idle window as bool", lambda t: t["spec"].update(idle_seconds=True)),
+        ("idle window unbounded", lambda t: t["spec"].update(idle_seconds=3601)),
         ("empty gates", lambda t: t["spec"].update(gates=[])),
         ("gate without argv", lambda t: t["spec"].update(gates=[{"name": "x"}])),
         (
@@ -164,6 +169,63 @@ def test_cline_cli_runs_packets_as_fresh_sessions(tmp_path):
     assert isinstance(adapter, ClineAdapter)
     # no --id: a later round is a fresh session on the fix prompt
     assert adapter.resume("s1", "fix")[:2] == ["/x/cline", "fix"]
+
+
+def test_opencode_cli_runs_packets_as_resumed_sessions(tmp_path):
+    from inference_grid.lanes.packet import OpencodeAdapter
+
+    assert "opencode_cli" in packet_task.PACKET_KINDS and not packet_task.UNSUPPORTED_ADAPTERS
+    lane = {"model": "opencode/kimi-k3", "executable": "/x/opencode"}
+    adapter = packet_task.packet_adapter("opencode_cli", lane, tmp_path, tmp_path, "s")
+    assert isinstance(adapter, OpencodeAdapter)
+    first = adapter.first("go")
+    assert first[:2] == ["/x/opencode", "run"] and first[-1] == "go"
+    assert first[first.index("--model") + 1] == "opencode/kimi-k3"
+    assert first[first.index("--format") + 1] == "json"
+    assert first[first.index("--dir") + 1] == str(tmp_path)
+    # a fix round re-enters the session the first round's JSON stream named
+    resumed = adapter.resume("ses_1", "fix")
+    assert resumed[resumed.index("--session") + 1] == "ses_1"
+    stream = tmp_path / "recorded.jsonl"
+    stream.write_text('{"type":"step_start","sessionID":"ses_f6"}\n')
+    assert adapter.session_id(stream) == "ses_f6"
+    assert adapter.session_id(tmp_path / "absent.jsonl") is None
+
+
+def test_an_opencode_cli_lane_runs_the_loop_end_to_end(world, monkeypatch):
+    """The tick with an opencode_cli lane runs green. The operator's real deny-read
+    policy stays out of it: admission reads that file, and on the operator's machine it
+    names the opencode auth file — the round-2 gate caught this test refusing there."""
+    from inference_grid.lanes import sandbox
+
+    monkeypatch.setattr(sandbox, "deny_read_roots", lambda: ())
+    world["lanes"]["packet-cli"] = dict(world["lanes"]["packet-cli"], kind="opencode_cli")
+    world["lanes_path"].write_text(json.dumps({"lanes": world["lanes"]}))
+    results = tick(world)
+    assert [r["result"] for r in results] == ["passed"]
+    task = json.loads((world["board"] / "d1-packet.json").read_text())
+    assert task["state"] == "passed"
+    receipt = next(r["receipt"] for r in world["ledger"].status() if r["state"] == "completed")
+    assert receipt["verified_in_lane"] is True
+
+
+def test_a_deny_read_list_covering_the_opencode_auth_refuses_at_admission(world, monkeypatch):
+    """The one-shot lane's policy gate holds for packets too: the deny-read list covering
+    the CLI's auth file refuses before anything spawns, and the task stays ready."""
+    from inference_grid.lanes import sandbox
+
+    world["lanes"]["packet-cli"] = dict(world["lanes"]["packet-cli"], kind="opencode_cli")
+    world["lanes_path"].write_text(json.dumps({"lanes": world["lanes"]}))
+    monkeypatch.setattr(
+        sandbox,
+        "deny_read_roots",
+        lambda: [str(Path.home() / ".local/share/opencode/auth.json")],
+    )
+    results = tick(world)
+    assert results[0]["result"].startswith("refused: credential_denied_by_policy")
+    task = json.loads((world["board"] / "d1-packet.json").read_text())
+    assert task["state"] == "ready"
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
 
 
 @pytest.fixture
@@ -315,6 +377,37 @@ def test_tick_runs_the_packet_loop_and_fetches_the_branch(world):
     assert card == {("packet", 1, 1)}
 
 
+def test_the_attempt_wall_covers_the_gates_and_the_reentry_rounds(world, monkeypatch):
+    """The agent's budget is the agent's: the gates' timeouts and one minute of re-entry
+    per round ride on top of it, both in the ledger spec and in the loop's deadline."""
+    task_path = world["board"] / "d1-packet.json"
+    raw = json.loads(task_path.read_text())
+    raw["budget"]["wall_seconds"] = 3600
+    raw["spec"]["max_rounds"] = 3
+    raw["spec"]["gates"] = [
+        {"name": "one", "argv": [sys.executable, "-c", "print('ok')"], "timeout": 600},
+        {"name": "two", "argv": [sys.executable, "-c", "print('ok')"], "timeout": 600},
+        {"name": "three", "argv": [sys.executable, "-c", "print('ok')"], "timeout": 600},
+    ]
+    task_path.write_text(json.dumps(raw, indent=1) + "\n")
+    wall = {}
+    real_build_loop = packet.build_loop
+
+    def spy(*args, **kwargs):
+        wall["seconds"] = kwargs["wall_seconds"]
+        return real_build_loop(*args, **kwargs)
+
+    monkeypatch.setattr(packet_task, "build_loop", spy)
+    results = tick(world)
+    assert [r["result"] for r in results] == ["passed"]
+    assert wall["seconds"] == 3600 + 3 * 600 + 60 * 3
+    aid = next(r["id"] for r in world["ledger"].status() if r["state"] == "completed")
+    with world["ledger"].engine.connect() as con:
+        ledger_task = con.execute(select(attempts.c.task).where(attempts.c.id == aid)).scalar_one()
+        spec = con.execute(select(tasks).where(tasks.c.id == ledger_task)).mappings().one()["spec"]
+    assert spec["timeout"] == 3600 + 1800 + 180
+
+
 def test_a_short_volume_holds_the_attempt_before_any_clone(world, monkeypatch):
     # The guard counts the checkout, not just the floor: 5 GiB free is enough for the
     # floor alone, but this repo's tree plus the floor is more than the volume holds.
@@ -443,6 +536,51 @@ def test_the_commit_gate_and_the_prompt_carry_the_lanes_own_trailer(world):
     message = git(world["project"], "log", "-1", "--format=%B", "packet/d1-packet")
     assert "Co-Authored-By: Deepseek-V4.1-Flash <noreply@deepseek.com>" in message
     assert "GLM" not in message
+
+
+def test_the_task_specs_idle_window_reaches_the_loop(world, monkeypatch):
+    """The idle watchdog's window is a task-spec knob, not a harness constant."""
+    task_path = world["board"] / "d1-packet.json"
+    raw = json.loads(task_path.read_text())
+    raw["spec"]["idle_seconds"] = 1200
+    task_path.write_text(json.dumps(raw, indent=1) + "\n")
+    seen = {}
+    real = packet_task.build_loop
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(packet_task, "build_loop", spy)
+    results = tick(world)
+    assert [r["result"] for r in results] == ["passed"]
+    assert seen["idle_seconds"] == 1200
+
+
+def test_an_owner_only_packet_is_refused_with_the_prefix(world):
+    """Brief 14 M3: a packet whose declared files fall under a board owner_only prefix
+    waits for the operator — no lane, no attempt, nothing spent, the task stays ready
+    and the tick row names the prefix that matched."""
+    results = tick(world, owner_only=["docs/reports"])
+    assert [r["result"] for r in results] == ["owner_only: docs/reports"]
+    assert results[0]["lane"] is None and results[0]["attempt"] is None
+    task = json.loads((world["board"] / "d1-packet.json").read_text())
+    assert task["state"] == "ready" and task["blocked_reason"] is None
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
+
+
+def test_an_owner_only_refusal_is_planned_dry(world):
+    plan = tick(world, dry_run=True, owner_only=["docs"])["plan"]
+    assert [row["reason"] for row in plan] == ["owner_only: docs"]
+
+
+def test_a_packet_outside_the_owner_only_prefixes_still_dispatches(world):
+    """The gate is the prefix, not the flag: a sibling directory outside every prefix
+    dispatches exactly as before."""
+    results = tick(world, owner_only=["docs/needs-you"])
+    assert [r["result"] for r in results] == ["passed"]
+    task = json.loads((world["board"] / "d1-packet.json").read_text())
+    assert task["state"] == "passed" and task["blocked_reason"] is None
 
 
 def test_a_pending_clone_elsewhere_counts_against_the_guard(world, monkeypatch, tmp_path):

@@ -38,6 +38,7 @@ def _inbox_awaiting(project_root, board_rows):
 def digest(ledger, boards_dir, now=None):
     """The one-page markdown digest over every board config in boards_dir."""
     now = time.time() if now is None else now
+    from .board.policy import owner_only_prefix
     from .cli import board_status
     from .tick_all import ordered_configs
 
@@ -49,8 +50,10 @@ def digest(ledger, boards_dir, now=None):
     ]
     suggestions = []
     inbox = []
+    owner_only_rows = []
     seen = set()
-    for config in ordered_configs(boards_dir):
+    configs = ordered_configs(boards_dir)
+    for config in configs:
         name = Path(config["project_root"]).name
         # One entry per board name: a config directory holding duplicates (two files for
         # one board) would otherwise list the board twice with the same counts.
@@ -60,16 +63,30 @@ def digest(ledger, boards_dir, now=None):
         rows = board_status(ledger, config["board_dir"])
         counts = {}
         oldest_ready = None
+        prefixes = config.get("owner_only")
         for row in rows:
             counts[row["state"]] = counts.get(row["state"], 0) + 1
         for path in sorted(Path(config["board_dir"]).glob("*.json")):
             import json as jsonlib
 
-            task = jsonlib.loads(path.read_text())
-            if task["state"] == "ready":
-                age = (now - path.stat().st_mtime) / 86400
-                if oldest_ready is None or age > oldest_ready[0]:
-                    oldest_ready = (age, task["id"])
+            # The plan node's drafts sidecar (and any other board-owned state) is not a
+            # task file; an unreadable one is skipped, never fatal to the digest.
+            try:
+                task = jsonlib.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(task, dict) or task.get("state") != "ready":
+                continue
+            if prefixes and task.get("category") == "packet":
+                # The autonomy policy's dispatch-time wait (brief 14 M3): a packet the
+                # runner would refuse is listed before the operator wonders why it
+                # never moves, with the prefix that matched.
+                prefix = owner_only_prefix(task, prefixes)
+                if prefix is not None:
+                    owner_only_rows.append((name, task.get("id") or path.stem, prefix))
+            age = (now - path.stat().st_mtime) / 86400
+            if oldest_ready is None or age > oldest_ready[0]:
+                oldest_ready = (age, task.get("id") or path.stem)
         lines.append(f"## Board {name}")
         lines.append("")
         lines.append(
@@ -119,4 +136,27 @@ def digest(ledger, boards_dir, now=None):
         lines.append(f"| {account} | {entry['attempts']} | {entry['held']} | {entry['refused']} |")
     if not by_account:
         lines.append("| (no attempts) | 0 | 0 | 0 |")
+    from .board.evals import EVAL_EVERY_DAYS, eval_markdown, eval_summary, lanes_from_configs
+
+    lanes = lanes_from_configs(configs)
+    summary = eval_summary(ledger, lanes, now=now) if lanes else None
+    lines += ["", "## Evals", ""]
+    if summary is None:
+        lines.append("- no lanes configured (a board config names the lanes file)")
+    else:
+        lines += eval_markdown(summary)
+    lines += ["", "## Needs you", ""]
+    for board_name, task_id, prefix in owner_only_rows:
+        lines.append(
+            f"- owner-only: `{task_id}` — a declared file is under prefix `{prefix}`"
+            f" (board {board_name})"
+        )
+    if summary is not None and summary["needs_you"]:
+        for row in summary["needs_you"]:
+            lines.append(f"- eval coverage: `{row['lane']}` — {row['reason']}")
+    elif not owner_only_rows:
+        if summary is not None:
+            lines.append(f"- none; every lane has an eval result inside {EVAL_EVERY_DAYS} days")
+        else:
+            lines.append("- none")
     return "\n".join(lines) + "\n"

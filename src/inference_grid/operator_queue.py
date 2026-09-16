@@ -5,9 +5,10 @@ Two lists for the capacity dashboard overlay:
 - `operator` — every item waiting on a human: a board task `blocked` whose reason names
   an operator decision (`operator`, `owner`, `resolve with evidence`; `superseded`
   excluded), a ledger attempt `held` for resolution, an alarm currently raised in the
-  watch state file (packet A1's `watch` CLI; absent until that packet lands), and every
-  row of the operator's hand-kept `owner-decisions.json`. Rows are
-  `{kind, id, reason, since}`.
+  watch state file (packet A1's `watch` CLI; absent until that packet lands), a packet
+  the plan node drafted and nobody has released (`draft`, brief 20 M1's fix packets
+  among them), and every row of the operator's hand-kept `owner-decisions.json`. Rows
+  are `{kind, id, reason, since}`.
 - `accepted_work` — per subscription per ISO week, from the ledger: attempts completed
   and accepted (including operator-recorded external work), and reviews whose rejected
   verdict named a real finding. Rows are `{week, account, accepted, attempts}`.
@@ -27,8 +28,13 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from .lanes.brief import PACKET_HEADING
 from .ledger import attempts as attempts_table
 from .ledger import events as events_table
+
+# The plan node's drafts list (`board/plan_task.py`): packet task ids it authored and
+# nobody has released yet.
+DRAFTS_FILE = "drafts.json"
 
 # A blocked reason needs the operator when it names one of these (case-insensitive),
 # unless it says the block was superseded.
@@ -103,6 +109,58 @@ def _held_attempt_rows(ledger):
     return rows
 
 
+def _drafted_title(board, packet_id):
+    """The drafted packet's heading text from its brief, else the task id.
+
+    The brief is project-relative and the board sits at `<project>/grid/board` (the same
+    layout `board/runner.py` resolves a board through), so the project root is the
+    board's grandparent. An unreadable brief is the id — never an invented title.
+    """
+    try:
+        task = json.loads((board / (packet_id + ".json")).read_text())
+        brief = (board.parent.parent / task["brief"]).read_text()
+    except (OSError, KeyError, TypeError, ValueError):
+        return packet_id
+    match = PACKET_HEADING.search(brief)
+    return match.group(2).strip() if match else packet_id
+
+
+def _draft_rows(board_dirs):
+    """Packets the plan node drafted and the operator has not released.
+
+    A draft is valid `ready` work the board deliberately holds out of dispatch until the
+    operator releases it or the board sets `auto_dispatch` (brief J1); brief 20 M1's fix
+    packets arrive here on their own, so they need to be visible where the operator looks.
+    """
+    rows = []
+    for board_dir in board_dirs:
+        board = Path(board_dir)
+        try:
+            drafts = json.loads((board / DRAFTS_FILE).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(drafts, dict):
+            drafts = drafts.get("drafts")
+        if not isinstance(drafts, list):
+            continue
+        try:
+            since = (board / DRAFTS_FILE).stat().st_mtime
+        except OSError:
+            since = None
+        for packet_id in drafts:
+            if not isinstance(packet_id, str) or not packet_id:
+                continue
+            rows.append(
+                {
+                    "kind": "draft",
+                    "id": packet_id,
+                    "reason": _drafted_title(board, packet_id),
+                    "since": _iso(since),
+                }
+            )
+    return rows
+
+
 def _alarm_rows(watch_state):
     """Alarms currently raised in A1's state file.
 
@@ -170,6 +228,7 @@ def operator_rows(ledger, board_dirs=(), watch_state=None, owner_decisions=None)
     """Every item that needs the operator, as `{kind, id, reason, since}` rows."""
     rows = [
         *_blocked_task_rows(board_dirs),
+        *_draft_rows(board_dirs),
         *_held_attempt_rows(ledger),
         *_alarm_rows(watch_state),
         *_decision_rows(owner_decisions),

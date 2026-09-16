@@ -22,6 +22,11 @@ def board_tick(
     boards=None,
     auto_land=False,
     auto_dispatch=False,
+    observations=None,
+    output_dir=None,
+    package_src=None,
+    owner_only=None,
+    require_lane_meta=None,
 ):
     from .board.runner import tick as board_run
     from .lanes.runner import load_lanes
@@ -47,6 +52,11 @@ def board_tick(
                             "packets_root",
                             "auto_land",
                             "auto_dispatch",
+                            "observations",
+                            "output_dir",
+                            "package_src",
+                            "owner_only",
+                            "require_lane_meta",
                         )
                         if key in config
                     },
@@ -67,6 +77,11 @@ def board_tick(
         dry_run=dry_run,
         auto_land=auto_land,
         auto_dispatch=auto_dispatch,
+        observations=observations,
+        output_dir=output_dir,
+        package_src=package_src,
+        owner_only=owner_only,
+        require_lane_meta=require_lane_meta,
     )
 
 
@@ -168,6 +183,7 @@ def main():
             "board-init",
             "calibrate",
             "calibration-score",
+            "evals",
             "tick-all",
             "digest",
             "boards",
@@ -216,6 +232,7 @@ def main():
             "board-init",
             "calibrate",
             "calibration-score",
+            "evals",
             "defer",
             "cooldown",
             "watch",
@@ -276,6 +293,7 @@ def main():
         "board-new": lambda **kw: board_new(**kw),
         "calibrate": lambda **kw: calibrate(**kw),
         "calibration-score": lambda **kw: calibration_score(ledger, **kw),
+        "evals": lambda **kw: evals(ledger, **kw),
         "board-status": lambda **kw: board_status(ledger, **kw),
         "lane-init": lambda **kw: lane_init(**kw),
         "board-init": lambda **kw: board_init(**kw),
@@ -326,6 +344,30 @@ def calibration_score(ledger, board_dir, run_id, packets_root, record=False):
     from .board.calibration import score_calibration
 
     return score_calibration(board_dir, run_id, packets_root, record=record, ledger=ledger)
+
+
+def evals(ledger, corpus_dir, lanes, board_dir, project_root, every_days=None):
+    """Author the calibration_run tasks every lane's stale evals are due.
+
+    `lanes` is the operator's lanes.json path (the lane set the freshness is measured
+    against); `project_root` is the board's project, where the runner stages a case's
+    review task — the authoring itself writes under `board_dir` and its grid root. The
+    command is idempotent per day and per (lane, case), so an hourly launchd job is safe.
+    """
+    from .board.evals import EVAL_EVERY_DAYS, author_evals
+    from .lanes.runner import load_lanes
+
+    if not corpus_dir or not board_dir or not project_root or not lanes:
+        raise ValueError("evals needs corpus_dir, lanes, board_dir and project_root")
+    lane_specs = load_lanes(lanes) if isinstance(lanes, (str, os.PathLike)) else lanes
+    authored = author_evals(
+        board_dir,
+        corpus_dir,
+        lane_specs,
+        ledger,
+        every_days=every_days or EVAL_EVERY_DAYS,
+    )
+    return {"project_root": str(project_root), "authored": authored}
 
 
 def lane_init(lane_id, board_dir, project_root=None):

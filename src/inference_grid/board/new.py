@@ -281,6 +281,14 @@ def lane_init(board_dir, project_root, lane_id):
         "task": str(board_dir / (task_id + ".json")),
         "brief": str(project_root / brief_rel),
         "test": str(canary_test),
+        # Lane facts that are policy rather than transport — hosting residency and
+        # retention — live in the operator's sidecar beside lanes.json (docs/LANES.md);
+        # a board tick config may require them via `require_lane_meta`.
+        "lane_meta": (
+            "policy facts (residency: us|eu|unknown, retention: zero|days|unknown, "
+            'retention_source) live in "lanes-meta.json" beside your lanes.json as '
+            '{"lanes": {"<lane id>": {...}}}; lanes the file does not name read unknown'
+        ),
         "dry_run_command": "inference-grid board-tick --json '" + json.dumps(dry_run) + "'",
         "tick_command": "inference-grid board-tick --json '"
         + json.dumps({**dry_run, "dry_run": False})

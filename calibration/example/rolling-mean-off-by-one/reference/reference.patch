@@ -1,0 +1,12 @@
+diff --git a/src/metrics/rolling.py b/src/metrics/rolling.py
+--- a/src/metrics/rolling.py
++++ b/src/metrics/rolling.py
+@@ -14,7 +14,7 @@
+     total = 0
+     for index, value in enumerate(values):
+         total += value
+-        if index > window:
++        if index >= window:
+             total -= values[index - window]
+         count = min(index + 1, window)
+         means.append(total / count)

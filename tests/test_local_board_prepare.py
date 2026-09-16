@@ -250,6 +250,44 @@ class ConfigureObservationTests(unittest.TestCase):
         self.assertEqual(set(ledger.lanes), {"goat", "goat-mini", "cline"})
 
 
+class ObservationRecordTests(unittest.TestCase):
+    """The record builder the board runner re-reads observation files through (brief L1)."""
+
+    def test_the_builder_counts_every_numeric_window_when_no_unit_map_is_given(self):
+        record, observed, used = prepare.observation_record({}, GOAT_OBSERVATION, None, 900)
+        self.assertEqual(used, {"five_hour": 25.0, "weekly": 40.0, "monthly": 50.0})
+        self.assertEqual(record["used_percent_max"], 50.0)
+        self.assertEqual(record["quota_observed_at"], NOW - 60)
+        self.assertEqual(record["quota_freshness_seconds"], 900)
+        self.assertEqual(record["admission_limit_percent"], 80)
+        self.assertEqual(record["qualification"], "qualified")
+        self.assertEqual(observed, NOW - 60)
+
+    def test_the_builder_flags_a_non_ok_observation_unobserved(self):
+        record, observed, used = prepare.observation_record(
+            {}, dict(GOAT_OBSERVATION, status="unknown"), None, 900
+        )
+        self.assertIsNone(record["quota_observed_at"])
+        self.assertEqual(observed, NOW - 60)
+        self.assertEqual(used, {"five_hour": 25.0, "weekly": 40.0, "monthly": 50.0})
+
+    def test_the_builder_without_windows_yields_an_unobserved_record(self):
+        record, observed, used = prepare.observation_record(
+            {}, {"observed_at": iso(NOW), "status": "ok"}, None, 900
+        )
+        self.assertIsNone(record["quota_observed_at"])
+        self.assertIsNone(record["used_percent_max"])
+        self.assertEqual(used, {})
+        self.assertEqual(observed, NOW)
+
+    def test_the_builder_treats_a_missing_observation_as_unobserved(self):
+        record, observed, used = prepare.observation_record({}, None, None, 900)
+        self.assertIsNone(record["quota_observed_at"])
+        self.assertIsNone(record["used_percent_max"])
+        self.assertEqual(used, {})
+        self.assertIsNone(observed)
+
+
 if __name__ == "__main__":
     unittest.main()
 

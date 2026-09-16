@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 import re
@@ -12,6 +13,9 @@ import pytest
 
 from inference_grid.board import runner
 from inference_grid.ledger import Ledger, Refused
+
+# The deployments/local directory the tick imports board_prepare's record builder from.
+DEPLOY = Path(__file__).resolve().parents[1] / "deployments" / "local"
 
 FAKE_ADAPTER = """
 import hashlib, json, sys
@@ -188,6 +192,133 @@ def ready_record(now):
         blocked_until=None,
         blocker=None,
     )
+
+
+def stale_record(now, age=2000):
+    """A lane record past its freshness window: what a pass-length-old board_prepare left."""
+    return dict(ready_record(now), quota_observed_at=now - age)
+
+
+def stored_lane_record(ledger, lane_id="go"):
+    from inference_grid.ledger import lanes as lane_records, select
+
+    with ledger.engine.connect() as con:
+        return (
+            con.execute(select(lane_records).where(lane_records.c.provider == lane_id))
+            .mappings()
+            .one()["record"]
+        )
+
+
+def observation_file(directory, now, age=60, name="go-observation.json"):
+    """A collector-shaped observation file, `age` s old, in `directory`."""
+    obs = {
+        "provider": "opencode",
+        "observed_at": datetime.datetime.fromtimestamp(
+            now - age, datetime.timezone.utc
+        ).isoformat(),
+        "status": "ok",
+        "windows": [
+            {"id": "five_hour", "used_percent": 25.0, "resets_at": None},
+            {"id": "weekly", "used_percent": 40.0, "resets_at": None},
+        ],
+    }
+    path = Path(directory) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obs))
+    return path
+
+
+def tick_with_observations(world, now, **kwargs):
+    return runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+        **kwargs,
+    )
+
+
+# An exact-second clock: the observation file's age in the refusal reason is integral.
+OBS_NOW = 1_000_000.0
+
+
+def test_a_stale_lane_record_with_a_fresh_observation_file_admits(world, monkeypatch, tmp_path):
+    # The ledger record ages with board_prepare's pass; the collector's file behind it is
+    # still fresh. The tick re-reads the file through board_prepare's record builder,
+    # records the fresh lane record and admits instead of refusing.
+    fake_worker(monkeypatch)
+    (world["board"] / "copy-wrong.json").unlink()
+    world["ledger"].record_lane("go", stale_record(OBS_NOW))
+    obs = observation_file(tmp_path / "observations", OBS_NOW)
+    results = tick_with_observations(
+        world, OBS_NOW, observations={"go": str(obs)}, package_src=str(DEPLOY)
+    )
+    assert results[0]["result"] == "passed"
+    attempts = [r for r in world["ledger"].status() if r["account"] == world["account"]]
+    assert len(attempts) == 1 and attempts[0]["state"] == "completed"
+    record = stored_lane_record(world["ledger"])
+    assert record["quota_observed_at"] == pytest.approx(OBS_NOW - 60)
+    assert record["quota_freshness_seconds"] == 900
+    assert record["used_percent_max"] == 40.0
+    view = runner.readiness_view(world["ledger"], world["lanes"], OBS_NOW, {"go": world["account"]})
+    assert view["go"]["state"] == "ready"
+
+
+def test_the_observation_paths_default_to_the_capacity_output_dir(world, monkeypatch, tmp_path):
+    # Without an explicit map, every provider's file is read from the collectors' own
+    # convention: <output_dir>/<provider>-observation.json.
+    fake_worker(monkeypatch)
+    (world["board"] / "copy-wrong.json").unlink()
+    world["ledger"].record_lane("go", stale_record(OBS_NOW))
+    out = tmp_path / "capacity"
+    observation_file(out, OBS_NOW, name="opencode-observation.json")
+    results = tick_with_observations(world, OBS_NOW, output_dir=str(out), package_src=str(DEPLOY))
+    assert results[0]["result"] == "passed"
+    assert stored_lane_record(world["ledger"])["quota_observed_at"] == pytest.approx(OBS_NOW - 60)
+
+
+def test_a_stale_observation_file_refuses_naming_the_age(world, tmp_path):
+    # The re-read cannot save a lane whose file is itself past the window: refused, with
+    # the file's age in the reason, in the rows and in the dry run's plan.
+    (world["board"] / "copy-wrong.json").unlink()
+    world["ledger"].record_lane("go", stale_record(OBS_NOW))
+    obs = observation_file(tmp_path / "observations", OBS_NOW, age=2000)
+    results = tick_with_observations(
+        world, OBS_NOW, observations={"go": str(obs)}, package_src=str(DEPLOY)
+    )
+    expected = "quota stale: observation file 2000s old (freshness window 900s)"
+    assert results[0]["result"] == expected
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
+    assert json.loads((world["board"] / "copy-ok.json").read_text())["state"] == "ready"
+    # The ledger record keeps the stale reading — the file never became evidence.
+    assert stored_lane_record(world["ledger"])["quota_observed_at"] == pytest.approx(OBS_NOW - 2000)
+    plan = tick_with_observations(
+        world, OBS_NOW, dry_run=True, observations={"go": str(obs)}, package_src=str(DEPLOY)
+    )
+    assert plan["plan"][0]["reason"] == expected
+    assert plan["readiness"]["go"]["reason"] == expected
+
+
+def test_a_missing_observation_file_behaves_as_today(world, tmp_path):
+    # No file, no re-read: the stale record refuses as it always did, nothing is written.
+    world["ledger"].record_lane("go", stale_record(OBS_NOW))
+    results = tick_with_observations(
+        world,
+        OBS_NOW,
+        observations={"go": str(tmp_path / "absent.json")},
+        package_src=str(DEPLOY),
+    )
+    assert {r["task"]: r["result"] for r in results} == {
+        "copy-ok": "no_ready_lane",
+        "copy-wrong": "no_ready_lane",
+    }
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
+    assert stored_lane_record(world["ledger"])["quota_observed_at"] == pytest.approx(OBS_NOW - 2000)
 
 
 def test_tick_without_lane_record_dispatches_nothing(world):
@@ -981,6 +1112,66 @@ def seed_active_attempt(world, task_id, alias=None):
     )
 
 
+def dispatched_task(world, tid):
+    """Rewrite one board task file into the `dispatched` state a crashed pass leaves."""
+    path = world["board"] / (tid + ".json")
+    task = json.loads(path.read_text())
+    task["state"] = "dispatched"
+    path.write_text(json.dumps(task, indent=1) + "\n")
+    return path
+
+
+def seed_attempt(world, board_task_id, alias=None):
+    """Submit and claim one attempt whose ledger id is `<board id>-<stamp>-<random>`.
+
+    The shape `admit` writes, so the runner finds it as the board task's own attempt;
+    the attempt is left `queued` (ACTIVE) unless the caller settles it.
+    """
+    from inference_grid.ledger import digest
+
+    ledger_task = board_task_id + "-20260101T000000-" + uuid.uuid4().hex[:6]
+    spec = {
+        "authorized": True,
+        "model": "glm-5.3-flash",
+        "family": "glm",
+        "argv": ["/usr/bin/true"],
+        "workspace": str(world["packets"] / (board_task_id + "-ws")),
+        "timeout": 60,
+        "output_bytes": 1000,
+        "inputs": {},
+        "manifest_sha256": digest({}),
+    }
+    world["ledger"].submit(ledger_task, "project", spec)
+    aid, generation = world["ledger"].claim(
+        ledger_task, alias or world["account"], {"five_hour": 0.01, "weekly": 0.01}
+    )
+    return aid, generation, ledger_task
+
+
+def seed_dead_attempt(world, board_task_id, outcome="consumed", alias=None):
+    """A terminal unsuccessful attempt for a board task (`consumed` → failed, released → abandoned)."""
+    aid, generation, ledger_task = seed_attempt(world, board_task_id, alias=alias)
+    world["ledger"].start(aid, generation)
+    world["ledger"].hold(aid, "runtime died")
+    world["ledger"].resolve(aid, outcome, "the runtime died", "test operator")
+    return aid, ledger_task
+
+
+def requeue_events(ledger):
+    """The ledger's `requeued` events, oldest first."""
+    from inference_grid.ledger import events as event_records, select
+
+    with ledger.engine.connect() as con:
+        return [
+            dict(r)
+            for r in con.execute(
+                select(event_records)
+                .where(event_records.c.kind == "requeued")
+                .order_by(event_records.c.at)
+            ).mappings()
+        ]
+
+
 def test_busy_lane_reports_lane_busy_and_skips_dispatch(world):
     seed_active_attempt(world, "seed-1")
     now = time.time()
@@ -1207,6 +1398,116 @@ def test_a_held_attempt_makes_the_lane_busy(world):
         "copy-wrong": "lane_busy",
     }
     assert len([r for r in world["ledger"].status() if r["account"] == world["account"]]) == 1
+
+
+@pytest.mark.parametrize(
+    "outcome, state",
+    [("consumed", "failed"), ("released", "abandoned")],
+    ids=["failed", "abandoned"],
+)
+def test_a_dispatched_task_with_a_dead_attempt_is_requeued(world, monkeypatch, outcome, state):
+    # The runtime died between `dispatched` and settlement: `tick` would skip the task for
+    # ever. The pass must return it to ready with a ledger event, and still dispatch the
+    # board's other ready task on the same tick.
+    dispatched_task(world, "copy-ok")
+    aid, ledger_task = seed_dead_attempt(world, "copy-ok", outcome=outcome)
+    fake_worker(monkeypatch)  # the sandbox denies the real adapter's /bin/ps; the seam is faked
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = run_tick(world, now)
+    by_task = {r["task"]: r for r in results}
+    assert by_task["copy-ok"]["result"] == "requeued"
+    assert by_task["copy-ok"]["attempt"] == aid
+    assert by_task["copy-wrong"]["result"] == "passed"  # dispatched on the same tick
+    assert json.loads((world["board"] / "copy-ok.json").read_text())["state"] == "ready"
+    events = requeue_events(world["ledger"])
+    assert len(events) == 1
+    assert events[0]["attempt"] == aid
+    assert events[0]["detail"] == {
+        "task": "copy-ok",
+        "ledger_task": ledger_task,
+        "reason": "newest attempt " + state,
+    }
+
+
+def test_a_live_attempt_leaves_the_dispatched_task_alone(world):
+    # A queued (ACTIVE) attempt already holds the task: nothing to requeue, nothing moved.
+    dispatched_task(world, "copy-ok")
+    seed_attempt(world, "copy-ok")
+    (world["board"] / "copy-wrong.json").unlink()
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = run_tick(world, now)
+    assert results == []
+    assert json.loads((world["board"] / "copy-ok.json").read_text())["state"] == "dispatched"
+    assert requeue_events(world["ledger"]) == []
+
+
+def test_a_terminal_successful_attempt_is_reported_not_touched(world):
+    # The attempt settled successful but the board never caught up: report it, leave it.
+    from inference_grid.ledger import digest
+
+    dispatched_task(world, "copy-ok")
+    aid, generation, _ = seed_attempt(world, "copy-ok")
+    world["ledger"].start(aid, generation)
+    world["ledger"].finish(
+        aid,
+        generation,
+        {
+            "status": "completed",
+            "finish_reason": "stop",
+            "actual_model": "glm-5.3-flash",
+            "manifest_sha256": digest({}),
+            "artifacts": [{"path": "mod2.py", "sha256": "a" * 64}],
+        },
+    )
+    (world["board"] / "copy-wrong.json").unlink()
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = run_tick(world, now)
+    assert results == [
+        {
+            "task": "copy-ok",
+            "lane": None,
+            "attempt": aid,
+            "result": "dispatched: attempt completed",
+        }
+    ]
+    assert json.loads((world["board"] / "copy-ok.json").read_text())["state"] == "dispatched"
+    assert requeue_events(world["ledger"]) == []
+
+
+def test_a_dry_run_reports_the_requeue_and_changes_nothing(world):
+    dispatched_task(world, "copy-ok")
+    aid, _ = seed_dead_attempt(world, "copy-ok")
+    (world["board"] / "copy-wrong.json").unlink()
+    before = (world["board"] / "copy-ok.json").read_bytes()
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    plan = runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+        dry_run=True,
+    )
+    assert plan["plan"] == [
+        {
+            "task": "copy-ok",
+            "lane": None,
+            "reason": "requeued",
+            "candidates": [],
+            "dropped": [],
+            "score": None,
+        }
+    ]
+    assert (world["board"] / "copy-ok.json").read_bytes() == before
+    assert requeue_events(world["ledger"]) == []
+    assert [r["id"] for r in world["ledger"].status() if r["account"] == world["account"]] == [aid]
 
 
 def write_link(board, source_id, **fields):

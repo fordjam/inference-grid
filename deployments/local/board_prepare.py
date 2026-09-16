@@ -144,6 +144,48 @@ def _read_observation(config, key, default):
         return None
 
 
+def observation_record(config, obs, window_units, valid):
+    """One observation file -> (lane record, observed, used): the builder configure_observation uses.
+
+    Shared with the board runner, which re-reads a provider's observation file at admission
+    time (brief L1) instead of copying this: one observation shape, one policy. With
+    ``window_units=None`` every window carrying a numeric ``used_percent`` counts. The
+    record's ``quota_observed_at`` is None when the file is missing, not ok, or carries no
+    counted window; ``observed`` is the file's own timestamp, the freshness test's other
+    operand; ``used`` is the per-window used-percent map the account's remaining units
+    come from.
+    """
+    observed = _ts(obs["observed_at"]) if obs else None
+    if window_units is None:
+        used = {
+            w["id"]: w["used_percent"]
+            for w in (obs or {}).get("windows", [])
+            if isinstance(w.get("used_percent"), (int, float))
+            and not isinstance(w["used_percent"], bool)
+        }
+    else:
+        used = {
+            w["id"]: w["used_percent"]
+            for w in (obs or {}).get("windows", [])
+            if w.get("id") in window_units
+            and isinstance(w["used_percent"], (int, float))
+            and not isinstance(w["used_percent"], bool)
+        }
+    ok = obs is not None and obs.get("status") == "ok" and used
+    record = {
+        "auth": "ok",
+        "quota_observed_at": observed if ok else None,
+        "quota_freshness_seconds": valid,
+        "used_percent_max": float(max(used.values())) if used else None,
+        "admission_limit_percent": admission_limit(config),
+        "cooldown_until": None,
+        "qualification": "qualified",
+        "blocked_until": None,
+        "blocker": None,
+    }
+    return record, observed, used
+
+
 def configure_observation(
     config, ledger, account, obs, window_units, valid, lanes_config, now, capacity=1
 ):
@@ -156,15 +198,8 @@ def configure_observation(
         return
     lane_ids = [entry["lane"] for entry in lanes_config]
     models = list(dict.fromkeys(entry["model"] for entry in lanes_config))
-    observed = _ts(obs["observed_at"]) if obs else None
-    used = {
-        w["id"]: w["used_percent"]
-        for w in (obs or {}).get("windows", [])
-        if w.get("id") in window_units
-        and isinstance(w["used_percent"], (int, float))
-        and not isinstance(w["used_percent"], bool)
-    }
-    ok = obs is not None and obs.get("status") == "ok" and used
+    record, observed, used = observation_record(config, obs, window_units, valid)
+    ok = record["quota_observed_at"] is not None
     if ok and observed + valid > now:
         remaining = {w: window_units[w] * (100 - used[w]) / 100 for w in used}
         try:
@@ -179,17 +214,6 @@ def configure_observation(
             )
         except Refused as exc:
             print(account, exc)
-    record = {
-        "auth": "ok",
-        "quota_observed_at": observed if ok else None,
-        "quota_freshness_seconds": valid,
-        "used_percent_max": float(max(used.values())) if used else None,
-        "admission_limit_percent": admission_limit(config),
-        "cooldown_until": None,
-        "qualification": "qualified",
-        "blocked_until": None,
-        "blocker": None,
-    }
     for lane in lane_ids:
         print(lane, ledger.record_lane(lane, dict(record, provider=lane))["state"])
 

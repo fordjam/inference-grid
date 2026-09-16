@@ -1,5 +1,6 @@
 """The versioned local deployment layer: collectors, the Claude poller, the scheduler loop,
-the board tick loop and the installer, all against fixture payloads and injected network.
+the quota feed, the board tick loop and the installer, all against fixture payloads and
+injected network.
 
 No test opens a socket: every network call goes through an injected ``fetch`` (or a fake
 status command), and every credential path points at a file in a temporary directory.
@@ -37,10 +38,12 @@ goat = load("collect_goat")
 cline = load("collect_cline")
 claude = load("refresh_claude")
 overlay = load("overlay_build")
+feed = load("capacity_feed")
 loop = load("capacity_loop")
 tick_boards = load("tick_boards")
 upload = load("upload")
 installer = load("install")
+evals_run = load("evals_run")
 
 
 def iso_ms(ms):
@@ -964,6 +967,95 @@ class OverlayBuildTests(unittest.TestCase):
         self.assertEqual([a["provider"] for a in accounts], ["claude"])
 
 
+def feed_account(provider, used):
+    """One overlay account entry, the shape overlay_build writes per provider."""
+    return {
+        "provider": provider,
+        "observed_at": "2026-09-16T03:00:00+00:00",
+        "status": "ok",
+        "windows": [
+            {"id": "five_hour", "used_percent": used, "resets_at": "2026-09-16T07:00:00+00:00"},
+            {"id": "weekly", "used_percent": used / 2, "resets_at": "2026-09-19T00:00:00+00:00"},
+        ],
+    }
+
+
+FEED_OVERLAY = {
+    "accounts": [
+        feed_account("zai", 12.5),
+        feed_account("codex", 11.25),
+        feed_account("opencode", 30.0),
+        feed_account("command-code", 35.7),
+        feed_account("clinepass", 12.5),
+        feed_account("claude", 33.0),
+    ],
+    "attempts": [
+        {
+            "task": "packet-l4",
+            "provider": "zai",
+            "model": "glm-5.3-flash via zcode",
+            "status": "running",
+            "at": "2026-09-16T03:10:00+00:00",
+        }
+    ],
+}
+
+
+def serve_feed(overlay_path):
+    """Handler.do_GET over a fake connection: (status line, headers, body) with no socket."""
+    handler = feed.Handler.__new__(feed.Handler)
+    handler.request_version = "HTTP/1.1"
+    handler.requestline = "GET /api/usage HTTP/1.1"
+    handler.overlay_path = overlay_path
+    handler.wfile = io.BytesIO()
+    handler.do_GET()
+    head, _, body = handler.wfile.getvalue().partition(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    headers = dict(line.decode().split(": ", 1) for line in lines[1:])
+    return lines[0], headers, body
+
+
+class CapacityFeedTests(unittest.TestCase):
+    def write_overlay(self, tmp, text):
+        path = tmp.path / "overlay.json"
+        path.write_text(text)
+        return path
+
+    def test_a_fixture_overlay_round_trips(self):
+        tmp = self.enterContext(_TmpDir())
+        path = self.write_overlay(tmp, json.dumps(FEED_OVERLAY))
+        self.assertEqual(feed.snapshot(path), FEED_OVERLAY)
+
+    def test_do_get_serves_the_overlay(self):
+        tmp = self.enterContext(_TmpDir())
+        path = self.write_overlay(tmp, json.dumps(FEED_OVERLAY))
+        status, headers, body = serve_feed(path)
+        self.assertTrue(status.endswith(b"200 OK"))
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(json.loads(body), FEED_OVERLAY)
+
+    def test_a_rebuilt_overlay_is_served_without_a_restart(self):
+        tmp = self.enterContext(_TmpDir())
+        path = self.write_overlay(tmp, json.dumps(FEED_OVERLAY))
+        serve_feed(path)
+        rebuilt = {"accounts": [feed_account("zai", 90.0)], "attempts": []}
+        path.write_text(json.dumps(rebuilt))
+        _status, _headers, body = serve_feed(path)
+        self.assertEqual(json.loads(body), rebuilt)
+
+    def test_missing_garbage_and_old_shaped_overlays_degrade(self):
+        tmp = self.enterContext(_TmpDir())
+        empty = {"accounts": [], "attempts": []}
+        self.assertEqual(feed.snapshot(tmp.path / "absent.json"), empty)
+        garbage = self.write_overlay(tmp, "{not json")
+        self.assertEqual(feed.snapshot(garbage), empty)
+        bare = tmp.path / "bare.json"
+        bare.write_text(json.dumps([{"provider": "zai", "status": "ok"}]))
+        self.assertEqual(
+            feed.snapshot(bare), {"accounts": [{"provider": "zai", "status": "ok"}], "attempts": []}
+        )
+
+
 class InstallTests(unittest.TestCase):
     def test_render_embeds_label_python_script_and_log_paths(self):
         text = installer.render(
@@ -1058,10 +1150,113 @@ class InstallTests(unittest.TestCase):
     def test_no_rendered_plist_carries_a_start_interval(self):
         tmp = self.enterContext(_TmpDir())
         installer.main(["--out-dir", str(tmp.path), "--python", "/usr/bin/python3"])
-        for name, _script, _log in installer.RUNTIMES:
+        for name in [name for name, _s, _l in installer.RUNTIMES] + [installer.EVALS_RUNTIME[0]]:
             plist = tmp.path / f"com.inference-grid.{name}.plist"
             self.assertNotIn("StartInterval", plistlib.loads(plist.read_bytes()))
             self.assertNotIn("StartInterval", plist.read_text())
+
+    def test_install_renders_the_evals_agent_with_the_config_path(self):
+        # Brief 20, M5: the eval agent is a KeepAlive plist whose program is the hourly
+        # loop, pointed at the operator's config — the file whose `evals_corpus` names the
+        # corpus the runs are authored from.
+        tmp = self.enterContext(_TmpDir())
+        config = tmp.path / "config.json"
+        config.write_text(json.dumps({"evals_corpus": "/operator/eval-corpus"}))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            installer.main(
+                [
+                    "--out-dir",
+                    str(tmp.path / "out"),
+                    "--python",
+                    "/usr/bin/python3",
+                    "--config",
+                    str(config),
+                ]
+            )
+        plist = tmp.path / "out" / "com.inference-grid.evals.plist"
+        data = plistlib.loads(plist.read_bytes())
+        self.assertEqual(data["Label"], "com.inference-grid.evals")
+        self.assertIs(data["KeepAlive"], True)
+        self.assertIs(data["RunAtLoad"], True)
+        self.assertEqual(data["ProcessType"], "Interactive")
+        # The loop is the program; the config and the corpus it names are its arguments.
+        self.assertEqual(data["ProgramArguments"][0], "/usr/bin/python3")
+        self.assertEqual(data["ProgramArguments"][1], str(installer.DEFAULT_DIR / "evals_run.py"))
+        self.assertIn(str(config), data["ProgramArguments"])
+        self.assertIn("/operator/eval-corpus", data["ProgramArguments"])
+        self.assertIn(str(installer.DEFAULT_DIR / "evals.log"), data["StandardOutPath"])
+        self.assertIn(
+            f"launchctl bootstrap gui/{os.getuid()} {plist}",
+            out.getvalue(),
+        )
+
+    def test_evals_corpus_flag_overrides_the_config(self):
+        tmp = self.enterContext(_TmpDir())
+        installer.main(
+            [
+                "--out-dir",
+                str(tmp.path),
+                "--python",
+                "/usr/bin/python3",
+                "--config",
+                str(tmp.path / "absent.json"),
+                "--evals-corpus",
+                "/operator/other-corpus",
+            ]
+        )
+        data = plistlib.loads((tmp.path / "com.inference-grid.evals.plist").read_bytes())
+        self.assertIn("/operator/other-corpus", data["ProgramArguments"])
+
+
+class EvalsRunTests(unittest.TestCase):
+    def config(self, tmp):
+        return {
+            "evals_corpus": str(tmp.path / "corpus"),
+            "lanes_path": str(tmp.path / "lanes.json"),
+            "board_dir": str(tmp.path / "board"),
+            "evals_project_root": str(tmp.path / "project"),
+            "evals_dir": str(tmp.path),
+            "log_path": str(tmp.path / "evals.log"),
+        }
+
+    def test_the_payload_names_every_path_from_the_config(self):
+        tmp = self.enterContext(_TmpDir())
+        payload = evals_run.eval_payload(self.config(tmp))
+        self.assertEqual(payload["corpus_dir"], str(tmp.path / "corpus"))
+        self.assertEqual(payload["lanes"], str(tmp.path / "lanes.json"))
+        self.assertEqual(payload["board_dir"], str(tmp.path / "board"))
+        self.assertEqual(payload["project_root"], str(tmp.path / "project"))
+        # An incomplete config asks for nothing rather than guessing.
+        self.assertIsNone(evals_run.eval_payload({"evals_corpus": "/x"}))
+
+    def test_the_loop_calls_once_per_interval_and_stops_on_its_deadline(self):
+        tmp = self.enterContext(_TmpDir())
+        calls = []
+
+        def spawn(config):
+            calls.append(config)
+
+        sleeps = []
+        clock = FakeClock()
+        evals_run.run(
+            self.config(tmp),
+            spawn,
+            lambda seconds: (sleeps.append(seconds), clock.sleep(seconds))[1],
+            clock=clock.clock,
+            deadline=3 * evals_run.EVAL_SECONDS,
+        )
+        # Immediately at 0, then at 3600 and 7200; the sleep after the third reaches the
+        # deadline, so the loop ends without a fourth call.
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [evals_run.EVAL_SECONDS] * 3)
+
+    def test_a_default_reports_an_incomplete_config_without_spawning(self):
+        tmp = self.enterContext(_TmpDir())
+        config = {"log_path": str(tmp.path / "evals.log")}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(evals_run.default_evals(config))
+        self.assertIn("config incomplete", (tmp.path / "evals.log").read_text())
 
 
 if __name__ == "__main__":

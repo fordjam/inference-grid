@@ -32,6 +32,44 @@ on in the meantime (`plan_requires_tier_plan`).
 "plan-lane": { "model": "glm-5.3-flash", "tier": "plan" }
 ```
 
+## Lane policy facts — `lanes-meta.json`
+
+Some lane facts are policy rather than transport: where the provider hosts the model and
+what it promises to retain. `lanes/config.py` is provider-authored and admits exactly its
+required keys, so those facts live in a sidecar the operator keeps **beside `lanes.json`**
+— `lanes-meta.json`, read once per tick:
+
+```json
+{"lanes": {
+  "go-opencode": {"residency": "us", "retention": "zero",
+                  "retention_source": "https://opencode.ai/docs/zen"},
+  "go":          {"residency": "unknown", "retention": "unknown"}
+}}
+```
+
+`residency` is `us | eu | unknown`, `retention` is `zero | days | unknown`, and
+`retention_source` is the URL or note the two facts were read from — the record is the
+operator's statement, and the source is what makes it auditable. A lane the file does not
+name (or a record without the key) reads `unknown` on that key, and a board the operator
+has not tagged at all (no sidecar) reads unknown everywhere: absence never satisfies.
+
+A board's tick config (the `board-tick --json` document, or the board's entry in
+`tick-all`'s `boards` directory) may carry `require_lane_meta`:
+
+```json
+"require_lane_meta": {"residency": ["us", "eu"], "retention": ["zero"]}
+```
+
+Every candidate lane — a task's explicit `lanes` list included — whose sidecar record does
+not satisfy **every** listed key is dropped before selection with reason `lane_policy`
+naming the key (`"detail": "residency unknown not in [us, eu]"`), and the dry run shows
+the drop in its plan rows. Unknown never satisfies, so an untagged lane is refused rather
+than trusted; when no lane satisfies the requirement the task is refused outright
+(`reason: lane_policy`) rather than routed to a lane the board must not use. A malformed
+sidecar — unparseable JSON, a key or value outside the shapes above — refuses the whole
+tick with the parse error: fail closed, never route on half-read policy. Without
+`require_lane_meta` the tick behaves exactly as before the key existed.
+
 ## Packaged kinds
 
 | Kind | Module | Family | Contract |
@@ -42,7 +80,7 @@ on in the meantime (`plan_requires_tier_plan`).
 | `claude_headless` | `zai` | claude | Anthropic-compatible base URL, `MAX_THINKING_TOKENS` from the task budget |
 | `zcode_cli` | `zcode` | glm | Bundled ZCode CLI, session-DB evidence |
 | `codex_cli` | `codex` | openai | Codex CLI headless (`codex exec`); `classify_codex` — see below |
-| `opencode_cli` | `opencode` | glm | `opencode run --format json` as an agent with tools; event-stream evidence, config/auth digest guard, `classify_opencode` — see below. `lanes.json` cannot name the kind until `lanes/config.py`'s accepted set grows by one entry (provider-authored; patch in the D2 report) |
+| `opencode_cli` | `opencode` | glm | `opencode run --format json` as an agent with tools; event-stream evidence, config/auth digest guard, `classify_opencode` — see below. The packet loop runs it (`PACKET_KINDS`); `lanes.json` cannot name the kind until `lanes/config.py`'s accepted set grows by one entry (provider-authored; patch in the D2 report) |
 
 ## Command Code GOAT
 
@@ -102,6 +140,16 @@ map to remaining units against the documented caps — remaining share of the wi
 the window's unit cap, the same shape the zai and go accounts already use — and the
 result, with the observation timestamp, is what `configure_account` writes for the
 lane's admission decision.
+
+Because `board_prepare` runs once per pass and a pass can last an hour, the board tick
+itself re-reads a stale lane record's observation file before refusing it: the tick config
+(the `board-tick --json` document) may carry `observations` — a map of provider (or lane)
+id to observation file path — and `output_dir`, the collectors' capacity output directory
+whose `<provider>-observation.json` convention the map defaults to. `package_src` names the
+`deployments/local/` directory the runner imports `board_prepare.py`'s record builder from.
+A lane record older than its `quota_freshness_seconds` is rebuilt from the file, recorded
+back into the ledger and re-classified; only a file that is itself older than the window
+refuses, with the file's age in the reason. Without these keys the tick behaves as before.
 
 ## Codex (OpenAI) — `codex_cli`, pending operator confirmation
 
@@ -177,25 +225,45 @@ and records the response's `provider` field in the verdict. Key path only — no
 executable; the credential file is the same 0o600 JSON document `read_key` already
 parses. An unknown `provider` in a `go_http` lane refuses before anything is sent.
 
-Plan coverage, observed on the raw API 2026-09-15: only some models are covered by the
-subscription — `z-ai/glm-5.3-flash` answered, while `moonshotai/kimi-k3` and
-`deepseek/deepseek-v4-flash-0731` returned `402 insufficient_credits` (those are billed
-to pay-as-you-go credits unless called through the Cline client). `go.py` classifies a
-402 as `refusal: model_not_in_plan`, which the driver never retries — a model outside
-the plan is a lane-config fact, not a transient fault. Qualify new models through a
-canary row before dispatching work on them.
+Model id namespace (L6): ClinePass bills vendor ids to credits; the subscription
+draws on the `cline-pass/` namespace instead, so `go.py` puts `cline-pass/<bare id>`
+on the wire while the lane record keeps the canonical vendor id — the runner's model
+match and the scorecard key on it, and the verdict carries `wire_model` whenever the
+two differ. The endpoint may echo either id in its response; both name the one model,
+and a different model is still refused. This is why `canary-cline-http` failed with
+HTTP 429 on 2026-09-16: the vendor id `z-ai/glm-5.3-flash` was served from a free
+tier with a daily cap, which the first canary exhausted.
+
+Plan coverage, observed on the raw API 2026-09-15: the pass namespace is what the
+subscription serves — the first canary's `429` on the vendor id
+(`grid/board/canary-cline-http.json`) and the `402 insufficient_credits` answers for
+`moonshotai/kimi-k3` and `deepseek/deepseek-v4-flash-0731` both came from the vendor
+id space (those two are billed to pay-as-you-go credits unless called through the
+Cline client). `go.py` classifies a 402 as `refusal: model_not_in_plan`, which the
+driver never retries — a model outside the plan is a lane-config fact, not a transient
+fault. Qualify new models through a canary row before dispatching work on them.
 
 ## Go subscription as an agent — `opencode_cli`
 
 ```json
-"go-agent": {
-  "provider": "opencode", "family": "glm", "model": "opencode/glm-5.3-flash",
+"go-opencode": {
+  "provider": "opencode", "family": "glm", "model": "opencode/kimi-k3",
   "kind": "opencode_cli", "credential_path": null,
   "executable": "/path/from/operator/opencode", "plan_units": {"five_hour": 1},
   "window": null, "max_concurrency": 1, "wall_seconds": 900,
   "categories": ["pure_function", "tests_multi_file"]
 }
 ```
+
+The lane facts that are policy rather than transport: `residency: "us"`, `retention:
+"zero"`, `retention_source: "https://opencode.ai/docs/zen"` — OpenCode Zen hosts every
+model in the US under a zero-retention policy, and the Go plan's table marks GLM-5.3-Flash,
+Kimi K3 and Qwen3.8 Max "0 days / not used for training", which makes the Go lanes the only
+ones an operator can point at a T1 repository (COT) that requires US/EU hosting and zero
+retention. `lanes/config.py`'s accepted key set has no place for those three (provider-
+authored), so the operator keeps them in the sidecar beside `lanes.json`
+(`lanes-meta.json`, see "Lane policy facts" above); a board can then require them with
+`require_lane_meta`, and without a record a reader must assume unknown.
 
 The same Go subscription `go_http` spends on single calls, run through the `opencode`
 CLI as an agent with tools (`opencode run --model <model> --format json --dir <worktree>`
@@ -206,6 +274,15 @@ shapes documented in `opencode_outcomes.py`; worth re-checking against a real ca
 before the first dispatch). Digests of the CLI's config (`~/.config/opencode/
 opencode.json`) and auth (`~/.local/share/opencode/auth.json`) files are taken before
 and after the run, as in the goat lane.
+
+**Packets.** `opencode_cli` is in the packet loop's `PACKET_KINDS`: the adapter
+(`lanes/packet.py::OpencodeAdapter`) starts `opencode run --model <provider/model>
+--format json` non-interactive, reads the session id from the JSON stream
+(`sessionID`), and a fix round re-enters it with `--session <id>`. The sandbox grants
+no home write root for this kind — the CLI's state directory (`.opencode/`) lives under
+the clone, inside the workspace's own write root — and admission carries the one-shot
+lane's policy gate: a deny-read list covering the auth file refuses
+(`credential_denied_by_policy`) before anything spawns.
 
 **Policy gate, the operator's decision, not the code's:** the deny-read list currently
 names the opencode auth file, and the lane refuses to start on that fact alone — verdict

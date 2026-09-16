@@ -55,6 +55,179 @@ def test_digest_reports_boards_suggestions_and_lanes(tmp_path):
     assert "| go-" + account[-8:] + " |" in text or f"| {account} |" in text
 
 
+def test_digest_survives_the_drafts_sidecar(tmp_path):
+    """The plan node's drafts list is board-owned state, not a task file (brief J1)."""
+    from pathlib import Path
+
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_board_status import write_task  # reuse the fixtures
+
+    project = tmp_path / "project"
+    board = project / "grid/board"
+    board.mkdir(parents=True)
+    write_task(board, "waiting", "ready")
+    (board / "drafts.json").write_text(json.dumps({"drafts": ["packet-k1"]}))
+    ledger = Ledger("sqlite:///" + str(tmp_path / "ledger.sqlite"))
+    ledger.initialize()
+    boards_dir = tmp_path / "boards"
+    boards_dir.mkdir()
+    (boards_dir / "project.json").write_text(
+        json.dumps({"board_dir": str(board), "project_root": str(project)})
+    )
+    text = digest(ledger, boards_dir)
+    assert "oldest ready task: waiting" in text
+
+
+def test_digest_reports_the_evals_table_and_the_needs_you_lanes(tmp_path):
+    """The Evals section (brief 20, M5): per lane, per kind, accepted / cases and the
+    newest result's age; a lane with no eval inside the window is a needs-you row."""
+    from test_board_status import write_task  # reuse the fixture
+
+    project = tmp_path / "project"
+    board = project / "grid/board"
+    board.mkdir(parents=True)
+    write_task(board, "waiting", "ready")
+    lanes_path = tmp_path / "lanes.json"
+    lanes_path.write_text(
+        json.dumps(
+            {
+                "lanes": {
+                    "go": {
+                        "provider": "opencode",
+                        "family": "glm",
+                        "model": "glm-5.3-flash",
+                        "kind": "go_http",
+                        "credential_path": None,
+                        "executable": None,
+                        "plan_units": {},
+                        "window": None,
+                        "max_concurrency": 1,
+                        "wall_seconds": 60,
+                        "categories": ["independent_review"],
+                    },
+                    "kimi": {
+                        "provider": "opencode",
+                        "family": "kimi",
+                        "model": "kimi-k3",
+                        "kind": "go_http",
+                        "credential_path": None,
+                        "executable": None,
+                        "plan_units": {},
+                        "window": None,
+                        "max_concurrency": 1,
+                        "wall_seconds": 60,
+                        "categories": ["independent_review"],
+                    },
+                }
+            }
+        )
+    )
+    boards_dir = tmp_path / "boards"
+    boards_dir.mkdir()
+    (boards_dir / "project.json").write_text(
+        json.dumps(
+            {
+                "board_dir": str(board),
+                "project_root": str(project),
+                "lanes_path": str(lanes_path),
+            }
+        )
+    )
+    now = time.time()
+    ledger = Ledger("sqlite:///" + str(tmp_path / "ledger.sqlite"))
+    ledger.initialize()
+    _seed_eval(
+        ledger, "11111111-2222-3333-4444-eeeeeeeeeeee", "glm", "glm-5.3-flash", "review", now
+    )
+
+    text = digest(ledger, boards_dir, now=now)
+    assert "## Evals" in text
+    assert "| go | review | 1 / 1 | 0.0 d |" in text
+    assert "| go | packet | 0 / 0 | never |" in text
+    assert "| kimi | review | 0 / 0 | never |" in text
+    assert "## Needs you" in text
+    assert "eval coverage: `kimi` — no eval ever recorded" in text
+    assert "eval coverage: `go`" not in text
+
+
+def test_digest_lists_owner_only_packets_under_needs_you(tmp_path):
+    """Brief 14 M3: a packet whose declared files fall under the board config's
+    `owner_only` prefixes is the one wait the runner enforces at dispatch, and the
+    digest names it under needs-you with the prefix that matched — before the
+    operator wonders why the packet never moves."""
+    from test_board_status import write_task  # reuse the fixture
+
+    project = tmp_path / "project"
+    board = project / "grid/board"
+    board.mkdir(parents=True)
+    owned = write_task(board, "owned", "ready")
+    owned["category"] = "packet"
+    owned["artifacts"] = ["docs/research/numbers.md"]
+    owned["spec"] = {
+        "brief": owned["brief"],
+        "packet_id": "A1",
+        "gates": [{"name": "ok", "argv": ["true"]}],
+        "base": "main",
+    }
+    (board / "owned.json").write_text(json.dumps(owned))
+    write_task(board, "plain", "ready")
+    ledger = Ledger("sqlite:///" + str(tmp_path / "ledger.sqlite"))
+    ledger.initialize()
+    boards_dir = tmp_path / "boards"
+    boards_dir.mkdir()
+    (boards_dir / "project.json").write_text(
+        json.dumps(
+            {
+                "board_dir": str(board),
+                "project_root": str(project),
+                "owner_only": ["docs/research"],
+            }
+        )
+    )
+    text = digest(ledger, boards_dir)
+    assert (
+        "- owner-only: `owned` — a declared file is under prefix `docs/research`"
+        " (board project)" in text
+    )
+    assert text.count("- owner-only:") == 1
+    assert "## Needs you" in text
+
+
+def _seed_eval(ledger, aid, family, model, kind, at):
+    from sqlalchemy import update
+
+    from inference_grid.ledger import attempts as attempts_t, events, tasks as tasks_t
+
+    with ledger.engine.begin() as con:
+        con.execute(
+            tasks_t.insert().values(
+                id="t-" + aid, project="p", spec={"family": family, "model": model}
+            )
+        )
+        con.execute(
+            attempts_t.insert().values(
+                id=aid,
+                task="t-" + aid,
+                account="a",
+                generation=1,
+                state="completed",
+                estimate={},
+                workspace="/w",
+                receipt={},
+                updated=0.0,
+            )
+        )
+    ledger.record_outcome(aid, "eval:" + kind, True, note="eval")
+    with ledger.engine.begin() as con:
+        con.execute(
+            update(events)
+            .where(events.c.attempt == aid, events.c.kind == "outcome_recorded")
+            .values(at=at)
+        )
+
+
 def uuid_hex():
     import uuid
 
