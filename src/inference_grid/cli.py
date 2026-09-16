@@ -22,6 +22,9 @@ def board_tick(
     boards=None,
     auto_land=False,
     auto_dispatch=False,
+    observations=None,
+    output_dir=None,
+    package_src=None,
 ):
     from .board.runner import tick as board_run
     from .lanes.runner import load_lanes
@@ -47,6 +50,9 @@ def board_tick(
                             "packets_root",
                             "auto_land",
                             "auto_dispatch",
+                            "observations",
+                            "output_dir",
+                            "package_src",
                         )
                         if key in config
                     },
@@ -67,6 +73,9 @@ def board_tick(
         dry_run=dry_run,
         auto_land=auto_land,
         auto_dispatch=auto_dispatch,
+        observations=observations,
+        output_dir=output_dir,
+        package_src=package_src,
     )
 
 
