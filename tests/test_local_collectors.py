@@ -1,5 +1,6 @@
 """The versioned local deployment layer: collectors, the Claude poller, the scheduler loop,
-the board tick loop and the installer, all against fixture payloads and injected network.
+the quota feed, the board tick loop and the installer, all against fixture payloads and
+injected network.
 
 No test opens a socket: every network call goes through an injected ``fetch`` (or a fake
 status command), and every credential path points at a file in a temporary directory.
@@ -37,6 +38,7 @@ goat = load("collect_goat")
 cline = load("collect_cline")
 claude = load("refresh_claude")
 overlay = load("overlay_build")
+feed = load("capacity_feed")
 loop = load("capacity_loop")
 tick_boards = load("tick_boards")
 upload = load("upload")
@@ -963,6 +965,95 @@ class OverlayBuildTests(unittest.TestCase):
         )
         accounts = overlay.prior_accounts(tmp.path / "prior.json")
         self.assertEqual([a["provider"] for a in accounts], ["claude"])
+
+
+def feed_account(provider, used):
+    """One overlay account entry, the shape overlay_build writes per provider."""
+    return {
+        "provider": provider,
+        "observed_at": "2026-09-16T03:00:00+00:00",
+        "status": "ok",
+        "windows": [
+            {"id": "five_hour", "used_percent": used, "resets_at": "2026-09-16T07:00:00+00:00"},
+            {"id": "weekly", "used_percent": used / 2, "resets_at": "2026-09-19T00:00:00+00:00"},
+        ],
+    }
+
+
+FEED_OVERLAY = {
+    "accounts": [
+        feed_account("zai", 12.5),
+        feed_account("codex", 11.25),
+        feed_account("opencode", 30.0),
+        feed_account("command-code", 35.7),
+        feed_account("clinepass", 12.5),
+        feed_account("claude", 33.0),
+    ],
+    "attempts": [
+        {
+            "task": "packet-l4",
+            "provider": "zai",
+            "model": "glm-5.3-flash via zcode",
+            "status": "running",
+            "at": "2026-09-16T03:10:00+00:00",
+        }
+    ],
+}
+
+
+def serve_feed(overlay_path):
+    """Handler.do_GET over a fake connection: (status line, headers, body) with no socket."""
+    handler = feed.Handler.__new__(feed.Handler)
+    handler.request_version = "HTTP/1.1"
+    handler.requestline = "GET /api/usage HTTP/1.1"
+    handler.overlay_path = overlay_path
+    handler.wfile = io.BytesIO()
+    handler.do_GET()
+    head, _, body = handler.wfile.getvalue().partition(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    headers = dict(line.decode().split(": ", 1) for line in lines[1:])
+    return lines[0], headers, body
+
+
+class CapacityFeedTests(unittest.TestCase):
+    def write_overlay(self, tmp, text):
+        path = tmp.path / "overlay.json"
+        path.write_text(text)
+        return path
+
+    def test_a_fixture_overlay_round_trips(self):
+        tmp = self.enterContext(_TmpDir())
+        path = self.write_overlay(tmp, json.dumps(FEED_OVERLAY))
+        self.assertEqual(feed.snapshot(path), FEED_OVERLAY)
+
+    def test_do_get_serves_the_overlay(self):
+        tmp = self.enterContext(_TmpDir())
+        path = self.write_overlay(tmp, json.dumps(FEED_OVERLAY))
+        status, headers, body = serve_feed(path)
+        self.assertTrue(status.endswith(b"200 OK"))
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(json.loads(body), FEED_OVERLAY)
+
+    def test_a_rebuilt_overlay_is_served_without_a_restart(self):
+        tmp = self.enterContext(_TmpDir())
+        path = self.write_overlay(tmp, json.dumps(FEED_OVERLAY))
+        serve_feed(path)
+        rebuilt = {"accounts": [feed_account("zai", 90.0)], "attempts": []}
+        path.write_text(json.dumps(rebuilt))
+        _status, _headers, body = serve_feed(path)
+        self.assertEqual(json.loads(body), rebuilt)
+
+    def test_missing_garbage_and_old_shaped_overlays_degrade(self):
+        tmp = self.enterContext(_TmpDir())
+        empty = {"accounts": [], "attempts": []}
+        self.assertEqual(feed.snapshot(tmp.path / "absent.json"), empty)
+        garbage = self.write_overlay(tmp, "{not json")
+        self.assertEqual(feed.snapshot(garbage), empty)
+        bare = tmp.path / "bare.json"
+        bare.write_text(json.dumps([{"provider": "zai", "status": "ok"}]))
+        self.assertEqual(
+            feed.snapshot(bare), {"accounts": [{"provider": "zai", "status": "ok"}], "attempts": []}
+        )
 
 
 class InstallTests(unittest.TestCase):
