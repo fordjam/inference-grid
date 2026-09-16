@@ -65,11 +65,17 @@ def digest(ledger, boards_dir, now=None):
         for path in sorted(Path(config["board_dir"]).glob("*.json")):
             import json as jsonlib
 
-            task = jsonlib.loads(path.read_text())
-            if task["state"] == "ready":
-                age = (now - path.stat().st_mtime) / 86400
-                if oldest_ready is None or age > oldest_ready[0]:
-                    oldest_ready = (age, task["id"])
+            # The plan node's drafts sidecar (and any other board-owned state) is not a
+            # task file; an unreadable one is skipped, never fatal to the digest.
+            try:
+                task = jsonlib.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(task, dict) or task.get("state") != "ready":
+                continue
+            age = (now - path.stat().st_mtime) / 86400
+            if oldest_ready is None or age > oldest_ready[0]:
+                oldest_ready = (age, task.get("id") or path.stem)
         lines.append(f"## Board {name}")
         lines.append("")
         lines.append(

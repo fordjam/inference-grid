@@ -191,6 +191,8 @@ def test_board_counts_and_missing_dirs_are_reported_read_only(tmp_path):
     (board / "t1.json").write_text(task("ready", "t1"))
     (board / "t2.json").write_text(task("blocked", "t2"))
     (board / "junk.json").write_text("{not json")
+    # The plan node's drafts list is board-owned state (brief J1), not an unreadable task.
+    (board / "drafts.json").write_text('{"drafts": ["packet-k1"]}')
     staged = board / "review"
     staged.mkdir()
     (staged / "artifact.json").write_text('{"verdict": "approved"}')  # subdirectory: not a task
