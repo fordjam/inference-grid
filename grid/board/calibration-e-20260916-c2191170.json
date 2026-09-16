@@ -1,12 +1,12 @@
 {
- "id": "calibration-e-20260916-0ca137e4",
+ "id": "calibration-e-20260916-c2191170",
  "category": "calibration_run",
- "brief": "grid/briefs/calibration-e-20260916-0ca137e4.txt",
+ "brief": "grid/briefs/calibration-e-20260916-c2191170.txt",
  "inputs": [],
  "tests": [],
  "artifacts": [],
  "lanes": [
-  "goat-deepseek"
+  "goat"
  ],
  "author_family": null,
  "budget": {
@@ -14,14 +14,14 @@
   "output_bytes": 100000,
   "thinking_tokens": null
  },
- "state": "blocked",
- "blocked_reason": "eval packet: account busy",
+ "state": "ready",
+ "blocked_reason": null,
  "spec": {
   "corpus_dir": "/Users/fordjam/.config/inference-grid/calibration/history",
   "lanes": [
-   "goat-deepseek"
+   "goat"
   ],
-  "run_id": "e-20260916-0ca137e4",
-  "case": "inference-grid-packet-l3-3"
+  "run_id": "e-20260916-c2191170",
+  "case": "yt-research-mcp-review-e0078ac"
  }
 }

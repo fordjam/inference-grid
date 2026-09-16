@@ -1,0 +1,1 @@
+Calibration run e-20260916-c2191170 for lanes goat. This is a code node: it runs corpus case yt-research-mcp-review-e0078ac on lane goat — authoring the case's own board task, scoring the settled attempt through board/calibration/score.py::score, recording an eval:<kind> outcome and settling itself passed. No lane runs it.

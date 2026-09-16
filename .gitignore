@@ -13,3 +13,6 @@ build/
 
 # The agent CLI's own state in a packet clone (session settings), never project content.
 .commandcode/
+
+# The runner materialises eval-run working copies here (a git repo per run); scratch, never tracked.
+grid/board/calibration/
