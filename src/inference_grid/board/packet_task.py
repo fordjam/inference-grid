@@ -286,8 +286,18 @@ def _account_windows(ledger, account_alias):
     return {window: 0.01 for window in acct["windows"]}
 
 
-def dispatch_packet(ledger, lanes, lane_id, task, project_root, packet_dir, account_alias):
-    """One packet attempt: admission first, then the loop, then the verdict settles it."""
+def admit_packet(ledger, lanes, lane_id, task, project_root, packet_dir, account_alias):
+    """Admit one packet attempt (submit, claim, lease) without running the loop.
+
+    The admission half of a packet attempt, split out so the board runner can admit on
+    its pass loop and run the long build→gate→re-enter loop in a worker thread (J6). The
+    base must resolve and the brief must parse before anything is admitted — those are
+    task-authoring errors the operator fixes, not attempts to hold.
+
+    Returns the admission `run_packet` consumes: `aid` and `generation`, plus either the
+    `context` the loop needs or the `state` a reconciliation hold inside `start` produced
+    (a held attempt is never run, and its ledger reason stands).
+    """
     lane = lanes[lane_id]
     kind = lane["kind"]
     if kind in UNSUPPORTED_ADAPTERS:
@@ -297,8 +307,6 @@ def dispatch_packet(ledger, lanes, lane_id, task, project_root, packet_dir, acco
     spec = task["spec"]
     project_root = Path(project_root)
     branch = "packet/" + task["id"]
-    # The base must resolve before anything is admitted: a bad base is a task-authoring
-    # error the operator fixes, not an attempt to hold.
     try:
         base_rev = _git(project_root, "rev-parse", "--verify", spec["base"] + "^{commit}")[
             :40
@@ -338,12 +346,51 @@ def dispatch_packet(ledger, lanes, lane_id, task, project_root, packet_dir, acco
     if ledger.start(aid, generation) is None:
         # Admission reconciliation held it inside start; the ledger reason stands.
         state = next((r["state"] for r in ledger.status() if r["id"] == aid), "held")
-        return aid, state, None
+        return {"aid": aid, "generation": generation, "state": state, "context": None}
 
     attempt_dir = workspace / aid
     attempt_dir.mkdir(mode=0o700)
-    env = dict(os.environ, HOME=str(Path.home()), TMPDIR=str(attempt_dir / "tmp"), PYTHONPATH="src")
-    (attempt_dir / "tmp").mkdir(exist_ok=True)
+    return {
+        "aid": aid,
+        "generation": generation,
+        "state": None,
+        "context": {
+            "lane": lane,
+            "kind": kind,
+            "task": task,
+            "spec": spec,
+            "branch": branch,
+            "base_rev": base_rev,
+            "packet": packet,
+            "rules": rules,
+            "project_root": project_root,
+            "attempt_dir": attempt_dir,
+        },
+    }
+
+
+def run_packet(ledger, admission):
+    """Run an admitted packet attempt's loop and settle it; returns (aid, state, attempt_dir).
+
+    The loop half of a packet attempt: build the scratch clone, run the lane adapter with
+    the declared gates and the commit gate, and either fetch the branch and complete the
+    attempt with the verdict as its receipt, or hold it with the loop's reason and leave
+    the branch for the operator. A reconciliation hold at admission returns immediately
+    without running anything, the state `admit_packet` reported.
+    """
+    aid = admission["aid"]
+    context = admission["context"]
+    if context is None:
+        return aid, admission["state"], None
+    generation = admission["generation"]
+    lane = context["lane"]
+    kind = context["kind"]
+    task = context["task"]
+    spec = context["spec"]
+    branch = context["branch"]
+    base_rev = context["base_rev"]
+    project_root = context["project_root"]
+    attempt_dir = context["attempt_dir"]
     try:
         clone = attempt_dir / "work"
         _git(project_root, "clone", "-q", "--shared", str(project_root), str(clone))
@@ -352,10 +399,14 @@ def dispatch_packet(ledger, lanes, lane_id, task, project_root, packet_dir, acco
             kind, lane, clone, attempt_dir, session_name=f"packet-{task['id']}-{aid[:8]}"
         )
         sandbox_command = build_sandbox(kind, clone, attempt_dir)
+        env = dict(
+            os.environ, HOME=str(Path.home()), TMPDIR=str(attempt_dir / "tmp"), PYTHONPATH="src"
+        )
+        (attempt_dir / "tmp").mkdir(exist_ok=True)
         prompt = compose_prompt(
-            rules,
-            orient(clone, mentioned_paths(packet)),
-            packet,
+            context["rules"],
+            orient(clone, mentioned_paths(context["packet"])),
+            context["packet"],
             branch=branch,
             base=spec["base"],
             python=sys.executable,
@@ -382,6 +433,7 @@ def dispatch_packet(ledger, lanes, lane_id, task, project_root, packet_dir, acco
     if not verdict.get("gates_passed"):
         ledger.hold(aid, "packet loop: " + str(verdict.get("reason")))
         return aid, "held", attempt_dir
+    clone = attempt_dir / "work"
     head = _git(clone, "rev-parse", "HEAD").decode().strip()
     # The deliverable is the branch; its receipt artifact pins the exact commit object.
     commit_digest = hashlib.sha256(_git(clone, "cat-file", "commit", head)).hexdigest()

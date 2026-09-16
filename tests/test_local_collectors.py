@@ -560,12 +560,18 @@ class TickBoardsTests(unittest.TestCase):
     def test_prepare_runs_before_every_board(self):
         clock = FakeClock()
         events = []
+        lock = threading.Lock()
 
         def prepare():
-            events.append("prepare")
+            with lock:
+                events.append("prepare")
 
         def tick(board):
-            events.append("tick:" + board)
+            # Each board's tick runs in its own thread (J6): the pass moves on as soon as
+            # a board's tick has been started, so the order between a pass's two ticks is
+            # not fixed. Every pass still prepares before it starts each of its boards.
+            with lock:
+                events.append("tick:" + board)
             return 0
 
         tick_boards.run(
@@ -576,8 +582,30 @@ class TickBoardsTests(unittest.TestCase):
             sleep=clock.sleep,
             clock=clock.clock,
         )
-        self.assertEqual(events, ["prepare", "tick:a", "prepare", "tick:b"] * 4)
+        self.assertEqual(events.count("prepare"), 8)  # one per board per pass
+        self.assertEqual(events.count("tick:a"), 4)
+        self.assertEqual(events.count("tick:b"), 4)
         self.assertEqual(clock.now, 7200)
+
+    def test_boards_tick_concurrently_and_the_ready_count_is_summed(self):
+        clock = FakeClock()
+        rendezvous = threading.Barrier(2, timeout=10)
+
+        def tick(board):
+            # Both boards are in flight at once; a serial loop would time out here.
+            rendezvous.wait()
+            return 1
+
+        ready = tick_boards.run(
+            ["a", "b"],
+            deadline=1,
+            prepare=lambda: None,
+            tick=tick,
+            sleep=clock.sleep,
+            clock=clock.clock,
+        )
+        self.assertEqual(ready, 2)  # the ready count is summed after the joins
+        self.assertEqual(clock.now, tick_boards.BUSY_SECONDS)  # one pass, then the busy sleep
 
     def test_ready_count_chooses_the_sleep_interval(self):
         sleeps = []
@@ -615,23 +643,25 @@ class TickBoardsTests(unittest.TestCase):
         self.assertEqual(tick_boards.count_ready(str(tmp.path)), 1)
         self.assertEqual(tick_boards.count_ready(None), 0)
 
-    def test_a_signal_lets_the_tick_finish_then_ends_the_loop(self):
+    def test_a_signal_lets_the_ticks_in_flight_finish_then_ends_the_loop(self):
         tmp = self.enterContext(_TmpDir())
         state = tmp.path / "tick-boards.draining"
         drain = tick_boards.Drain(state)
         with_drain_handlers(self, drain)
         events = []
-        started = threading.Event()
+        rendezvous = threading.Barrier(3, timeout=10)
         finish = threading.Event()
 
         def tick(board):
+            # Both boards of the pass are in flight at once (J6); each waits here until
+            # the signal lets it finish.
             events.append("tick:" + board)
-            started.set()
-            self.assertTrue(finish.wait(5))
+            rendezvous.wait()
+            self.assertTrue(finish.wait(10))
             return 0
 
         def send():
-            self.assertTrue(started.wait(5))
+            rendezvous.wait()  # both ticks started: the tick in flight is the whole pass
             os.kill(os.getpid(), signal.SIGTERM)
             finish.set()
 
@@ -647,7 +677,8 @@ class TickBoardsTests(unittest.TestCase):
             drain=drain,
         )
         sender.join(5)
-        self.assertEqual(events, ["tick:a"])
+        self.assertEqual(sorted(events), ["tick:a", "tick:b"])
+        self.assertNotIn("sleep", events)
         self.assertTrue(drain.draining)
         self.assertEqual(state.read_text(), "draining\n")
 

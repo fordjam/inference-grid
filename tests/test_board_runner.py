@@ -1,7 +1,9 @@
 import json
 import os
+import re
 import shutil
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -85,6 +87,11 @@ def make_review_task(tid, brief_name, author_family="claude"):
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
+    return build_world(tmp_path, monkeypatch)
+
+
+def build_world(tmp_path, monkeypatch, adapter=FAKE_ADAPTER):
+    """A temp project, board, lane and ledger; `adapter` stands in for the lane runner."""
     project = tmp_path / "project"
     board = project / "grid/board"
     board.mkdir(parents=True)
@@ -104,9 +111,9 @@ def world(tmp_path, monkeypatch):
     )
     for tid, brief in (("copy-ok", "brief.txt"), ("copy-wrong", "brief-wrong.txt")):
         (board / f"{tid}.json").write_text(json.dumps(make_task(tid, brief)))
-    adapter = tmp_path / "fake_adapter.py"
-    adapter.write_text(FAKE_ADAPTER)
-    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(adapter)])
+    adapter_path = tmp_path / "fake_adapter.py"
+    adapter_path.write_text(adapter)
+    monkeypatch.setattr(runner, "RUNNER", [sys.executable, str(adapter_path)])
     url = os.environ.get("GRID_TEST_DATABASE_URL", "sqlite:///" + str(tmp_path / "ledger.sqlite"))
     ledger = Ledger(url)
     ledger.initialize()
@@ -1855,3 +1862,197 @@ def test_category_qualification_carries_across_provider_prefixes(world):
     )
     assert view["cline"]["state"] == "ready"
     assert "independent_review" in view["cline"]["qualified_for"]
+
+
+# ------------------------------------------------------------------ concurrent dispatch (J6)
+
+# The runner's immutable ledger task id for a board task: <board task>-<UTC stamp>-<random>.
+LEDGER_TASK = re.compile(r"^(?P<board>.+)-\d{8}T\d{6}-[0-9a-f]+$")
+
+
+def scripted_execute(sleep_by_task=None, hold_tasks=()):
+    """A runner.execute stand-in: sleep, hold the named tasks, complete the rest.
+
+    The J6 change is the runner's scheduling, not the worker's. A real adapter cannot
+    settle under this sandbox — `killpg` and `/bin/ps` are denied, so `stop_group` raises
+    out of `execute` — so the worker seam is faked to keep the sleep (the overlap must be
+    observable) and the settlement (the rows and events) deterministic. The named tasks
+    hold, which is a failure settling only its own task; the rest complete with a receipt
+    the review policy waives, so a passing task settles without spawning a review.
+    """
+    sleep_by_task = sleep_by_task or {}
+
+    def fake(ledger, aid, generation):
+        row = ledger.start(aid, generation)
+        if row is None:
+            return "duplicate_or_stale"
+        spec = row["spec"]
+        task = next((r["task"] for r in ledger.status() if r["id"] == aid), "")
+        naps = [seconds for prefix, seconds in sleep_by_task.items() if task.startswith(prefix)]
+        time.sleep(max(naps or [0.0]))
+        if any(task.startswith(prefix) for prefix in hold_tasks):
+            ledger.hold(aid, "scripted hold")
+            return "held"
+        ledger.finish(
+            aid,
+            generation,
+            {
+                "status": "completed",
+                "finish_reason": "stop",
+                "actual_model": spec["model"],
+                "manifest_sha256": spec["manifest_sha256"],
+                "artifacts": [{"path": "mod2.py", "sha256": "a" * 64}],
+                "verified_in_lane": True,
+                "gates": [{"name": "tests", "ok": True}],
+            },
+        )
+        return "completed"
+
+    return fake
+
+
+def fake_worker(monkeypatch, **kwargs):
+    """Install the scripted executor and a passing run_tests stub for one tick."""
+    monkeypatch.setattr(runner, "execute", scripted_execute(**kwargs))
+    monkeypatch.setattr(runner, "run_tests", lambda *args, **kwargs: (True, "tests stub passed"))
+
+
+def two_wide(world):
+    """Capacity 2 on both the account and the lane: two ready tasks may run at once."""
+    world["ledger"].configure_account(
+        world["account"], 2, {"five_hour": 10, "weekly": 20}, time.time() + 600, ["glm-5.3-flash"]
+    )
+    world["lanes"]["go"]["max_concurrency"] = 2
+
+
+def run_tick(world, now):
+    return runner.tick(
+        world["board"],
+        world["project"],
+        world["ledger"],
+        world["lanes"],
+        world["lanes_path"],
+        {"go": world["account"]},
+        world["packets"],
+        now=now,
+    )
+
+
+def in_flight_counter(monkeypatch):
+    """Wrap runner.dispatch to record how many attempts were ever running together."""
+    state = {"now": 0, "max": 0}
+    guard = threading.Lock()
+    real = runner.dispatch
+
+    def counting(*args, **kwargs):
+        with guard:
+            state["now"] += 1
+            state["max"] = max(state["max"], state["now"])
+        try:
+            return real(*args, **kwargs)
+        finally:
+            with guard:
+                state["now"] -= 1
+
+    monkeypatch.setattr(runner, "dispatch", counting)
+    return lambda: state["max"]
+
+
+def events_by_board_task(ledger):
+    """The ledger event kinds per board task, in order, keyed by the board's task name."""
+    from inference_grid.ledger import events as event_records, select
+
+    with ledger.engine.connect() as con:
+        rows = list(con.execute(select(event_records).order_by(event_records.c.at)).mappings())
+    task_of = {r["id"]: r["task"] for r in ledger.status()}
+    out = {}
+    for row in rows:
+        match = LEDGER_TASK.match(task_of.get(row["attempt"]) or "")
+        if match:
+            out.setdefault(match.group("board"), []).append(row["kind"])
+    return out
+
+
+def test_two_attempts_on_one_account_run_overlapped(world, monkeypatch):
+    # Accounts carry a capacity (3 on GOAT, 2 on Cline) that serial dispatch made
+    # meaningless: two ready tasks on one board run at once, so a pass costs one attempt's
+    # wall time, not the sum.
+    two_wide(world)
+    fake_worker(monkeypatch, sleep_by_task={"copy": 1.2})
+    peak = in_flight_counter(monkeypatch)
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    started = time.monotonic()
+    results = run_tick(world, now)
+    elapsed = time.monotonic() - started
+    assert peak() == 2  # both attempts were in flight together
+    assert elapsed < 2.1  # serial, the two 1.2 s attempts would cost ~2.4 s
+    assert [r["task"] for r in results] == ["copy-ok", "copy-wrong"]
+    assert {r["result"] for r in results} == {"passed"}
+
+
+def test_capacity_one_keeps_attempts_serial(world, monkeypatch):
+    # The same board on a capacity-1 account never runs two attempts at once, and the
+    # second is admitted only after the first has settled.
+    fake_worker(monkeypatch, sleep_by_task={"copy": 1.0})
+    peak = in_flight_counter(monkeypatch)
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    results = run_tick(world, now)
+    assert peak() == 1
+    assert [r["task"] for r in results] == ["copy-ok", "copy-wrong"]
+    assert {r["result"] for r in results} == {"passed"}
+
+
+def test_a_failed_attempt_settles_alone_while_the_other_runs(world, monkeypatch):
+    # A hold in one attempt settles only its own task; the other was admitted, ran and
+    # passed in the same pass.
+    two_wide(world)
+    fake_worker(monkeypatch, sleep_by_task={"copy": 0.3}, hold_tasks=("copy-crash",))
+    (world["project"] / "brief-crash.txt").write_text("crash this one\n")
+    (world["board"] / "copy-crash.json").write_text(
+        json.dumps(make_task("copy-crash", "brief-crash.txt"))
+    )
+    (world["board"] / "copy-wrong.json").unlink()
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    by_task = {r["task"]: r for r in run_tick(world, now)}
+    assert by_task["copy-crash"]["result"] == "held" and by_task["copy-crash"]["attempt"]
+    assert by_task["copy-ok"]["result"] == "passed"
+    states = {
+        tid: json.loads((world["board"] / f"{tid}.json").read_text())["state"]
+        for tid in ("copy-crash", "copy-ok")
+    }
+    assert states == {"copy-crash": "blocked", "copy-ok": "passed"}
+    assert json.loads((world["board"] / "copy-crash.json").read_text())["blocked_reason"]
+
+
+def test_rows_keep_board_order_however_the_attempts_finish(world, monkeypatch):
+    # copy-ok is routed first but sleeps; copy-wrong's attempt settles first. The rows a
+    # print reads are still board order — the serial pass's order, unchanged.
+    two_wide(world)
+    fake_worker(monkeypatch, sleep_by_task={"copy-ok": 1.0, "copy-wrong": 0.0})
+    now = time.time()
+    world["ledger"].record_lane("go", ready_record(now))
+    assert [r["task"] for r in run_tick(world, now)] == ["copy-ok", "copy-wrong"]
+
+
+def test_a_concurrent_pass_matches_a_serial_one(tmp_path, monkeypatch):
+    # "the stdout rows and ledger events are identical to the serial run's": the same board
+    # settled on a capacity-1 account (one attempt at a time) and on a capacity-2 account
+    # (two at once) produces the same rows and the same events per attempt.
+    fake_worker(monkeypatch)
+    serial = build_world(tmp_path / "serial", monkeypatch)
+    concurrent = build_world(tmp_path / "concurrent", monkeypatch)
+    two_wide(concurrent)
+    now = time.time()
+    serial["ledger"].record_lane("go", ready_record(now))
+    concurrent["ledger"].record_lane("go", ready_record(now))
+    serial_rows = run_tick(serial, now)
+    concurrent_rows = run_tick(concurrent, now)
+
+    def normalized(results):
+        return [{k: v for k, v in r.items() if k != "attempt"} for r in results]
+
+    assert normalized(concurrent_rows) == normalized(serial_rows)
+    assert events_by_board_task(concurrent["ledger"]) == events_by_board_task(serial["ledger"])
