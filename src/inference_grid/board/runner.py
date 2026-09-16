@@ -309,14 +309,17 @@ def readiness_view(ledger, lanes, now, accounts_by_lane=None, scorecard=None):
 
 
 def calibration_reports(ledger):
-    """Per (family, model) aggregate of the ledger's calibration outcomes.
+    """Per (family, model) aggregate of the ledger's calibration/eval outcomes.
 
-    score_calibration records one outcome per calibration case with category
-    "calibration" and accepted = all defects recalled and no false positives
-    (board/calibration.py), so a lane's acceptance rate over those outcomes is the
-    strict recall the calibration gate measured. route blends that rate into the
-    selection score; the rows match a scorecard row's identity minus the category.
+    score_calibration records one outcome per case, category `eval:review` (the legacy
+    `calibration` still counts; board/calibration/score.py) and accepted = all defects
+    recalled and no false positives, so a lane's acceptance rate over those outcomes is
+    the strict recall the calibration gate measured. A packet case's `eval:packet`
+    outcome counts the same way. route blends that rate into the selection score; the
+    rows match a scorecard row's identity minus the category.
     """
+    from .calibration import is_calibration_outcome
+
     with ledger.engine.connect() as con:
         specs = {t["id"]: t["spec"] for t in con.execute(select(task_records)).mappings()}
         rows = list(con.execute(select(attempt_records)).mappings())
@@ -325,7 +328,7 @@ def calibration_reports(ledger):
             select(ledger_events).where(ledger_events.c.kind == "outcome_recorded")
         ).mappings():
             detail = e["detail"]
-            if isinstance(detail, dict) and detail.get("category") == "calibration":
+            if isinstance(detail, dict) and is_calibration_outcome(detail.get("category")):
                 outcomes[e["attempt"]] = detail
     agg = {}
     for row in rows:

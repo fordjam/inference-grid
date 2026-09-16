@@ -1,0 +1,3 @@
+Add `rolling_mean(values, window)` to the metrics helpers, with unit tests. The
+implementation is in place and believed correct: verify it against the docstring and
+make it match for every window, including windows longer than the input.

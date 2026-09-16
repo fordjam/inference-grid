@@ -505,7 +505,7 @@ def test_record_true_records_calibration_outcomes(tmp_path):
         )
     assert len(recorded) == 1
     assert recorded[0]["attempt"] == AID
-    assert recorded[0]["detail"]["category"] == "calibration"
+    assert recorded[0]["detail"]["category"] == "eval:review"
     assert recorded[0]["detail"]["accepted"] is True
 
 
@@ -689,15 +689,22 @@ PRIVATE_CORPUS = Path.home() / ".config/inference-grid/calibration/corpus-v1"
 def test_the_example_corpus_loads_and_authors_its_tasks(tmp_path):
     from inference_grid.board.task import validate_task
 
-    # The shipped corpus is a four-case example (two clean, two with a planted defect); the
-    # operator's own corpus lives outside the repository and is not published.
+    # The shipped corpus is a three-case example: two review cases (one clean, one with a
+    # planted defect) and one packet case (a buggy helpers module and its hidden reference
+    # suite); the operator's own corpus lives outside the repository and is not published.
     cases = load_corpus(CORPUS_V1)
-    assert [c["case"] for c in cases] == ["clean-normalize", "sum-drops-last"]
-    clean = {c["case"]: c["answer"]["clean"] for c in cases}
+    review = [c for c in cases if c["kind"] == "review"]
+    packet = [c for c in cases if c["kind"] == "packet"]
+    assert [c["case"] for c in review] == ["clean-normalize", "sum-drops-last"]
+    assert [c["case"] for c in packet] == ["rolling-mean-off-by-one"]
+    clean = {c["case"]: c["answer"]["clean"] for c in review}
     assert clean == {"clean-normalize": True, "sum-drops-last": False}
     board, project = board_and_project(tmp_path)
     created = calibration.author_calibration(board, project, CORPUS_V1, ["go"], "seed-v1")
-    assert [t["id"] for t in created["tasks"]] == [f"calib-seed-v1-{c['case']}" for c in cases]
+    assert [t["id"] for t in created["tasks"]] == [f"calib-seed-v1-{c['case']}" for c in review]
+    # A packet case is not a review packet: authoring it is the evals path, so it is
+    # reported as skipped rather than staged as a review.
+    assert created["skipped"] == ["rolling-mean-off-by-one"]
     for entry in created["tasks"]:
         task = validate_task(json.loads((board / (entry["id"] + ".json")).read_text()))
         assert task["author_family"] == "calibration"
