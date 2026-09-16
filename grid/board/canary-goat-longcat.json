@@ -1,9 +1,9 @@
 {
- "id": "canary-goat-qwen",
+ "id": "canary-goat-longcat",
  "category": "canary",
- "brief": "grid/briefs/canary-goat-qwen.txt",
+ "brief": "grid/briefs/canary-goat-longcat.txt",
  "inputs": [
-  "grid/briefs/canary-goat-qwen.txt"
+  "grid/briefs/canary-goat-longcat.txt"
  ],
  "tests": [
   "grid/tests/test_canary_reply.py"
@@ -12,7 +12,7 @@
   "reply.txt"
  ],
  "lanes": [
-  "goat-qwen"
+  "goat-longcat"
  ],
  "author_family": null,
  "budget": {
@@ -20,6 +20,6 @@
   "output_bytes": 10000,
   "thinking_tokens": null
  },
- "state": "blocked",
- "blocked_reason": "attempt 935869b6-40ce-44eb-9b46-ba25a78e7e37 held; resolve with evidence"
+ "state": "ready",
+ "blocked_reason": null
 }

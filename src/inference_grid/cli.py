@@ -206,6 +206,8 @@ def main():
             "catalogue",
             "deals",
             "quality",
+            "case-from-landed",
+            "case-from-review",
             "board-init",
             "calibrate",
             "calibration-score",
@@ -335,6 +337,8 @@ def main():
         "catalogue": lambda **kw: ledger.catalogue(**kw),
         "deals": lambda **kw: deals_command(ledger, **kw),
         "quality": lambda **kw: quality_command(ledger, **kw),
+        "case-from-landed": lambda **kw: case_from_landed(**kw),
+        "case-from-review": lambda **kw: case_from_review(**kw),
     }
     report = commands[args.command](**data)
     if args.command == "land":
@@ -471,6 +475,27 @@ def quality_command(ledger, benchmarks_path=None, category=None):
     from .board.priors import quality_table
 
     return quality_table(ledger, benchmarks_path=benchmarks_path, category=category)
+
+
+def case_from_landed(project_root, board_dir, task_id, corpus_dir, name=None, prefixes=None):
+    """A packet eval case from a landed packet: base tree, landed patch, its tests."""
+    from .board.calibration.history import DEFAULT_PREFIXES, packet_case_from_landed
+
+    return packet_case_from_landed(
+        project_root,
+        board_dir,
+        task_id,
+        corpus_dir,
+        name=name,
+        prefixes=tuple(prefixes) if prefixes else DEFAULT_PREFIXES,
+    )
+
+
+def case_from_review(board_dir, review_id, corpus_dir, answer, name=None):
+    """A review eval case from a staged review packet and a confirmed answer key."""
+    from .board.calibration.history import review_case_from_staging
+
+    return review_case_from_staging(board_dir, review_id, corpus_dir, answer, name=name)
 
 
 def digest(ledger, boards_dir, since=None):

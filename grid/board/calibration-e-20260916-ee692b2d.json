@@ -1,0 +1,27 @@
+{
+ "id": "calibration-e-20260916-ee692b2d",
+ "category": "calibration_run",
+ "brief": "grid/briefs/calibration-e-20260916-ee692b2d.txt",
+ "inputs": [],
+ "tests": [],
+ "artifacts": [],
+ "lanes": [
+  "goat-longcat"
+ ],
+ "author_family": null,
+ "budget": {
+  "wall_seconds": 60,
+  "output_bytes": 100000,
+  "thinking_tokens": null
+ },
+ "state": "ready",
+ "blocked_reason": null,
+ "spec": {
+  "corpus_dir": "/Users/fordjam/.config/inference-grid/calibration/history",
+  "lanes": [
+   "goat-longcat"
+  ],
+  "run_id": "e-20260916-ee692b2d",
+  "case": "inference-grid-packet-l4"
+ }
+}
