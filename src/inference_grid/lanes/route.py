@@ -25,11 +25,20 @@ inputs and carries its answer back with the drop report:
   tier the task's category asks for and reports the others in `dropped` with reason
   `tier_mismatch`. The filter never empties the offer: with no lane of the task's tier
   offered, every lane stays, so a board whose records predate the key routes as it did.
+- Lane policy: a board that demands hosting and retention guarantees carries
+  `require_lane_meta` ({"residency": ["us", "eu"], "retention": ["zero"]}); every
+  candidate — an explicit list included — whose `lane_meta` record (the lanes-meta.json
+  sidecar, read by the tick, lanes/meta.py) does not satisfy every listed key is dropped
+  with reason `lane_policy` naming the key. Unknown never satisfies, so an untagged lane
+  is refused rather than trusted, and a requirement that no lane satisfies refuses the
+  task: policy decides where work may go at all, before budgets and tiers say where it
+  fits. Without the key, route behaves as if the sidecar did not exist.
 """
 
 from math import ceil, gcd
 
 from .go import CONTENT_ALLOWANCE, REASONING_HEADROOM
+from .meta import policy_drop, validate_requirement
 from .select import select_lane
 
 # go.run's request cap when a task carries no thinking budget.
@@ -202,6 +211,13 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
     empties the offer — a task whose lanes all declare another tier is routed by readiness
     and score exactly as it was before the key existed — so the budget decides fit and the
     tier decides choice among the lanes that fit.
+
+    Before both, the board's `require_lane_meta` (carried on the task dict the way
+    `budget` is) filters the candidates on their `lane_meta` records: a lane failing any
+    listed key is dropped `lane_policy` with the key named, and when every candidate
+    fails — the untagged included, whose unknown satisfies nothing — the answer is lane
+    None, reason `lane_policy`. A malformed requirement raises ValueError: the tick
+    refuses rather than routes around its own policy.
     """
     cat = task.get("category") if isinstance(task, dict) else None
     budget = task.get("budget") if isinstance(task, dict) else None
@@ -209,17 +225,40 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes):
     explicit = task.get("lanes") if isinstance(task, dict) else None
     explicit = explicit if isinstance(explicit, list) else []
     tier = wanted_tier(cat)
+    require = task.get("require_lane_meta") if isinstance(task, dict) else None
     if explicit:
         candidates = [lid for lid in lanes if lid in explicit]
     else:
         candidates = default_lanes(cat, lanes)
+    if require:
+        validate_requirement(require)
+        kept_ids, policy_drops = [], []
+        for lid in candidates:
+            row = policy_drop(lid, lanes[lid].get("lane_meta"), require)
+            if row is None:
+                kept_ids.append(lid)
+            else:
+                policy_drops.append(row)
+        if not kept_ids:
+            return {
+                "lane": None,
+                "score": None,
+                "reason": "lane_policy",
+                "candidates": [],
+                "dropped": policy_drops,
+                "tier": tier,
+            }
+        candidates = kept_ids
+        dropped = policy_drops
+    else:
+        dropped = []
     prompt = ceil(inputs_bytes / 4)
     # An output cap cannot bound a prompt. What it bounds is the reasoning the model spends
     # on it, which on 2026-09-14's reviews ran about half the prompt (10 279 tokens on a
     # 15 949-token packet overran a 10 000 cap); the prompt itself is bounded by the
     # model's context window, from the lane view or the catalogue below.
     need = prompt // 2 + CONTENT_ALLOWANCE
-    dropped, kept = [], []
+    kept = []
     for lid in candidates:
         lane = lanes[lid]
         cap = max_tokens_cap(lane, thinking)

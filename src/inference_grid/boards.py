@@ -350,6 +350,9 @@ def board_snapshot(ledger, config, packets_root=None, now=None):
                 packets,
                 now=now,
                 dry_run=True,
+                # The board's hosting/retention requirement plans the lane_policy drops
+                # the real tick would make.
+                require_lane_meta=config.get("require_lane_meta"),
             )
             plan = {row["task"]: row for row in answer.get("plan", [])}
             readiness = answer.get("readiness", {})

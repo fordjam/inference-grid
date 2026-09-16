@@ -2,6 +2,9 @@ import copy
 import json
 import time
 import unittest
+from unittest import mock
+
+import pytest
 
 from test_board_runner import make_review_task, make_task, ready_record, world  # noqa: F401 -- binds the world fixture here
 
@@ -480,6 +483,256 @@ def test_the_dry_run_explains_a_tier_mismatch(request):
     assert entry["dropped"] == [
         {"lane": "go", "reason": "tier_mismatch", "detail": "lane tier build, task wants review"}
     ]
+
+
+class LanePolicyTests(unittest.TestCase):
+    """The board's hosting/retention requirement against the sidecar records (L8)."""
+
+    REQUIRE = {"residency": ["us", "eu"], "retention": ["zero"]}
+
+    def test_a_board_requiring_us_zero_offers_only_the_tagged_lanes(self):
+        lanes = {
+            "go": dict(LANES["go"], lane_meta={"residency": "us", "retention": "zero"}),
+            "zcode": LANES["zcode"],  # untagged: unknown satisfies nothing
+        }
+        ready = {k: {"state": "ready"} for k in lanes}
+        out = route(task(require_lane_meta=self.REQUIRE), lanes, ready, [], [], 0, 0)
+        self.assertEqual((out["lane"], out["candidates"]), ("go", [{"lane": "go", "cap": 16000}]))
+        # The untagged lane's drop row names the first key it fails.
+        self.assertEqual(
+            out["dropped"],
+            [
+                {
+                    "lane": "zcode",
+                    "reason": "lane_policy",
+                    "detail": "residency unknown not in [us, eu]",
+                }
+            ],
+        )
+
+    def test_unknown_never_satisfies_even_when_written_down(self):
+        lanes = {"go": dict(LANES["go"], lane_meta={"residency": "unknown", "retention": "zero"})}
+        out = route(
+            task(require_lane_meta=self.REQUIRE),
+            lanes,
+            {k: {"state": "ready"} for k in lanes},
+            [],
+            [],
+            0,
+            0,
+        )
+        self.assertEqual((out["lane"], out["reason"]), (None, "lane_policy"))
+        self.assertEqual(out["dropped"][0]["detail"], "residency unknown not in [us, eu]")
+
+    def test_days_retention_drops_where_zero_is_required(self):
+        lanes = {"go": dict(LANES["go"], lane_meta={"residency": "us", "retention": "days"})}
+        out = route(
+            task(require_lane_meta=self.REQUIRE),
+            lanes,
+            {k: {"state": "ready"} for k in lanes},
+            [],
+            [],
+            0,
+            0,
+        )
+        self.assertEqual((out["lane"], out["reason"]), (None, "lane_policy"))
+        self.assertEqual(out["dropped"][0]["detail"], "retention days not in [zero]")
+
+    def test_no_lane_satisfying_the_requirement_refuses_the_task(self):
+        # The policy gate can empty the offer where the tier one never does: a board that
+        # must not use a lane refuses the task instead of using the lane.
+        out = route(task(require_lane_meta=self.REQUIRE), LANES, READY, [], [], 0, 0)
+        self.assertEqual(
+            (out["lane"], out["score"], out["reason"], out["candidates"]),
+            (None, None, "lane_policy", []),
+        )
+        self.assertEqual([d["reason"] for d in out["dropped"]], ["lane_policy", "lane_policy"])
+
+    def test_an_explicit_list_is_filtered_too(self):
+        # The whole point of the board key: the requirement holds even where the task
+        # names its lane, so compliance stops depending on which lanes a task names.
+        lanes = {"go": dict(LANES["go"], lane_meta={"residency": "eu", "retention": "zero"})}
+        out = route(
+            task(lanes=["go"], require_lane_meta=self.REQUIRE),
+            lanes,
+            {k: {"state": "ready"} for k in lanes},
+            [],
+            [],
+            0,
+            0,
+        )
+        self.assertEqual((out["lane"], out["dropped"]), ("go", []))
+
+    def test_surviving_policy_lanes_still_report_budget_and_tier_drops(self):
+        lanes = {
+            "go": dict(
+                LANES["go"], lane_meta={"residency": "us", "retention": "zero"}, max_tokens=10000
+            ),
+            "zcode": LANES["zcode"],  # untagged: policy drops it before the budget runs
+            "kimi": dict(
+                LANES["kimi"], lane_meta={"residency": "eu", "retention": "zero"}, max_tokens=22000
+            ),
+        }
+        ready = {k: {"state": "ready"} for k in lanes}
+        budget = {"wall_seconds": 60, "output_bytes": 100000, "thinking_tokens": 2000}
+        out = route(
+            task(
+                category="independent_review",
+                lanes=["go", "zcode", "kimi"],
+                budget=budget,
+                require_lane_meta=self.REQUIRE,
+            ),
+            lanes,
+            ready,
+            [],
+            [],
+            0,
+            BIG_PACKET,
+        )
+        # Policy drops come first, then the budget refusals, then the tier report — the
+        # offered set is what policy, budget and tier all left standing.
+        self.assertEqual(
+            [(d["lane"], d["reason"]) for d in out["dropped"]],
+            [("zcode", "lane_policy"), ("go", "budget_unfit")],
+        )
+        self.assertEqual([c["lane"] for c in out["candidates"]], ["kimi"])
+
+    def test_without_a_requirement_a_stray_meta_changes_nothing(self):
+        # A board that carries no requirement routes exactly as before L8, sidecar or
+        # no sidecar: the records ride the lane view ignored.
+        lanes = {
+            "go": dict(LANES["go"], lane_meta={"residency": "mars", "retention": "days"}),
+            "zcode": dict(LANES["zcode"], lane_meta={"residency": "eu", "retention": "zero"}),
+        }
+        ready = {k: {"state": "ready"} for k in lanes}
+        out = route(task(), lanes, ready, [], [], 0, 0)
+        self.assertEqual((out["lane"], out["dropped"]), ("go", []))
+        self.assertEqual([c["lane"] for c in out["candidates"]], ["go", "zcode"])
+
+    def test_a_malformed_requirement_refuses_instead_of_routing(self):
+        with self.assertRaises(ValueError):
+            route(task(require_lane_meta={"retention": ["unknown"]}), LANES, READY, [], [], 0, 0)
+        with self.assertRaises(ValueError):
+            route(task(require_lane_meta={"hosting": ["us"]}), LANES, READY, [], [], 0, 0)
+
+
+def test_the_tick_applies_the_board_requirement_from_the_sidecar(request):
+    w = request.getfixturevalue("world")
+    for tid in ("copy-meta", "copy-meta-2"):
+        (w["board"] / f"{tid}.json").write_text(json.dumps(make_task(tid, "brief.txt")))
+    sidecar = w["lanes_path"].parent / "lanes-meta.json"
+    now = time.time()
+    w["ledger"].record_lane("go", ready_record(now))
+    # The go lane is hosted in the US under zero retention, per the operator's source.
+    sidecar.write_text(
+        json.dumps(
+            {
+                "lanes": {
+                    "go": {
+                        "residency": "us",
+                        "retention": "zero",
+                        "retention_source": "https://example.com/zen",
+                    }
+                }
+            }
+        )
+    )
+    reads = []
+    real_load = runner.load_lane_meta
+
+    def counting_load(lanes_path):
+        reads.append(lanes_path)
+        return real_load(lanes_path)
+
+    with mock.patch.object(runner, "load_lane_meta", counting_load):
+        plan = runner.tick(
+            w["board"],
+            w["project"],
+            w["ledger"],
+            w["lanes"],
+            w["lanes_path"],
+            {"go": w["account"]},
+            w["packets"],
+            now=now,
+            dry_run=True,
+            require_lane_meta={"residency": ["us", "eu"], "retention": ["zero"]},
+        )
+    # The sidecar is read once per tick, not once per task.
+    assert len(reads) == 1
+    entry = next(row for row in plan["plan"] if row["task"] == "copy-meta")
+    # The tagged lane is offered; the dry run shows the policy pass in its plan row.
+    assert (entry["lane"], entry["reason"]) == ("go", "selected")
+    assert entry["dropped"] == []
+
+    # The same board with a record that misses the retention guarantee: the task is
+    # refused on policy, the row naming the key, and nothing is dispatched.
+    sidecar.write_text(json.dumps({"lanes": {"go": {"residency": "us", "retention": "days"}}}))
+    plan = runner.tick(
+        w["board"],
+        w["project"],
+        w["ledger"],
+        w["lanes"],
+        w["lanes_path"],
+        {"go": w["account"]},
+        w["packets"],
+        now=now,
+        dry_run=True,
+        require_lane_meta={"residency": ["us", "eu"], "retention": ["zero"]},
+    )
+    entry = plan["plan"][0]
+    assert entry["lane"] is None
+    assert entry["reason"] == "lane_policy"
+    assert entry["candidates"] == []
+    assert entry["dropped"] == [
+        {
+            "lane": "go",
+            "reason": "lane_policy",
+            "detail": "retention days not in [zero]",
+        }
+    ]
+
+
+def test_a_malformed_sidecar_refuses_the_whole_tick(request):
+    w = request.getfixturevalue("world")
+    (w["board"] / "copy-bad.json").write_text(json.dumps(make_task("copy-bad", "brief.txt")))
+    sidecar = w["lanes_path"].parent / "lanes-meta.json"
+    sidecar.write_text('{"lanes": {"go": {"residency": "mars"}}}')
+    # Fail closed: an unparseable or out-of-enum sidecar refuses the pass itself, with
+    # the parse error — even before any board requirement is considered.
+    with pytest.raises(ValueError) as raised:
+        runner.tick(
+            w["board"],
+            w["project"],
+            w["ledger"],
+            w["lanes"],
+            w["lanes_path"],
+            {"go": w["account"]},
+            w["packets"],
+            now=0,
+            dry_run=True,
+        )
+    assert "residency" in str(raised.value)
+
+
+def test_no_sidecar_and_no_requirement_behaves_as_today(request):
+    w = request.getfixturevalue("world")
+    (w["board"] / "copy-plain.json").write_text(json.dumps(make_task("copy-plain", "brief.txt")))
+    now = time.time()
+    w["ledger"].record_lane("go", ready_record(now))
+    plan = runner.tick(
+        w["board"],
+        w["project"],
+        w["ledger"],
+        w["lanes"],
+        w["lanes_path"],
+        {"go": w["account"]},
+        w["packets"],
+        now=now,
+        dry_run=True,
+    )
+    entry = next(row for row in plan["plan"] if row["task"] == "copy-plain")
+    assert (entry["lane"], entry["reason"]) == ("go", "selected")
+    assert entry["dropped"] == []
 
 
 if __name__ == "__main__":

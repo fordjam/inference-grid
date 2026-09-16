@@ -32,6 +32,44 @@ on in the meantime (`plan_requires_tier_plan`).
 "plan-lane": { "model": "glm-5.3-flash", "tier": "plan" }
 ```
 
+## Lane policy facts — `lanes-meta.json`
+
+Some lane facts are policy rather than transport: where the provider hosts the model and
+what it promises to retain. `lanes/config.py` is provider-authored and admits exactly its
+required keys, so those facts live in a sidecar the operator keeps **beside `lanes.json`**
+— `lanes-meta.json`, read once per tick:
+
+```json
+{"lanes": {
+  "go-opencode": {"residency": "us", "retention": "zero",
+                  "retention_source": "https://opencode.ai/docs/zen"},
+  "go":          {"residency": "unknown", "retention": "unknown"}
+}}
+```
+
+`residency` is `us | eu | unknown`, `retention` is `zero | days | unknown`, and
+`retention_source` is the URL or note the two facts were read from — the record is the
+operator's statement, and the source is what makes it auditable. A lane the file does not
+name (or a record without the key) reads `unknown` on that key, and a board the operator
+has not tagged at all (no sidecar) reads unknown everywhere: absence never satisfies.
+
+A board's tick config (the `board-tick --json` document, or the board's entry in
+`tick-all`'s `boards` directory) may carry `require_lane_meta`:
+
+```json
+"require_lane_meta": {"residency": ["us", "eu"], "retention": ["zero"]}
+```
+
+Every candidate lane — a task's explicit `lanes` list included — whose sidecar record does
+not satisfy **every** listed key is dropped before selection with reason `lane_policy`
+naming the key (`"detail": "residency unknown not in [us, eu]"`), and the dry run shows
+the drop in its plan rows. Unknown never satisfies, so an untagged lane is refused rather
+than trusted; when no lane satisfies the requirement the task is refused outright
+(`reason: lane_policy`) rather than routed to a lane the board must not use. A malformed
+sidecar — unparseable JSON, a key or value outside the shapes above — refuses the whole
+tick with the parse error: fail closed, never route on half-read policy. Without
+`require_lane_meta` the tick behaves exactly as before the key existed.
+
 ## Packaged kinds
 
 | Kind | Module | Family | Contract |
@@ -223,8 +261,9 @@ model in the US under a zero-retention policy, and the Go plan's table marks GLM
 Kimi K3 and Qwen3.8 Max "0 days / not used for training", which makes the Go lanes the only
 ones an operator can point at a T1 repository (COT) that requires US/EU hosting and zero
 retention. `lanes/config.py`'s accepted key set has no place for those three (provider-
-authored), so the operator keeps them in the sidecar beside `lanes.json` (brief L8's
-`lanes-meta.json`) until that lands; without the sidecar a reader must assume unknown.
+authored), so the operator keeps them in the sidecar beside `lanes.json`
+(`lanes-meta.json`, see "Lane policy facts" above); a board can then require them with
+`require_lane_meta`, and without a record a reader must assume unknown.
 
 The same Go subscription `go_http` spends on single calls, run through the `opencode`
 CLI as an agent with tools (`opencode run --model <model> --format json --dir <worktree>`
