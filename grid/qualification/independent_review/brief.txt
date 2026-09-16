@@ -1,0 +1,4 @@
+Review the staged module seeded_defects.py. It was authored with planted defects on
+purpose; every planted defect can be demonstrated by quoting the code. Decide
+"rejected" and report at least one finding whose observed text quotes the defect line.
+The verdict JSON follows the review schema; findings may cite more than one defect.

@@ -230,6 +230,10 @@ def lane_view(lanes, now):
             # config's fixed key set cannot, and route falls back to the go.py policy.
             "max_tokens": lane.get("max_tokens"),
             "context": lane.get("context"),
+            # O2 prices a lane from the catalogue by its plan (provider) and expects the
+            # tokens of its kind (an agent loop is not one call).
+            "provider": lane.get("provider"),
+            "kind": lane.get("kind"),
         }
     return view
 

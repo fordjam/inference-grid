@@ -1,0 +1,67 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### O3. Quality priors: published benchmark scores per model, ingested as a prior the evidence then overrides
+A model the grid has never run has no scorecard row, so `select_lane` scores it
+(0+1)/(0+2) = 0.5 and never prefers it over a model with one lucky success — and a
+model with a hundred cheap failures still gets tried. Published benchmarks are a prior,
+not a verdict: they say where to start, and the grid's own outcomes say where it ends.
+
+Do:
+1. `~/.config/inference-grid/benchmarks.json` (operator-owned, validated on read): per
+   model id (and alias ids — `kimi-k3`, `moonshotai/kimi-k3`, `cline-pass/kimi-k3` are one
+   model), a list of {benchmark, score, max_score, date, source_url}. Benchmarks worth
+   carrying, each mapped to a category family in `board/priors.py`: SWE-bench Verified /
+   Pro and Aider polyglot (packet, pure_function, tests_multi_file, bugfix-shaped work);
+   LiveCodeBench (pure_function); a code-review benchmark where one is published, else
+   the calibration corpus alone (independent_review). A fetcher is optional and single-
+   source (one public leaderboard JSON, fetched by a collector on the capacity loop,
+   recorded with its date); every other number is typed by hand with its URL.
+2. `priors.quality_prior(model, category) -> (p, strength)`: the benchmark score
+   normalised to [0, 1] for that category's mapped benchmark(s), and a pseudo-count
+   strength (default 8; 0 when no benchmark applies, i.e. back to the flat prior). The
+   posterior used everywhere else is Beta(prior_p*strength + accepted + 1,
+   (1-prior_p)*strength + rejected + 1) — the scorecard's own accepted/attempts — so
+   twenty real outcomes swamp any benchmark, and zero outcomes fall back to it.
+3. For reviewers, quality is not "the review attempt completed": it is recall on the
+   calibration corpus (M4's `eval:*` rows: seeded defects found, false positives) and,
+   once M5 runs nightly, that series. `quality_estimate(model, category)` returns the
+   posterior mean and the evidence count, with `source` naming which of the three fed
+   it (benchmark, scorecard, calibration).
+4. `inference-grid quality --json` prints the estimate per (model, category) with the
+   inputs; the digest's Evidence section gains the prior column so a number without
+   outcomes reads as a prior.
+Tests: alias resolution; prior maths at 0 and 20 outcomes; a review model's estimate
+comes from calibration recall, not attempt completion; a missing benchmarks file is the
+flat prior; validation refuses a score above max_score. Report: `docs/reports/packet-o3.md`.
+- Size: medium. Why: selection without a prior tries nothing new and forgets nothing old.
+
+---

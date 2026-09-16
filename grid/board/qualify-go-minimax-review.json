@@ -1,0 +1,27 @@
+{
+ "id": "qualify-go-minimax-review",
+ "category": "independent_review",
+ "brief": "grid/qualification/independent_review/brief.txt",
+ "inputs": [
+  "grid/qualification/independent_review/brief.txt",
+  "grid/qualification/independent_review/seeded_defects.py"
+ ],
+ "tests": [
+  "grid/tests/test_review_schema.py",
+  "grid/qualification/independent_review/test_findings.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "go-minimax"
+ ],
+ "author_family": "operator",
+ "budget": {
+  "wall_seconds": 600,
+  "output_bytes": 2000000,
+  "thinking_tokens": 6000
+ },
+ "state": "ready",
+ "blocked_reason": null
+}

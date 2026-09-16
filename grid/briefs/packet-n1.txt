@@ -1,0 +1,79 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### N1. Provider economics, the record: every quota reading kept, every attempt's usage captured
+Five days of the grid produced 268 attempts, and the question "which plan is worth its
+money" cannot be answered from the ledger: `observations` and the 870 `quota_observed`
+events store a digest of each reading, never the numbers, so only the current
+`used_percent` per provider exists (the Go collector's append-only log is the accidental
+exception); and `outcome_recorded.usage` is null on every row although every adapter's
+native stream reports what the run cost — Cline's `run_result` carries `usage`
+(`inputTokens`, `cacheReadTokens`, `outputTokens`, `iterations`, `durationMs`), Command
+Code's `result` document carries cost fields, and the HTTP lanes return usage in the
+response body. On 2026-09-16 the only way to learn that seven ClinePass runs had read
+46M tokens (41M of them cache) over 728 iterations was to open transcripts on disk.
+
+Do, in `ledger.py` and the lanes:
+1. `quota_history`: a new table (provider, window_id, observed_at, used_percent,
+   resets_at, status) appended on every `record_lane`/quota observation — the NUMBERS,
+   not a digest — with the existing digest kept for replay detection. `Ledger.quota_series
+   (provider, window_id, since)` reads it back in time order.
+2. Usage capture, from the CLIs' OWN stores first, our transcript second. Every CLI lane
+   already keeps a per-request usage record keyed by the working directory, which is the
+   attempt's `work/` clone — so the join is the path:
+   - Command Code: `~/.commandcode/projects/<cwd-slug>/<session>.jsonl`, one `"usage"`
+     object per request with `inputTokens`, `outputTokens`, `cacheReadTokens`,
+     `cacheWriteTokens`, `costUsd` (the provider's own dollar figure);
+   - Cline: `~/.cline/data/sessions/<id>/<id>.json` (`cwd`, `model`, `started_at`,
+     `ended_at`, `exit_code`) beside the session's message store; the run's totals are also
+     the `run_result.usage` line in our native transcript (`inputTokens`,
+     `cacheReadTokens`, `outputTokens`, `iterations`, `durationMs`);
+   - OpenCode (L7's `opencode_cli`): `~/.local/share/opencode/opencode.db`, tables
+     `session`/`message`/`part` — what github.com/gaboe/opencode-usage reads (prior art:
+     per-provider/model daily totals with API-equivalent pricing; read it before designing
+     the report shape, do not vendor it);
+   - go/zai HTTP: the response body's `usage`.
+   Each adapter gains `usage(attempt_dir, work) -> dict | None`, normalised to
+   {input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, iterations,
+   duration_s, cost_usd, source} with absent fields None, never guessed, and `source`
+   naming which store answered. `build_loop` sums the rounds' usage into the verdict
+   (`usage`), and `run_packet` / the review and canary settle paths pass it to
+   `record_outcome(usage=...)` so the scorecard rows carry it.
+3. `inference-grid usage --json {since}`: the raw rows (attempt, account, lane, model,
+   category, accepted, usage) for the window — the data N2's report reads.
+Tests: a quota reading appended twice with different numbers yields two rows and one
+replay-detected digest; each adapter's `usage` parses a fixture transcript and returns
+None for a stream without a terminal; a packet verdict sums two rounds' usage; the
+outcome carries it; `usage --json` returns the rows. Report: `docs/reports/packet-n1.md`.
+- Size: medium. Why: allowance is being spent at rates that differ fifty-fold between
+  plans and nothing records why.
+
+---

@@ -1,0 +1,25 @@
+{
+ "id": "canary-go-minimax",
+ "category": "canary",
+ "brief": "grid/briefs/canary-go-minimax.txt",
+ "inputs": [
+  "grid/briefs/canary-go-minimax.txt"
+ ],
+ "tests": [
+  "grid/tests/test_canary_reply.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "go-minimax"
+ ],
+ "author_family": null,
+ "budget": {
+  "wall_seconds": 120,
+  "output_bytes": 10000,
+  "thinking_tokens": null
+ },
+ "state": "ready",
+ "blocked_reason": null
+}

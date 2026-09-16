@@ -1,0 +1,25 @@
+{
+ "id": "canary-goat-kimi",
+ "category": "canary",
+ "brief": "grid/briefs/canary-goat-kimi.txt",
+ "inputs": [
+  "grid/briefs/canary-goat-kimi.txt"
+ ],
+ "tests": [
+  "grid/tests/test_canary_reply.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "goat-kimi"
+ ],
+ "author_family": null,
+ "budget": {
+  "wall_seconds": 120,
+  "output_bytes": 10000,
+  "thinking_tokens": null
+ },
+ "state": "blocked",
+ "blocked_reason": "attempt ed6a5e8d-7602-4fab-905b-18e184f0ca1a held; resolve with evidence"
+}

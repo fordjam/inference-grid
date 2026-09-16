@@ -1,0 +1,62 @@
+## 1. Hard rules
+
+### Never read or edit
+- `~/.config/inference-grid/` (credential files, `lanes.json`, quota stamps, `deny-read.json`).
+- `~/.local/share/opencode/auth.json`, `~/.commandcode/auth.json`, `~/.zcode/`, any `.env*`.
+- `~/.grid-workspaces/` and `~/.local/share/inference-grid/board.sqlite` — live packets and the
+  durable ledger the board runner is using. Look, don't touch.
+- Personal project data anywhere (`~/insta-saved/data`, `saved.db`, `~/projects/pyprojects/monarch` data files).
+
+### Never run
+- `inference-grid board-tick`, `board-tick-all.py`, any `dispatch.py` — they spend subscription quota
+  and race the running coordinator. Unit tests only.
+- `git push`, tags, releases. Commit locally on `main`; the coordinator pushes after CI.
+- Anything that installs packages system-wide or edits launchd.
+
+### Never write
+- Credentials, tokens, absolute home paths or e-mail addresses into code, tests, docs or commit
+  messages. The only credential access in this package is through `lane["credential_path"]` inside
+  `src/inference_grid/lanes/*.py`; do not add another.
+- Provider-authored files marked "integrated unmodified" (`observation.py`, `goat_outcomes.py`,
+  `remaining_units.py`, `provider_report.py`, `lane_readiness.py`, `flash_window.py`,
+  `lanes/config.py`, `lanes/select.py`, `lanes/sandbox.py`, `board/task.py`) — fix callers instead,
+  or write a new module. If one of them is wrong, say so in the report.
+
+### Tests must stay offline
+No test may open a network connection. Lane tests use fake CLIs, injected `send` functions and fake
+session databases (see `tests/test_lane_zcode.py`, `tests/test_lane_go.py`). macOS-only tests skip
+at module level when `/usr/bin/sandbox-exec` is absent.
+
+---
+
+#### N2. Provider economics, the report: allowance and dollars per accepted outcome, per plan
+Depends on N1. With readings and usage recorded, the operator's question — which plan
+to drop, which to upgrade — becomes a report.
+
+Do:
+1. `plans.json` beside `lanes.json` (operator-authored, `~/.config/inference-grid/`,
+   validated on read, absent = every dollar figure prints "no price on file"): per
+   account, `price_per_month`, `windows` (e.g. five_hour, weekly, monthly), and
+   `metering` — one of `tokens` (input+output billed), `tokens_cached_discount` (cache
+   reads billed at a stated fraction), `requests`, `unknown` — with a `source` string
+   saying where the rule was read. `inference-grid doctor` lists accounts without a plan.
+2. `inference-grid economics --json {since, until}` and a Markdown rendering: per account
+   and per ISO week — attempts by category, completed/held/failed/abandoned, accepted,
+   landed (via `packet_landed` events), median wall minutes, summed usage, allowance
+   consumed in the window (from `quota_history`: the rise in `used_percent` net of resets,
+   per window id), allowance-per-accepted, and where a price is on file dollars-per-accepted
+   (price × allowance share). Every derived figure names its inputs; a plan whose metering
+   is `unknown` prints its usage but no per-token cost. An "observations" column says how
+   many readings the window had, so a sparse series is not mistaken for a flat one.
+3. The digest gains an *Economics* section (this week vs last, per account, the two
+   per-accepted figures) and lists under *needs-you* any account whose allowance-per-
+   accepted rose more than 2x week over week.
+Tests: a fixture ledger with two accounts over two weeks produces the expected table;
+resets are netted (a window that reset mid-week is not counted as negative consumption);
+missing prices and unknown metering render as stated; the digest section and the
+needs-you rule. Report: `docs/reports/packet-n2.md`, including the report run against
+the live ledger for 2026-09-12..16.
+- Size: medium. Why: the decision to drop ClinePass or upgrade Go should rest on a table,
+  not on a transcript someone opened by hand.
+
+---

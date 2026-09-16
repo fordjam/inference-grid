@@ -1,0 +1,25 @@
+{
+ "id": "canary-go-deepseek",
+ "category": "canary",
+ "brief": "grid/briefs/canary-go-deepseek.txt",
+ "inputs": [
+  "grid/briefs/canary-go-deepseek.txt"
+ ],
+ "tests": [
+  "grid/tests/test_canary_reply.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "go-deepseek"
+ ],
+ "author_family": null,
+ "budget": {
+  "wall_seconds": 120,
+  "output_bytes": 10000,
+  "thinking_tokens": null
+ },
+ "state": "blocked",
+ "blocked_reason": "attempt 6a9d1d99-430e-4d06-93d1-8be4f3c88d2f held; resolve with evidence"
+}
