@@ -25,6 +25,7 @@ def board_tick(
     observations=None,
     output_dir=None,
     package_src=None,
+    owner_only=None,
 ):
     from .board.runner import tick as board_run
     from .lanes.runner import load_lanes
@@ -53,6 +54,7 @@ def board_tick(
                             "observations",
                             "output_dir",
                             "package_src",
+                            "owner_only",
                         )
                         if key in config
                     },
@@ -76,6 +78,7 @@ def board_tick(
         observations=observations,
         output_dir=output_dir,
         package_src=package_src,
+        owner_only=owner_only,
     )
 
 

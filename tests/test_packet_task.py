@@ -522,3 +522,29 @@ def test_the_task_specs_idle_window_reaches_the_loop(world, monkeypatch):
     results = tick(world)
     assert [r["result"] for r in results] == ["passed"]
     assert seen["idle_seconds"] == 1200
+
+
+def test_an_owner_only_packet_is_refused_with_the_prefix(world):
+    """Brief 14 M3: a packet whose declared files fall under a board owner_only prefix
+    waits for the operator — no lane, no attempt, nothing spent, the task stays ready
+    and the tick row names the prefix that matched."""
+    results = tick(world, owner_only=["docs/reports"])
+    assert [r["result"] for r in results] == ["owner_only: docs/reports"]
+    assert results[0]["lane"] is None and results[0]["attempt"] is None
+    task = json.loads((world["board"] / "d1-packet.json").read_text())
+    assert task["state"] == "ready" and task["blocked_reason"] is None
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
+
+
+def test_an_owner_only_refusal_is_planned_dry(world):
+    plan = tick(world, dry_run=True, owner_only=["docs"])["plan"]
+    assert [row["reason"] for row in plan] == ["owner_only: docs"]
+
+
+def test_a_packet_outside_the_owner_only_prefixes_still_dispatches(world):
+    """The gate is the prefix, not the flag: a sibling directory outside every prefix
+    dispatches exactly as before."""
+    results = tick(world, owner_only=["docs/needs-you"])
+    assert [r["result"] for r in results] == ["passed"]
+    task = json.loads((world["board"] / "d1-packet.json").read_text())
+    assert task["state"] == "passed" and task["blocked_reason"] is None
