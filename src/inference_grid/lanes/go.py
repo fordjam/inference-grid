@@ -130,6 +130,24 @@ def endpoint_for(provider):
         raise ValueError("unknown provider: " + str(provider)) from None
 
 
+# The model id the endpoint bills the subscription under (brief 14, L6): ClinePass
+# draws on the pass only for ids in its own `cline-pass/` namespace — a vendor id
+# (`z-ai/glm-5.3-flash`) is served, when at all, from a free tier whose daily cap the
+# first canary exhausted (`endpoint returned HTTP 429`, grid/board/canary-cline-http.json,
+# 2026-09-16), and an uncovered vendor id 402s (model_not_in_plan). The lane record
+# keeps the canonical id — the runner's model match and the scorecard key on it — and
+# the wire carries `cline-pass/<bare id>`.
+PASS_NAMESPACES = {"clinepass": "cline-pass/"}
+
+
+def wire_model(provider, model):
+    """The model id to put on the wire for a provider; the lane's own id otherwise."""
+    namespace = PASS_NAMESPACES.get(provider)
+    if namespace is None or not isinstance(model, str):
+        return model
+    return namespace + model.rsplit("/", 1)[-1]
+
+
 def expected_artifact(work):
     """The single artifact name listed in inputs/expected.json."""
     try:
@@ -164,11 +182,18 @@ def http_send(body, key, session, timeout, endpoint=ENDPOINT):
     return json.loads(raw)
 
 
-def qualify(response, model):
-    """The reply must come from the asked model, have stopped normally, and carry text."""
+def qualify(response, model, aliases=()):
+    """The reply must come from the asked model, have stopped normally, and carry text.
+
+    `aliases` are the other ids the one asked model legitimately answers under: a
+    ClinePass request carries the pass id (wire_model) while the endpoint may echo the
+    lane's configured vendor id — one model behind two ids, the runner's bare_model
+    rule. Any other id is still an unexpected model.
+    """
     if not isinstance(response, dict):
         return "native response was not a JSON object"
-    if response.get("model") != model:
+    served = response.get("model")
+    if served != model and served not in aliases:
         return "request served by an unexpected model"
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -318,8 +343,9 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
     }
     # The endpoint is a property of the lane's provider (docs/LANES.md): an unknown one
     # refuses before credentials are read or a request is built.
+    provider = lane.get("provider", DEFAULT_PROVIDER)
     try:
-        endpoint = endpoint_for(lane.get("provider", DEFAULT_PROVIDER))
+        endpoint = endpoint_for(provider)
     except ValueError as exc:
         verdict["refusal"] = str(exc)
         return None, verdict
@@ -344,8 +370,14 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
         max_tokens = REASONING_HEADROOM * thinking_tokens + CONTENT_ALLOWANCE
         verdict["thinking_tokens"] = thinking_tokens
     verdict["max_tokens"] = max_tokens
+    # The wire carries the id the provider bills the subscription under (wire_model);
+    # the lane's own id stays the receipt's actual_model, and the verdict records the
+    # wire id whenever it differs so a hold names what was actually asked for.
+    sent_model = wire_model(provider, request["model"])
+    if sent_model != request["model"]:
+        verdict["wire_model"] = sent_model
     body = {
-        "model": request["model"],
+        "model": sent_model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "max_tokens": max_tokens,
@@ -402,7 +434,7 @@ def run(request, lane, attempt_dir, *, send=None, max_tokens=16000, timeout=None
         choices = response.get("choices")
         if isinstance(choices, list) and choices and isinstance(choices[0], dict):
             verdict["finish_reason"] = choices[0].get("finish_reason")
-    problem = qualify(response, request["model"])
+    problem = qualify(response, sent_model, aliases=(request["model"],))
     if problem:
         verdict["refusal"] = reasoning_overrun(response, max_tokens) or problem
         return None, verdict
