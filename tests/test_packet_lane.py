@@ -457,6 +457,56 @@ def test_zcode_adapter_flags_and_session_id(tmp_path):
     assert zc.session_id(tmp_path / "absent.jsonl") is None
 
 
+FAKE_OPENCODE = """#!/usr/bin/env python3
+import json, pathlib, sys
+
+argv = sys.argv[1:]
+assert argv and argv[0] == "run", argv
+flags, i = {}, 1
+while i < len(argv) - 1:
+    if argv[i] in ("--auto", "--print-logs"):
+        i += 1
+    else:
+        flags[argv[i]] = argv[i + 1]
+        i += 2
+calls = pathlib.Path(sys.argv[0]).with_suffix(".calls")
+round_no = len(calls.read_text().splitlines()) + 1 if calls.exists() else 1
+with calls.open("a") as out:
+    out.write(json.dumps({"round": round_no, "session": flags.get("--session")}) + "\\n")
+work = pathlib.Path(flags["--dir"])
+(work / "gate-marker").write_text("pass" if round_no >= 2 else "fail")
+print(json.dumps({"type": "step_start", "sessionID": "sess-oc"}))
+"""
+
+
+def test_the_opencode_cli_round_trip_resumes_its_session(tmp_path):
+    """The real adapter against a fake `opencode` CLI: round 1 fails the gate, and round 2
+    is a `--session` resume of the session id the JSON stream named — and passes."""
+    work = _git_repo(tmp_path / "work")
+    cli = tmp_path / "fake_opencode.py"
+    cli.write_text(FAKE_OPENCODE)
+    os.chmod(cli, 0o755)
+    adapter = OpencodeAdapter("opencode/kimi-k3", work=work, binary=str(cli))
+    verdict = build_loop(
+        adapter,
+        plain,
+        work,
+        dict(os.environ),
+        "the brief",
+        [marker_gate(work)],
+        tmp_path / "attempt",
+        wall_seconds=3600,
+        max_rounds=3,
+    )
+    assert verdict["reason"] == "gates_passed"
+    assert verdict["session_id"] == "sess-oc" and verdict["verified_in_lane"] is True
+    calls = [
+        json.loads(line) for line in (tmp_path / "fake_opencode.calls").read_text().splitlines()
+    ]
+    assert [c["round"] for c in calls] == [1, 2]
+    assert calls[0]["session"] is None and calls[1]["session"] == "sess-oc"
+
+
 def test_a_round_that_changes_nothing_is_an_early_stop(tmp_path):
     work = _git_repo(tmp_path / "work")
     agent = QuietAgent(work, terminal={"type": "run_result", "finishReason": "completed"})

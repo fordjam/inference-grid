@@ -171,6 +171,63 @@ def test_cline_cli_runs_packets_as_fresh_sessions(tmp_path):
     assert adapter.resume("s1", "fix")[:2] == ["/x/cline", "fix"]
 
 
+def test_opencode_cli_runs_packets_as_resumed_sessions(tmp_path):
+    from inference_grid.lanes.packet import OpencodeAdapter
+
+    assert "opencode_cli" in packet_task.PACKET_KINDS and not packet_task.UNSUPPORTED_ADAPTERS
+    lane = {"model": "opencode/kimi-k3", "executable": "/x/opencode"}
+    adapter = packet_task.packet_adapter("opencode_cli", lane, tmp_path, tmp_path, "s")
+    assert isinstance(adapter, OpencodeAdapter)
+    first = adapter.first("go")
+    assert first[:2] == ["/x/opencode", "run"] and first[-1] == "go"
+    assert first[first.index("--model") + 1] == "opencode/kimi-k3"
+    assert first[first.index("--format") + 1] == "json"
+    assert first[first.index("--dir") + 1] == str(tmp_path)
+    # a fix round re-enters the session the first round's JSON stream named
+    resumed = adapter.resume("ses_1", "fix")
+    assert resumed[resumed.index("--session") + 1] == "ses_1"
+    stream = tmp_path / "recorded.jsonl"
+    stream.write_text('{"type":"step_start","sessionID":"ses_f6"}\n')
+    assert adapter.session_id(stream) == "ses_f6"
+    assert adapter.session_id(tmp_path / "absent.jsonl") is None
+
+
+def test_an_opencode_cli_lane_runs_the_loop_end_to_end(world, monkeypatch):
+    """The tick with an opencode_cli lane runs green. The operator's real deny-read
+    policy stays out of it: admission reads that file, and on the operator's machine it
+    names the opencode auth file — the round-2 gate caught this test refusing there."""
+    from inference_grid.lanes import sandbox
+
+    monkeypatch.setattr(sandbox, "deny_read_roots", lambda: ())
+    world["lanes"]["packet-cli"] = dict(world["lanes"]["packet-cli"], kind="opencode_cli")
+    world["lanes_path"].write_text(json.dumps({"lanes": world["lanes"]}))
+    results = tick(world)
+    assert [r["result"] for r in results] == ["passed"]
+    task = json.loads((world["board"] / "d1-packet.json").read_text())
+    assert task["state"] == "passed"
+    receipt = next(r["receipt"] for r in world["ledger"].status() if r["state"] == "completed")
+    assert receipt["verified_in_lane"] is True
+
+
+def test_a_deny_read_list_covering_the_opencode_auth_refuses_at_admission(world, monkeypatch):
+    """The one-shot lane's policy gate holds for packets too: the deny-read list covering
+    the CLI's auth file refuses before anything spawns, and the task stays ready."""
+    from inference_grid.lanes import sandbox
+
+    world["lanes"]["packet-cli"] = dict(world["lanes"]["packet-cli"], kind="opencode_cli")
+    world["lanes_path"].write_text(json.dumps({"lanes": world["lanes"]}))
+    monkeypatch.setattr(
+        sandbox,
+        "deny_read_roots",
+        lambda: [str(Path.home() / ".local/share/opencode/auth.json")],
+    )
+    results = tick(world)
+    assert results[0]["result"].startswith("refused: credential_denied_by_policy")
+    task = json.loads((world["board"] / "d1-packet.json").read_text())
+    assert task["state"] == "ready"
+    assert [r for r in world["ledger"].status() if r["account"] == world["account"]] == []
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     global FAKE_AGENT_SOURCE
