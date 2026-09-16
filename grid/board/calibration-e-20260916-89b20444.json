@@ -14,7 +14,7 @@
   "output_bytes": 100000,
   "thinking_tokens": null
  },
- "state": "ready",
+ "state": "passed",
  "blocked_reason": null,
  "spec": {
   "corpus_dir": "/Users/fordjam/.config/inference-grid/calibration/history",

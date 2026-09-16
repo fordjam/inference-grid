@@ -188,7 +188,31 @@ def run(request, lane, attempt_dir, *, cmd=None, max_turns=12, home=None):
         return None, verdict
     raw = (attempt_dir / "native.jsonl").read_bytes()[:MAX_STDOUT]
     rows = parse_rows(raw)
-    classified = goat_outcomes.classify_goat(rows, supervisor, request["model"])
+    # Command Code echoes some vendors' ids in their own casing — `moonshotai/Kimi-K3`,
+    # `Qwen/Qwen3.8-Flash` — while the lane names them lower-case (2026-09-16: both
+    # canaries refused `model_unqualified` on a served reply). The classifier's exact
+    # comparison is the provider's, kept unmodified; the rows it reads are folded to the
+    # lane's casing first, and the verdict records what was actually served.
+    asked = request["model"]
+    served = set()
+
+    def _fold(row):
+        """The row with any model id equal to the asked one ignoring case replaced by it."""
+        if not isinstance(row, dict):
+            return row
+        out = dict(row)
+        model = out.get("model")
+        if isinstance(model, str) and model != asked and model.lower() == asked.lower():
+            served.add(model)
+            out["model"] = asked
+        if isinstance(out.get("event"), dict):
+            out["event"] = _fold(out["event"])
+        return out
+
+    folded = [_fold(e) for e in rows]
+    if served:
+        verdict["served_model_ids"] = sorted(served)
+    classified = goat_outcomes.classify_goat(folded, supervisor, request["model"])
     verdict["progress"] = classified["progress"]
     if classified["outcome"] != "native_complete":
         verdict["refusal"] = "goat " + classified["outcome"] + ": " + classified["reason"]

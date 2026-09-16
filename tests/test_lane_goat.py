@@ -43,6 +43,8 @@ if "tamper" in prompt:
     with open(os.path.join(os.environ["HOME"], ".commandcode", "config.json"), "a") as stream:
         stream.write("tampered\n")
 event_model = "glm-other" if "wrong model" in prompt else model
+if "vendor casing" in prompt:
+    event_model = model.upper()  # moonshotai/Kimi-K3, Qwen/Qwen3.8-Flash: the vendor's casing
 effort = "high" if "effort high" in prompt else "low"
 for _ in range(2):
     emit(
@@ -146,6 +148,15 @@ class GoatLaneTests(unittest.TestCase):
         receipt, verdict = goat.run(request, self.lane, attempt, home=self.home)
         self.assertIsNone(receipt)
         self.assertEqual(verdict["refusal"], "effort evidence missing")
+
+    def test_vendor_casing_of_the_asked_model_is_the_same_model(self):
+        # Command Code echoed `moonshotai/Kimi-K3` for the lane's `moonshotai/kimi-k3` and
+        # the canary refused model_unqualified on a served reply (2026-09-16).
+        request, attempt = self.attempt("reply with vendor casing please")
+        receipt, verdict = goat.run(request, self.lane, attempt, home=self.home)
+        self.assertIsNotNone(receipt)
+        self.assertIsNone(verdict["refusal"])
+        self.assertEqual(verdict["served_model_ids"], ["GLM-5.3-FLASH"])
 
     def test_model_mismatch_refused(self):
         request, attempt = self.attempt("reply with wrong model please")

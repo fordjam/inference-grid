@@ -1,0 +1,801 @@
+diff --git a/docs/BOARD_AUDIT_INTEGRATION.md b/docs/BOARD_AUDIT_INTEGRATION.md
+new file mode 100644
+index 0000000..d283ef1
+--- /dev/null
++++ b/docs/BOARD_AUDIT_INTEGRATION.md
+@@ -0,0 +1,57 @@
++# Integrating `glm/board-audit` — readiness check, 2026-09-13
++
++State on 2026-09-13, before any merge. Verified, not performed: this document
++does not merge anything.
++
++## Diff
++
++```
++$ git diff --stat main..glm/board-audit    (tail)
++ tests/test_board_audit.py             |  881 +++++++
++ tests/test_capacity_report.py         |  483 ++++
++ tests/test_programme_status.py        |   97 +
++ 17 files changed, 10079 insertions(+), 14 deletions(-)
++```
++
++The branch adds two new scripts (`scripts/board_audit.py`,
++`scripts/capacity_report.py`), their three new test files (the only files
++touched under `tests/`), a small Evidence-section change to
++`scripts/programme_status.py`, and six documents. The 14 deleted lines are
++inside `scripts/programme_status.py` (the capacity()/render() rework).
++Nothing under `src/`, `strategy-lab/`, or the dispatchers is touched.
++
++## Fast-forward
++
++```
++$ git merge-base --is-ancestor main glm/board-audit && echo ff
++ff
++$ git merge-base main glm/board-audit   # == main's tip
++c401181
++```
++
++`main` has not moved since the branch was cut (branch point == `main` tip ==
++`c401181`), so the merge is a pure fast-forward: no merge commit, no
++conflicts possible.
++
++## Test counts
++
++| tree | default suite (`uv run pytest -q`) | collected |
++| --- | --- | --- |
++| `glm/board-audit` (this tree) | **1,316 passed, 2 skipped** | 1,318 of 1,359 (41 integration/slow deselected by `addopts`) |
++| `main` | **1,229 passed, 2 skipped** | 1,231 |
++
++`main`'s counts are derived, not guessed: the branch's only changes under
++`tests/` are the three new files above, which collect 87 tests, and `main`
++equals the branch point — so main collects 1,318 − 87 = 1,231, of which the
++default suite runs 1,229. That reproduces exactly the 1,229-test baseline
++handoff 1 recorded, which is the cross-check.
++
++## The one command the operator runs
++
++```
++git checkout main && git merge --ff-only glm/board-audit
++```
++
++`--ff-only` is the safety: if `main` has moved by the time this runs, the
++command refuses instead of merging, and this document should be regenerated
++first.
+diff --git a/docs/PLAN_STATUS_2026-09-13.md b/docs/PLAN_STATUS_2026-09-13.md
+new file mode 100644
+index 0000000..e6990b4
+--- /dev/null
++++ b/docs/PLAN_STATUS_2026-09-13.md
+@@ -0,0 +1,115 @@
++# Plan status — 2026-09-13
++
++One row per item in `docs/PLAN.md` (the amended, superseding plan) and the
++`docs/ORIGINAL_PLAN.md` items it carries forward. Statuses: **implemented**
++(module plus a test in this repository that proves it), **partial** (what is
++missing), **absent**. Evidence is code and tests in this repository only;
++nothing under `strategy-lab/` was read for this review (existence checks
++only), and the research-library package was inventoried but has no plan rows
++to check against (see "Beyond the plan").
++
++## 1. Layout (PLAN §1)
++
++| item | status | evidence |
++| --- | --- | --- |
++| uv project; scripts `yt-research`, `yt-research-mcp` | implemented | `pyproject.toml [project.scripts]` |
++| `src/yt_research/{ids,metadata,discovery,captions,asr,transcripts,cache,errors,ytdlp}.py` | implemented | all nine modules present |
++| `mcp_server.py`, `cli.py` in the package, thin wrappers | implemented | `src/yt_research/mcp_server.py`, `cli.py`; no MCP/CLI imports in the library (package docstring states it; import graph confirms) |
++| `__init__` re-exports the public API | implemented | `__init__.py` `__all__`: the 7 functions + `ResearchError`, `ERROR_CODES`, `__version__` |
++| committed fixtures (json3, VTT, flat extraction, info dict) | implemented | `tests/fixtures/{manual,auto_wordlevel}.json3`, `auto_rolling.vtt`, `flat_entries.json`, `info_dict.json` |
++| `.claude/skills/` research + strategy-spec skills | implemented (existence) | `.claude/skills/{yt-research,strategy-spec,library-triage}/` — contents not reviewed under this brief |
++| `strategy-lab/` templates + rubric | implemented (existence) | `strategy-lab/templates/strategy-spec.md`, `strategy-lab/rubric/flaws.md` — contents not read (brief forbids strategy-lab reads) |
++| extra `logging_setup.py` module | beyond plan | present; harmless addition (stderr logging setup) |
++
++## 2. Public Python API (PLAN §2)
++
++| item | status | evidence |
++| --- | --- | --- |
++| `search_videos(query, *, max_results, channel, sort, upload_after, kind)` — exact signature | implemented | `discovery.py:125`; `tests/test_discovery.py` (19 tests) |
++| channel restriction via the `/search?query=` tab, falling back to listing + title filter | implemented | `discovery.py::channel_search_url` (`ids.py:196`) + `_search_in_channel` (`discovery.py:197`); covered in `tests/test_discovery.py` |
++| `upload_after` client-side filter; entries without a date kept, limitation documented | implemented | `discovery.py::_filter_upload_after` + docstring ("Filtered client-side and only …") |
++| `list_channel_videos(channel, *, max_results=50, tab)` — handle/URL/ID forms | implemented | `discovery.py:224`; `ids.py` channel forms tested in `tests/test_ids.py` (10 tests) |
++| `list_playlist(playlist, *, max_results=200)` | implemented | `discovery.py:262` |
++| `get_metadata(url)` + `is_live`, `was_live`, `availability`, `tags`, `categories`, `chapters` | **partial** | mapping implemented (`metadata.py:47-53`); live behaviour covered by `tests/integration/test_live.py`, CLI error path by `tests/test_cli.py:149` — but **no offline unit test asserts the extended-field mapping against the committed `info_dict.json` fixture** (packet B1) |
++| `fetch_transcript(url, *, lang, mode, refresh, start, end)`; `window` + joined `text` in output | implemented | `transcripts.py:100`, `_window`/`_finalize` (`transcripts.py:48-62`); `tests/test_transcripts.py` (18 tests) |
++| segment normalisation: rolling-caption de-dup, merge, noise tags | implemented | `captions.py::dedupe_cues:391`, pipeline `captions.py:486`; `tests/test_captions.py` (39 tests, incl. `auto_rolling.vtt` fixture) |
++| `list_cached()` | implemented | `cache.py:252`; `tests/test_cache.py` (25 tests) |
++| `search_cached(query, *, limit, video_id)` — FTS5, `{video_id, title, start, end, text, snippet}` | implemented | `cache.py:297`, FTS5 table `cache.py:43`, `snippet()` at `cache.py:325` |
++| payload fields `caption_kind`, `retrieved_at`, `cached`, `source` | implemented | `transcripts.py:170-174,218` |
++
++## 3. MCP server (PLAN §3)
++
++| item | status | evidence |
++| --- | --- | --- |
++| FastMCP stdio server wrapping the API | implemented | `mcp_server.py` (imports `FastMCP`, with an `mcp >= 2.0` `MCPServer` alias fallback — beyond-plan resilience) |
++| one tool per API function; errors returned as data, never raised | implemented | `mcp_server.py:50-56` (`{"error": {code, message, details}}`); `tests/test_mcp_server.py` (10 tests), protocol coverage in `tests/test_mcp_protocol.py` |
++| logging to stderr, level from `YT_MCP_LOG_LEVEL` | implemented | `logging_setup.py`; README documents it |
++| "7 tools" | implemented — and superseded | the plan's 7 research tools are all advertised; the server now exposes 20 (README line 20) because the beyond-plan research-library tools were added. Plan growth, not a gap. |
++
++## 4. CLI (PLAN §4)
++
++| item | status | evidence |
++| --- | --- | --- |
++| subcommands mirroring the API; `--json` prints the exact API dict | implemented | `cli.py:120-159` (`search`, `channel`, `playlist`, `metadata`, `transcript`, `cached`, `search-cached`); `tests/test_cli.py` (15 tests) |
++| `transcript --txt` prints `[mm:ss] text` lines | implemented | `cli.py:154`; tested in `tests/test_cli.py` |
++| `--version` | implemented | `cli.py:120` |
++
++## 5. Build phases (PLAN §5 acceptance checks)
++
++| phase | status | evidence |
++| --- | --- | --- |
++| 0 scaffold: server advertises tools; CLI `--help` | implemented | `tests/test_mcp_server.py`, `tests/test_cli.py` |
++| 1 IDs + metadata; deleted video → `video_unavailable` | implemented / see B1 | `tests/test_ids.py`; deleted-video error path tested in `test_cli.py` + `integration/test_live.py:62`; extended-field mapping unit test missing (packet B1) |
++| 2 discovery against committed flat fixture; integration vs a stable channel | implemented | `flat_entries.json` fixture; `tests/integration/test_live.py` |
++| 3 captions: json3 preferred, VTT fallback, manual-over-auto, rolling dedup, window | implemented | `tests/test_captions.py` (39), `tests/test_transcripts.py` (18) |
++| 4 cache: second call `cached: true` with zero yt-dlp calls; atomic writes | implemented | `tests/test_cache.py` (25; monkeypatched yt-dlp entry point); `_write_atomic` `cache.py:88` |
++| 5 ASR: model resolution exactly per original §4; 16 kHz mono; cleanup; `-m slow` | implemented | `tests/test_asr.py` (15) + `tests/integration/test_asr_slow.py`; `asr.py` (env override → HF-cache scan preferring `large-v3-turbo` → named error `mlx-community/whisper-large-v3-turbo`; resolved model logged once, `asr.py:149-151`) |
++| 6 hardening: full error taxonomy; `YT_MCP_REQUEST_DELAY` (default 1.0 s); `--version`; README client config (`claude mcp add` + opencode); mixed-list smoke | implemented | `errors.py:14-23` (8 plan codes + `internal_error`), `tests/test_errors.py`; `ytdlp.py:32-39`; README lines 79/86; `tests/integration/test_live.py` |
++
++## 6. Strategy-lab layer (PLAN §6)
++
++| item | status | evidence |
++| --- | --- | --- |
++| `.claude/skills/yt-research/SKILL.md` | implemented (existence) | present; contents not reviewed under this brief |
++| `.claude/skills/strategy-spec/SKILL.md` + template + rubric + testability mapping | implemented (existence) | present (`strategy-lab/templates/strategy-spec.md`, `strategy-lab/rubric/flaws.md`); contents not read — the brief forbids strategy-lab reads, so the rubric/checklist items are neither verified nor falsified here |
++
++## 7. Original-plan items carried forward (ORIGINAL §2-§5)
++
++| item | status | evidence |
++| --- | --- | --- |
++| two-layer retrieval, `mode` ∈ auto/captions_only/asr_only, `captions_only` fails rather than falling back | implemented | `transcripts.py`; tested in `tests/test_transcripts.py`/`test_pipeline.py` |
++| json3 preferred, VTT fallback, manual over auto, `caption_kind` recorded | implemented | `captions.py`; `tests/test_captions.py` |
++| missing language → available languages in the error details | implemented | `transcripts.py:180-194`, `captions.py::available_languages` |
++| model resolution order (env → HF cache scan → named error, resolved path, logged once) | implemented | `asr.py:117-151`; `tests/test_asr.py` |
++| audio to 16 kHz mono WAV, deleted after transcription | implemented | `asr.py:169-185` |
++| cache keyed `(video_id, lang, source)`, blobs + SQLite index, atomic writes, no TTL, `refresh` | implemented | `cache.py`; `tests/test_cache.py` |
++| error taxonomy incl. `rate_limited`; request delay, no tight-loop retry | implemented | `errors.py`, `ytdlp.py:32-39`; `tests/test_ytdlp.py` (13), `tests/test_errors.py` |
++| non-goals (no summarisation, no diarization in v1, no web UI, audio deleted) | respected | no such code exists in the package |
++
++## 8. Beyond the plan (not gaps — recorded for completeness)
++
++* `src/research_library/` + the `rlib` CLI + ~13 more MCP tools: an entire
++  second research corpus (arXiv, RSS, Substack, PDF, StackExchange, podcast,
++  slideslive adapters) with its own test fleet (`tests/test_library_*.py`).
++  Neither plan document mentions it; it postdates both.
++* `mcp >= 2.0` `MCPServer` fallback in `mcp_server.py`.
++* Cache root renamed to `~/.cache/yt-research` (plan said
++  `~/.cache/yt-transcript-mcp`) — consistent with the package rename,
++  overridden via `YT_MCP_CACHE_DIR` as planned.
++* Programme tooling (`scripts/board_audit.py`, `capacity_report.py`,
++  `programme_status.py`, dispatchers) — governed by the handoff briefs, not
++  by `PLAN.md`.
++
++## 9. Rows that could not be classified
++
++* Strategy-lab §6 content claims (what the skills/templates/rubric actually
++  contain) — existence verified only; the brief forbids reading
++  `strategy-lab/`.
++* The plan's phase-0 acceptance ("server advertises all 7 tools") is judged
++  against the modern 20-tool surface; the original 7 are a subset, so the
++  row is recorded as implemented-and-superseded rather than counted as a
++  mismatch.
++
++**Net: the only actionable gap found is B1 (packet below); everything else
++in both plan documents is implemented, implemented-and-superseded by planned
++growth, or deliberately outside this review's reach.**
+diff --git a/docs/handoff-glm-6.md b/docs/handoff-glm-6.md
+new file mode 100644
+index 0000000..db42e7e
+--- /dev/null
++++ b/docs/handoff-glm-6.md
+@@ -0,0 +1,52 @@
++# Handoff brief 6 — yt-research-mcp: what is left in the plan (GLM, interactive ZCode / Z.ai)
++
++Follows `docs/handoff-glm-5.md` (all done on `glm/board-audit`; 1,316 tests). **Section 1 of
++`docs/handoff-glm.md` applies unchanged.** This brief is analysis first, then the packets it
++justifies; nothing under `strategy-lab/` is read or written.
++
++#### A1. Plan gap analysis
++`docs/PLAN.md` is the source of truth for the package (`src/yt_research/`, `mcp_server.py`,
++`cli.py`). Read it and `docs/ORIGINAL_PLAN.md`, then produce `docs/PLAN_STATUS_2026-09-13.md`:
++one row per planned item — implemented (with the module and a test that proves it), partial
++(what is missing), or absent. Evidence only from code and tests in this repository; where the
++plan is ambiguous, say so rather than decide.
++- Size: medium (reading).
++
++#### A2. Packets for the gaps
++For every *absent* or *partial* row that is pure library/CLI work with an offline test, append a
++packet in this file's format (location, acceptance test, size) under a new `## B` section, in
++the order the plan implies. Do not implement them under this brief; the coordinator orders them.
++- Size: small.
++
++#### A3. Integration readiness of `glm/board-audit`
++The branch is 30+ commits over `main`, all verified. Produce `docs/BOARD_AUDIT_INTEGRATION.md`:
++`git diff --stat main..glm/board-audit`, confirmation the merge is a fast-forward
++(`git merge-base --is-ancestor main glm/board-audit`), the test count on both, and the one
++command the operator runs. No merge.
++- Size: trivial.
++
++## B — packets for the gaps (generated by A1/A2, 2026-09-13)
++
++The plan-gap analysis (`docs/PLAN_STATUS_2026-09-13.md`) found exactly one
++partial row that is pure library work with an offline test: `get_metadata`'s
++extended-field mapping (`is_live`, `was_live`, `availability`, `tags`,
++`categories`, `chapters`) has no unit test asserting it against the
++committed `info_dict.json` fixture — it is only covered live (integration)
++or by CLI mocks. Everything else in both plan documents is implemented,
++implemented-and-superseded, or outside this review's reach, so there is
++exactly one packet. The coordinator orders it.
++
++#### B1. Unit-test the extended metadata mapping
++`src/yt_research/metadata.py::get_metadata` maps the committed
++`tests/fixtures/info_dict.json` to the public dict; assert every planned
++field — the original five (title, channel, duration, upload date, view
++count) plus `is_live`, `was_live`, `availability`, `tags`, `categories`,
++`chapters` (`metadata.py::_chapters`) — against that fixture offline, plus
++the degraded shapes (missing `chapters` → empty list, null `availability`
++passes through as null).
++- Tests: new `tests/test_metadata.py` (or a section in `tests/test_pipeline.py`),
++  fixture-only, no network.
++- Size: small.
++
++## Definition of done
++As brief 3. Report which plan rows you could not classify.
+diff --git a/scripts/board_audit.py b/scripts/board_audit.py
+index d03afd6..412242f 100644
+--- a/scripts/board_audit.py
++++ b/scripts/board_audit.py
+@@ -52,6 +52,13 @@ thinks it is in flight, but nothing it names can bring it back. Active claims
+ whose receipt is gone are flagged the same way. Each unresumable task carries
+ a `resumable_from` list: what could still restart it.
+ 
++Every task carries an age: days since its own timestamp field (`updated`,
++`updated_at`, `as_of`, ... -- discovered, never assumed), else since the
++newest surviving evidence file's mtime (stat only -- the file is never
++read), else unknown. The "oldest by status" section names, per status, the
++oldest task and what its age stands on -- the oldest pending review and the
++oldest blocked task are exactly the rows the memo asked about.
++
+ With `--strict` the board must also satisfy the shape derived in
+ docs/CURRENT_WORK_SCHEMA.md (unique ids, non-empty statuses, numeric
+ priorities, existing repo directories, ISO-8601 updated_at, no evidence path
+@@ -59,7 +66,9 @@ cited under two different statuses). Violations make the exit code 1; the
+ report is still written. `--capacity-ledger PATH` (with `--strict`) adds
+ warning rows for board fields that cite a seat whose capacity.jsonl snapshot
+ feed is dead by the same rule the capacity report uses; warnings never move
+-the exit code.
++the exit code. `--fix-plan OUT` writes the same violations as minimal
++RFC 6902 patches that would resolve each one -- never applied; the
++coordinator reviews and applies.
+ 
+ The summary counts cover the paths cited by `tasks`; paths cited by
+ `active_claims` and by top-level fields are audited and reported in their own
+@@ -88,6 +97,10 @@ HEX_TOKEN = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{7,40}(?![0-9a-fA-F])")
+ LIVE_MARKERS = ("pending", "awaiting", "in_progress", "in progress",
+                 "blocked", "dispatched")
+ 
++#  Task keys that carry the task's own timestamp (exact, lowercased match;
++#  the value must still parse as ISO). Anything else ages by evidence mtime.
++TASK_TIME_FIELDS = ("updated", "updated_at", "as_of", "timestamp", "date")
++
+ 
+ def default_run(argv: list[str]) -> tuple[int, str]:
+     """The only subprocess seam: read-only git queries go through here."""
+@@ -237,8 +250,9 @@ def _resumable_from(task: dict, paths: list[dict], revs: list[dict]) -> list[dic
+ 
+ 
+ def audit_document(doc: dict, source: str, roots: tuple[str, ...] | None = None,
+-                   run=default_run) -> dict:
++                   run=default_run, now: datetime | None = None) -> dict:
+     roots = volatile_roots() if roots is None else tuple(roots)
++    now = now or datetime.now(timezone.utc)
+     counts: Counter = Counter()
+     rev_counts: Counter = Counter()
+     repo_missing_total = 0
+@@ -276,6 +290,7 @@ def audit_document(doc: dict, source: str, roots: tuple[str, ...] | None = None,
+             repo_missing_total += len(revs)
+             repo_totals.setdefault(str(repo), Counter())["repo_missing"] += len(revs)
+         findings = [p for p in paths if p["class"] != "present"]
++        age_days, age_source = task_age(task, paths, now)
+         tasks_out.append({
+             "id": task.get("id"),
+             "priority": task.get("priority"),
+@@ -287,6 +302,8 @@ def audit_document(doc: dict, source: str, roots: tuple[str, ...] | None = None,
+             "revisions_named": len(revs),
+             "revisions": revs,
+             "unresolved_revisions": [r for r in revs if r["class"] != "resolves"],
++            "age_days": age_days,
++            "age_source": age_source,
+         })
+         #  Live on the board, but not one cited path survives: the task cannot
+         #  be resumed from its evidence. A volatile path (even a live one)
+@@ -301,8 +318,23 @@ def audit_document(doc: dict, source: str, roots: tuple[str, ...] | None = None,
+                 "gone": len(findings),
+                 "paths": findings,
+                 "resumable_from": _resumable_from(task, paths, revs),
++                "age_days": age_days,
++                "age_source": age_source,
+             })
+     tasks_out.sort(key=_priority_sort_key)
++    oldest_by_status = []
++    for status in vocabulary:
++        candidates = [t for t in tasks_out if t["status"] == status]
++        known = [t for t in candidates if t["age_days"] is not None]
++        oldest = max(known, key=lambda t: t["age_days"]) if known \
++            else candidates[0]
++        oldest_by_status.append({
++            "status": status, "task": oldest["id"],
++            "age_days": oldest["age_days"], "age_source": oldest["age_source"],
++            "unknown": not known,
++        })
++    oldest_by_status.sort(key=lambda r: (r["age_days"] is None,
++                                         -(r["age_days"] or 0)))
+     summary = {
+         "paths_total": sum(counts.values()),
+         "present": counts["present"],
+@@ -350,6 +382,7 @@ def audit_document(doc: dict, source: str, roots: tuple[str, ...] | None = None,
+         "tasks": tasks_out,
+         "vocabulary": dict(sorted(vocabulary.items())),
+         "unresumable": unresumable,
++        "oldest_by_status": oldest_by_status,
+         "repositories": {repo: dict(c) for repo, c in sorted(repo_totals.items())},
+         "active_claims": claims_out,
+         "top_level": top_level,
+@@ -411,6 +444,47 @@ def strict_violations(doc: dict) -> list[str]:
+     return v
+ 
+ 
++def parse_at(value) -> datetime | None:
++    if not isinstance(value, str):
++        return None
++    try:
++        return datetime.fromisoformat(value)
++    except ValueError:
++        return None
++
++
++def _mtime_of(raw_path: str) -> float | None:
++    resolved = os.path.expandvars(os.path.expanduser(raw_path))
++    try:
++        return os.stat(resolved).st_mtime
++    except OSError:
++        return None
++
++
++def task_age(task: dict, paths: list[dict], now: datetime) -> tuple:
++    """How old a task is, and what the age stands on: the task's own
++    timestamp field if it has one, else the newest `present` evidence file's
++    mtime (stat only -- the file is never opened), else unknown.
++    Returns (age_days | None, source)."""
++    for key, value in task.items():
++        if str(key).lower() in TASK_TIME_FIELDS:
++            parsed = parse_at(value)
++            if parsed is not None:
++                return round((now - parsed).total_seconds() / 86400, 2), str(key)
++    newest: tuple | None = None
++    for entry in paths:
++        if entry["class"] != "present":
++            continue
++        mtime = _mtime_of(entry["path"])
++        if mtime is not None and (newest is None or mtime > newest[0]):
++            newest = (mtime, entry["field"])
++    if newest is not None:
++        age = (now - datetime.fromtimestamp(newest[0], tz=timezone.utc)) \
++            .total_seconds() / 86400
++        return round(age, 2), f"mtime of {newest[1]}"
++    return None, "unknown"
++
++
+ def capacity_warnings(doc: dict, dead_seats: set) -> list[str]:
+     """Board fields that cite a seat whose capacity snapshot feed is dead.
+     Only capacity-named fields are scanned (capacity_source and kin): an id,
+@@ -436,8 +510,116 @@ def capacity_warnings(doc: dict, dead_seats: set) -> list[str]:
+     return warnings
+ 
+ 
++def _pointer(*parts) -> str:
++    """A JSON Pointer (RFC 6901) with ~ and / escaped."""
++    return "/" + "/".join(str(p).replace("~", "~0").replace("/", "~1")
++                          for p in parts)
++
++
++def _proven_repo(task: dict, result: dict) -> str | None:
++    """The repository that provably preserves one of the task's revisions
++    (the audit's found_in), if any -- the shape of the coordinator's own
++    misfiled-repo correction."""
++    for entry in result.get("tasks") or []:
++        if entry.get("id") != task.get("id"):
++            continue
++        for r in entry.get("unresolved_revisions") or []:
++            if r.get("class") == "found_in":
++                return r.get("found_in")
++    return None
++
++
++def fix_plan(doc: dict, result: dict) -> list[dict]:
++    """For each strict violation -- plus a lost top-level path, and a repo
++    that is gone while another board repository provably preserves one of
++    the task's revisions -- the minimal RFC 6902 patch that would resolve
++    it. The plan is never applied; the coordinator reviews and applies.
++    """
++    fixes: list[dict] = []
++
++    def add(violation: str, *ops: dict):
++        fixes.append({"violation": violation, "patch": list(ops)})
++
++    tasks = doc.get("tasks") or []
++    seen_ids: dict = {}
++    evidence_first: dict = {}
++    for i, task in enumerate(tasks):
++        tid = task.get("id")
++        if isinstance(tid, str) and tid.strip():
++            if tid in seen_ids:
++                seen_ids[tid] += 1
++                add(f"duplicate task id: {tid}",
++                    {"op": "replace", "path": _pointer("tasks", i, "id"),
++                     "value": f"{tid}-{seen_ids[tid] + 1}"})
++            else:
++                seen_ids[tid] = 1
++
++        status = task.get("status")
++        if not isinstance(status, str) or not status.strip():
++            add(f"task {tid!r}: status must be a non-empty string",
++                {"op": "replace" if "status" in task else "add",
++                 "path": _pointer("tasks", i, "status"), "value": "FIXME"})
++
++        priority = task.get("priority")
++        try:
++            float(priority)
++        except (TypeError, ValueError):
++            add(f"task {tid!r}: priority {priority!r} is not a number",
++                {"op": "replace", "path": _pointer("tasks", i, "priority"),
++                 "value": "FIXME"})
++        else:
++            if isinstance(priority, str):
++                add(f"task {tid!r}: priority is a string; normalise to number",
++                    {"op": "replace", "path": _pointer("tasks", i, "priority"),
++                     "value": float(priority)})
++
++        repo = task.get("repo")
++        if repo is not None:
++            if not is_path_value(repo) \
++                    or not os.path.isdir(
++                        os.path.expandvars(os.path.expanduser(repo))):
++                proven = _proven_repo(task, result)
++                if proven:
++                    add(f"task {tid!r}: repo {repo!r} is gone or not a path, "
++                        f"but a revision it names is preserved in {proven}",
++                        {"op": "replace",
++                         "path": _pointer("tasks", i, "repo"),
++                         "value": proven})
++                else:
++                    add(f"task {tid!r}: repo {repo!r} is not an existing "
++                        "directory",
++                        {"op": "remove", "path": _pointer("tasks", i, "repo")})
++
++        evidence = task.get("evidence")
++        if is_path_value(evidence):
++            first = evidence_first.setdefault(str(evidence), (i, status))
++            if first[0] != i and first[1] != status:
++                add(f"evidence path {evidence} is cited again with a "
++                    "different status",
++                    {"op": "remove", "path": _pointer("tasks", i, "evidence")})
++
++    updated = doc.get("updated_at")
++    if not isinstance(updated, str):
++        add(f"updated_at is missing or not a string: {updated!r}",
++            {"op": "replace" if "updated_at" in doc else "add",
++             "path": "/updated_at", "value": "FIXME"})
++    else:
++        try:
++            datetime.fromisoformat(updated)
++        except ValueError:
++            add(f"updated_at {updated!r} is not an ISO-8601 timestamp",
++                {"op": "replace", "path": "/updated_at", "value": "FIXME"})
++
++    for field in result.get("top_level") or []:
++        if field["class"] in ("missing", "volatile_missing"):
++            add(f"top-level {field['field']}: citation is lost "
++                f"({field['class']})",
++                {"op": "remove", "path": _pointer(*field["field"].split("."))})
++    return fixes
++
++
+ def audit(source: str, roots: tuple[str, ...] | None = None,
+-          run=default_run) -> dict:
++          run=default_run, now: datetime | None = None) -> dict:
+     try:
+         with open(source, encoding="utf-8") as fh:
+             doc = json.load(fh)
+@@ -456,11 +638,12 @@ def audit(source: str, roots: tuple[str, ...] | None = None,
+             "repositories": {},
+             "vocabulary": {},
+             "unresumable": [],
++            "oldest_by_status": [],
+             "active_claims": [],
+             "top_level": [],
+         }
+         return empty
+-    return audit_document(doc, source, roots=roots, run=run)
++    return audit_document(doc, source, roots=roots, run=run, now=now)
+ 
+ 
+ def _cell(value: object) -> str:
+@@ -677,8 +860,8 @@ def to_markdown(result: dict) -> str:
+ 
+     out += ["## Live tasks that cannot be resumed from evidence", ""]
+     if result.get("unresumable"):
+-        out += ["| task | pri | status | evidence | resumable from |",
+-                "| --- | --- | --- | --- | --- |"]
++        out += ["| task | pri | status | evidence | age (d) | resumable from |",
++                "| --- | --- | --- | --- | --- | --- |"]
+         for t in result["unresumable"]:
+             detail = "; ".join(f"{p['field']}: `{p['path']}` ({p['class']})"
+                                for p in t["paths"])
+@@ -696,13 +879,25 @@ def to_markdown(result: dict) -> str:
+                                    f"{where} (branches: {branches or '—'})")
+             resumable = "; ".join(survive) \
+                 or "nothing on disk; re-derive from the task text"
++            age = t.get("age_days")
+             out.append(f"| {_cell(t['id'])} | {_cell(t['priority'])} "
+                        f"| {_cell(t['status'])} | {t['gone']} of {t['cited']} cited — {_cell(detail)} "
+-                       f"| {_cell(resumable)} |")
++                       f"| {_cell(age)} | {_cell(resumable)} |")
+     else:
+         out.append("Every live task still has at least one surviving path.")
+     out.append("")
+ 
++    out += ["## Oldest task by status", "",
++            "Age is days since the task's own timestamp field, else since the "
++            "newest surviving evidence file's mtime, else unknown. The oldest "
++            "pending review and the oldest blocked task live here.", "",
++            "| status | oldest task | age (d) | age from |",
++            "| --- | --- | --- | --- |"]
++    for row in result.get("oldest_by_status", []):
++        out.append(f"| {_cell(row['status'])} | {_cell(row['task'])} "
++                   f"| {_cell(row['age_days'])} | {_cell(row['age_source'])} |")
++    out.append("")
++
+     out += ["## Active claims whose receipt is gone", ""]
+     flagged = [c for c in result.get("active_claims", []) if c.get("receipt_missing")]
+     if flagged:
+@@ -748,8 +943,13 @@ def main(argv: list[str] | None = None) -> int:
+                         help="with --strict: also warn when a board capacity "
+                              "field cites a seat whose snapshot feed is dead "
+                              "in this ledger")
++    parser.add_argument("--fix-plan", metavar="OUT",
++                        help="write a JSON file of minimal RFC 6902 patches, "
++                             "one per strict violation, that would resolve it "
++                             "-- never applied; the coordinator reviews")
+     args = parser.parse_args(argv)
+     result = audit(args.board)
++    doc = None
+     if args.baseline:
+         try:
+             with open(args.baseline, encoding="utf-8") as fh:
+@@ -757,7 +957,7 @@ def main(argv: list[str] | None = None) -> int:
+         except (OSError, json.JSONDecodeError) as exc:
+             result["delta"] = {"previous_audited_at": None,
+                                "error": f"baseline unreadable: {exc}"}
+-    if args.strict:
++    if args.strict or args.fix_plan:
+         try:
+             with open(args.board, encoding="utf-8") as fh:
+                 doc = json.load(fh)
+@@ -777,6 +977,12 @@ def main(argv: list[str] | None = None) -> int:
+                 result["capacity_warnings"] = capacity_warnings(doc, dead)
+             except OSError as exc:
+                 result["capacity_warnings"] = [f"capacity ledger unreadable: {exc}"]
++    if args.fix_plan:
++        with open(args.fix_plan, "w", encoding="utf-8") as fh:
++            json.dump({"generated_at": result.get("audited_at"),
++                       "board": args.board,
++                       "fixes": fix_plan(doc or {}, result)}, fh, indent=2)
++            fh.write("\n")
+     report = to_markdown(result)
+     if args.json:
+         with open(args.json, "w", encoding="utf-8") as fh:
+@@ -787,7 +993,7 @@ def main(argv: list[str] | None = None) -> int:
+             fh.write(report)
+     else:
+         print(report, end="")
+-    return 1 if result.get("strict_violations") else 0
++    return 1 if args.strict and result.get("strict_violations") else 0
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/test_board_audit.py b/tests/test_board_audit.py
+index d710fb5..a651ed2 100644
+--- a/tests/test_board_audit.py
++++ b/tests/test_board_audit.py
+@@ -9,8 +9,9 @@ suite passes identically on macOS (/private/tmp, /var/folders) and Linux
+ 
+ import importlib.util
+ import json
++import os
+ import subprocess
+-from datetime import datetime, timedelta
++from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ 
+ import pytest
+@@ -617,6 +618,161 @@ def test_cli_capacity_ledger_adds_warnings_without_touching_exit(tmp_path):
+     assert "capacity ledger unreadable" in out_md.read_text()
+ 
+ 
++# ------------------------------------------ A2 (handoff-5): task aging
++
++NOW = datetime(2026, 9, 13, 12, 0, 0, tzinfo=timezone.utc)
++
++
++def test_age_comes_from_the_tasks_own_timestamp_field():
++    doc = {"tasks": [{"id": "T1", "status": "pending",
++                      "updated_at": "2026-09-01T00:00:00+00:00"}]}
++    task = board_audit.audit_document(doc, "b", roots=(), now=NOW)["tasks"][0]
++    assert task["age_days"] == 12.5
++    assert task["age_source"] == "updated_at"
++
++
++def test_age_falls_back_to_newest_present_evidence_mtime(tmp_path):
++    evidence = tmp_path / "e.md"
++    evidence.write_text("")
++    stamp = (NOW - timedelta(days=3)).timestamp()
++    os.utime(evidence, (stamp, stamp))
++    doc = {"tasks": [{"id": "T1", "status": "blocked",
++                      "evidence": str(evidence),
++                      "plan": str(tmp_path / "gone.md")}]}
++    task = board_audit.audit_document(doc, "b", roots=(), now=NOW)["tasks"][0]
++    assert abs(task["age_days"] - 3.0) < 0.01
++    assert task["age_source"] == "mtime of evidence"
++
++
++def test_age_is_unknown_without_timestamp_or_surviving_evidence(tmp_path):
++    doc = {"tasks": [{"id": "T1", "status": "pending",
++                      "evidence": str(tmp_path / "gone.md")}]}
++    row = board_audit.audit_document(doc, "b", roots=(), now=NOW)
++    task = row["tasks"][0]
++    assert task["age_days"] is None and task["age_source"] == "unknown"
++    oldest = row["oldest_by_status"][0]
++    assert oldest == {"status": "pending", "task": "T1", "age_days": None,
++                      "age_source": "unknown", "unknown": True}
++
++
++def test_oldest_by_status_names_the_oldest_task_per_status_and_orders():
++    doc = {"tasks": [
++        {"id": "young", "priority": 1, "status": "pending",
++         "updated_at": "2026-09-12T00:00:00+00:00"},
++        {"id": "old", "priority": 2, "status": "reviewed_adopt",
++         "updated_at": "2026-08-14T00:00:00+00:00"},
++        {"id": "mid", "priority": 3, "status": "pending",
++         "updated_at": "2026-09-08T00:00:00+00:00"},
++    ]}
++    row = board_audit.audit_document(doc, "b", roots=(), now=NOW)
++    oldest = {(r["status"], r["task"]): r["age_days"]
++              for r in row["oldest_by_status"]}
++    assert oldest[("pending", "mid")] == 5.5      # mid is older than young
++    assert oldest[("reviewed_adopt", "old")] == 30.5
++    # statuses ordered oldest first -- the oldest pending review is near the top
++    assert [r["status"] for r in row["oldest_by_status"]] == \
++        ["reviewed_adopt", "pending"]
++
++
++def test_unresumable_rows_carry_the_age(tmp_path):
++    doc = {"tasks": [{"id": "L1", "status": "pending",
++                      "updated_at": "2026-09-03T00:00:00+00:00",
++                      "evidence": str(tmp_path / "gone.md")}]}
++    result = board_audit.audit_document(doc, "b", roots=(), now=NOW)
++    assert result["unresumable"][0]["age_days"] == 10.5
++    md = board_audit.to_markdown(result)
++    assert "| 10.5 |" in md
++
++
++# ------------------------------------- A3 (handoff-5): the fix plan
++
++def test_fix_plan_for_a_misfiled_repo_points_where_the_revision_lives(
++        git_repo, tmp_path):
++    other, (elsewhere, _) = git_repo
++    doc = {"tasks": [
++        {"id": "T1", "repo": str(tmp_path / "vanished"), "revision": elsewhere},
++        {"id": "T2", "repo": str(other)},
++    ]}
++
++    def fake_run(argv):
++        if argv[3] == "branch":
++            return 0, "codex/preserved\n"
++        return (0, "") if argv[2] == str(other) else (1, "")
++
++    result = audit(doc, run=fake_run)
++    fixes = board_audit.fix_plan(doc, result)
++    misfiled = [f for f in fixes if "preserved in" in f["violation"]]
++    assert misfiled == [{"violation": misfiled[0]["violation"],
++                         "patch": [{"op": "replace",
++                                    "path": "/tasks/0/repo",
++                                    "value": str(other)}]}]
++    # and the coordinator's correction, applied, is exactly the patch
++    assert misfiled[0]["patch"][0]["value"] != str(tmp_path / "vanished")
++
++
++def test_fix_plan_removes_a_lost_top_level_path(tmp_path):
++    doc = {"updated_at": "2026-09-13T00:00:00+00:00",
++           "loop_protocol_evidence": str(tmp_path / "gone.md"),
++           "tasks": []}
++    fixes = board_audit.fix_plan(doc, audit(doc))
++    assert fixes == [{"violation": fixes[0]["violation"],
++                      "patch": [{"op": "remove",
++                                 "path": "/loop_protocol_evidence"}]}]
++    assert "lost" in fixes[0]["violation"]
++
++
++def test_fix_plan_normalises_priority_and_flags_unparseable():
++    doc = {"updated_at": "2026-09-13T00:00:00+00:00", "tasks": [
++        {"id": "A", "priority": "1.05", "status": "ok"},
++        {"id": "B", "priority": "soon", "status": "ok"},
++    ]}
++    fixes = board_audit.fix_plan(doc, audit(doc))
++    by_task_path = {f["patch"][0]["path"]: f["patch"][0] for f in fixes}
++    assert by_task_path["/tasks/0/priority"] == {
++        "op": "replace", "path": "/tasks/0/priority", "value": 1.05}
++    assert by_task_path["/tasks/1/priority"]["value"] == "FIXME"
++
++
++def test_fix_plan_covers_the_remaining_strict_rules(tmp_path):
++    doc = {"updated_at": "yesterday", "tasks": [
++        {"id": "dup", "priority": 1, "status": "ok"},
++        {"id": "dup", "priority": 1, "status": "ok"},
++        {"id": "nostatus", "priority": 1},
++        {"id": "cite-a", "priority": 1, "status": "adopt",
++         "evidence": str(tmp_path / "shared.md")},
++        {"id": "cite-b", "priority": 1, "status": "returned",
++         "evidence": str(tmp_path / "shared.md")},
++    ]}
++    fixes = board_audit.fix_plan(doc, audit(doc))
++    patches = {(f["patch"][0]["op"], f["patch"][0]["path"])
++               for f in fixes}
++    assert ("replace", "/updated_at") in patches
++    assert ("replace", "/tasks/1/id") in patches          # duplicate id
++    assert ("add", "/tasks/2/status") in patches          # missing status
++    # the second citation of the same evidence, under a different status, goes
++    assert ("remove", "/tasks/4/evidence") in patches
++    # ...while the same-status pair would not have been flagged
++    doc["tasks"][4]["status"] = "adopt"
++    assert not [f for f in board_audit.fix_plan(doc, audit(doc))
++                if f["patch"][0]["path"] == "/tasks/4/evidence"]
++
++
++def test_cli_fix_plan_writes_file_and_never_touches_the_board(tmp_path):
++    board = tmp_path / "board.json"
++    doc = clean_board(tmp_path)
++    doc["tasks"].append({"id": "C", "priority": "0.9", "status": "ok"})
++    board.write_text(json.dumps(doc))
++    before = board.read_bytes()
++    plan = tmp_path / "fix-plan.json"
++    rc = board_audit.main([str(board), "--fix-plan", str(plan)])
++    assert rc == 0                               # the plan never gates
++    written = json.loads(plan.read_text())
++    normalise = [f for f in written["fixes"]
++                 if f["patch"][0]["path"] == "/tasks/2/priority"]
++    assert normalise[0]["patch"][0]["value"] == 0.9
++    assert board.read_bytes() == before          # never applied
++
++
+ def test_delta_header_when_the_previous_run_had_no_timestamp(tmp_path):
+     cur = board_audit.audit_document({"tasks": []}, "board.json", roots=())
+     md = board_audit.to_markdown({**cur, "delta": {"previous_audited_at": None}})
+@@ -656,12 +812,16 @@ def test_json_output_round_trips(tmp_path):
+ def test_markdown_has_a_row_per_dirty_path_and_skips_clean_tasks(tmp_path):
+     md = board_audit.to_markdown(
+         board_audit.audit_document(dirty_doc(tmp_path), "board.json"))
+-    # DIRTY cites two gone paths -> two rows; STUCK one; CLEAN must not appear.
++    # DIRTY cites two gone paths -> two rows; STUCK one. CLEAN must not appear
++    # in the evidence table -- it legitimately shows up once, in the
++    # oldest-by-status section, as its status's freshest task.
+     # gone-a shows up three times: DIRTY's row, STUCK's row, and STUCK's
+     # unresumable detail.
+     assert md.count("`" + str(tmp_path / "gone-a.md") + "`") == 3
+     assert str(tmp_path / "gone-b.md") in md
+-    assert "CLEAN" not in md
++    assert md.count("CLEAN") == 1
++    assert md.index("CLEAN") > md.index("## Oldest task by status")
++    assert "STUCK" in md and "pending" in md
+     assert "STUCK" in md and "pending" in md
+ 
+ 

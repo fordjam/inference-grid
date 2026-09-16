@@ -1,0 +1,31 @@
+{
+ "id": "eval-e-20260916-eabdfe83-fb3a476e700a",
+ "category": "independent_review",
+ "brief": "grid/briefs/eval-e-20260916-eabdfe83-fb3a476e700a.txt",
+ "inputs": [
+  "grid/briefs/eval-e-20260916-eabdfe83-fb3a476e700a.txt",
+  "grid/board/review/eval-e-20260916-eabdfe83-fb3a476e700a/docs/BOARD.md",
+  "grid/board/review/eval-e-20260916-eabdfe83-fb3a476e700a/source.json",
+  "grid/board/review/eval-e-20260916-eabdfe83-fb3a476e700a/src/inference_grid/board/runner.py",
+  "grid/board/review/eval-e-20260916-eabdfe83-fb3a476e700a/src/inference_grid/board/task.py",
+  "grid/board/review/eval-e-20260916-eabdfe83-fb3a476e700a/tests/test_board_runner.py",
+  "grid/board/review/eval-e-20260916-eabdfe83-fb3a476e700a/diff.patch"
+ ],
+ "tests": [
+  "grid/tests/test_review_schema.py"
+ ],
+ "artifacts": [
+  "reply.txt"
+ ],
+ "lanes": [
+  "goat-qwen"
+ ],
+ "author_family": "calibration",
+ "budget": {
+  "wall_seconds": 600,
+  "output_bytes": 2000000,
+  "thinking_tokens": 24000
+ },
+ "state": "ready",
+ "blocked_reason": null
+}
