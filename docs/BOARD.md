@@ -183,28 +183,15 @@ A directory-split brief names the group under review and lists the sibling revie
 
 ## Review policy
 
-Every passing work task gets one `independent_review` task by default. That is not free and
-it is not always informative: when the source attempt's receipt already proves the work —
-`verified_in_lane: true` **and** every declared gate passed — and the author family is not
-`claude`, the per-commit review is **waived** (`board/policy.py::review_needed`). Only that
-proof waives. A missing receipt, an unverified lane, a receipt that declares no gate
-results, any declared gate that did not pass, and a first-party author all keep the current
-path and author the review. A packet task whose lane could not verify itself also keeps the
-current path (no per-commit review; see Packet tasks), and the branch-scope review below is
-what reads such a branch as a whole.
-
-A waiver is never silent. It is recorded as the source task's review record at
-`<board>/review/<task-id>/review.json` (`{"review": {"waived": true, "reason": …}}`) and, in
-the ledger, as a `review_waived` event. The record is a board-owned sidecar, not a task
-field: `board/task.py` is provider-authored (integrated unmodified) and refuses any key
-outside its fixed schema, so the record lands where a review task's `source.json` link
-already lives.
-
-The evidence that earns the waiver is calibration recall, not the boolean. A green gate
-says the code the gate exercises behaved; `board/calibration.py` measures how much a
-reviewer actually finds, per lane, against known answer keys. Read a lane's recorded recall
-and the waiver is a decision made on measured evidence; without it, `verified_in_lane` is
-only a claim a lane makes about itself.
+Every passing work task gets one `independent_review` task — always (B7: review is a gate,
+not a waiver). There used to be a waiver path here (`board/policy.py::review_needed`) that
+skipped the per-commit review when the source attempt's receipt already proved the work;
+it is deleted, along with the `review_waived` ledger event and the `review.json` sidecar it
+wrote. No code path emits `review_waived` anymore. A task whose reviewer lane is
+unavailable — no independent-family lane ready, none of the tier the category asks for —
+waits in `review_pending` with route()'s own reason; it never settles `passed` unreviewed.
+A packet task keeps its own separate path (no per-commit review; see Packet tasks), and the
+branch-scope review below is what reads such a branch as a whole.
 
 `review_branch(..., scope: "branch")` reads a branch the merge node has already proved: one
 packet for the whole branch-vs-target diff, staged as the merged tree (`git merge-tree`)
@@ -214,9 +201,11 @@ against the target's current tree — the thing no per-commit review can see.
 
 ## Reviewer calibration
 
-The board routes reviews by an acceptance rate that measures whether a reviewer produced
-a well-formed verdict, not whether the verdict was right. Calibration measures the
-difference with a corpus whose defects are known. `calibration/example/` in this
+The board's own acceptance rate measures whether a reviewer produced a well-formed
+verdict, not whether the verdict was right — and B4 stopped routing on it anyway (the
+router is a static tier table now). Calibration measures the recall/precision gap
+directly, an operator signal for the needs-you page's reviewer-recall panel, not a
+routing input. `calibration/example/` in this
 repository shows the format — clean cases to catch false positives beside cases with a
 planted defect — each holding a `diff.patch`, the changed files and a brief, plus an
 `answer.json` that is never staged. A real corpus is built from the defect classes an

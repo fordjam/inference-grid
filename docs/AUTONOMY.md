@@ -41,9 +41,11 @@ Alone is what the tick already does, and where:
   `auto_dispatch`.
 - **Land a passed packet under `auto_land`** — on a board the operator configured with
   `auto_land`, the tick ends by landing every `passed` packet through `board/land.py`:
-  the loop's gates re-run on the merged tree and the branch joins its base. Reaching
-  `passed` is the gate's and the review's verdict — the in-lane gates, and an approved
-  independent review or a recorded waiver backed by the receipt.
+  the loop's gates re-run on the merged tree and the branch joins its base. A packet
+  task reaches `passed` on its own in-lane gates alone — no per-commit review task is
+  ever spawned for a packet; the branch-scope review, once a verify_merge task proves
+  the merge, is what reads such a branch as a whole. Every other work task's `passed`
+  is always gated by an approved independent review (B7: never a waiver).
 - **Publish observations** — the collectors and `board_prepare` refresh quota readings
   and lane records so the next pass selects on current facts. Publication is the
   deliverable; it edits nothing in the project.

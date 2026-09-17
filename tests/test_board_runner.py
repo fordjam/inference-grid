@@ -2186,7 +2186,10 @@ def scripted_execute(sleep_by_task=None, hold_tasks=()):
     out of `execute` — so the worker seam is faked to keep the sleep (the overlap must be
     observable) and the settlement (the rows and events) deterministic. The named tasks
     hold, which is a failure settling only its own task; the rest complete with a receipt
-    the review policy waives, so a passing task settles without spawning a review.
+    declaring one artifact (B7: every passing task now gets a review task, which stages
+    that artifact by copying it from the attempt's output directory — the fake worker
+    writes the real file worker.py's own layout expects, `<workspace>/<aid>/artifacts/`,
+    so that copy has something real to find).
     """
     sleep_by_task = sleep_by_task or {}
 
@@ -2201,6 +2204,9 @@ def scripted_execute(sleep_by_task=None, hold_tasks=()):
         if any(task.startswith(prefix) for prefix in hold_tasks):
             ledger.hold(aid, "scripted hold")
             return "held"
+        artifact_dir = Path(spec["workspace"]) / aid / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / "mod2.py").write_text("scripted artifact\n")
         ledger.finish(
             aid,
             generation,
@@ -2331,7 +2337,7 @@ def test_a_failed_attempt_settles_alone_while_the_other_runs(world, monkeypatch)
         tid: json.loads((world["board"] / f"{tid}.json").read_text())["state"]
         for tid in ("copy-crash", "copy-ok")
     }
-    assert states == {"copy-crash": "blocked", "copy-ok": "passed"}
+    assert states == {"copy-crash": "blocked", "copy-ok": "review_pending"}
     assert json.loads((world["board"] / "copy-crash.json").read_text())["blocked_reason"]
 
 
