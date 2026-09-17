@@ -13,6 +13,8 @@ import json
 import math
 import os
 import subprocess
+import sys
+import traceback
 import urllib.error
 import urllib.request
 import datetime
@@ -99,6 +101,14 @@ def observe(fetch, credentials_text, prior, state, now=None):
         a["status"] = "auth_required"
         delay = 900
     except Exception:
+        # Every unhandled exception used to leave a["status"] at its "unknown"
+        # default with no diagnostic at all -- grep -c unknown claude-collector.log
+        # only grew, never explained. Log the timestamped traceback (this
+        # process's stderr is claude-collector-error.log) and record a status a
+        # human can act on instead of a name for "something, unrecorded, broke".
+        print(f"{a['observed_at']} ERROR claude poll failed:", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        a["status"] = "error"
         delay = 900
     if not a["windows"] and prior.get("windows"):
         a["windows"] = prior["windows"]

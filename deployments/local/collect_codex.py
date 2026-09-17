@@ -8,6 +8,8 @@ refresh is attempted (401/403 -> auth_required). Credential paths come from the 
 import json
 import math
 import os
+import sys
+import traceback
 import urllib.error
 import urllib.request
 import datetime
@@ -86,7 +88,13 @@ def observe(fetch, config, now=None, homes=None):
             last_err = "HTTP_" + str(exc.code)
             obs["status"] = "auth_required" if exc.code in (401, 403) else "unknown"
         except Exception as exc:
+            # 02-A4: an unhandled exception used to leave obs["status"] wherever an
+            # earlier home iteration set it (often still the "unknown" default),
+            # with only the exception class name recorded and no log line at all.
+            print(f"{obs['observed_at']} ERROR codex home {home} failed:", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             last_err = type(exc).__name__
+            obs["status"] = "error"
     if obs["status"] != "ok" and last_err:
         obs["error"] = last_err
     return obs

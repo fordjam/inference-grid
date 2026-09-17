@@ -157,7 +157,7 @@ class ObservationShapeMixin:
 
     def assert_observation_shape(self, obs, provider):
         self.assertEqual(obs["provider"], provider)
-        self.assertIn(obs["status"], ("ok", "unknown"))
+        self.assertIn(obs["status"], ("ok", "unknown", "error"))
         self.assertIsInstance(obs["observed_at"], str)
         for w in obs["windows"]:
             self.assertIn(w["id"], ("five_hour", "weekly", "monthly", "weekly_opus"))
@@ -197,10 +197,13 @@ class ZaiCollectorTests(ObservationShapeMixin, unittest.TestCase):
         self.assertEqual(obs["windows"][0]["resets_at"], iso_ms(1757916000000))
 
     def test_parse_reports_api_refusals(self):
-        obs = zai.parse({"code": 401, "success": False})
-        self.assertEqual(obs["status"], "unknown")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            obs = zai.parse({"code": 401, "success": False})
+        self.assertEqual(obs["status"], "error")
         self.assertEqual(obs["error"], "ValueError")
         self.assertEqual(obs["windows"], [])
+        self.assertIn("Traceback (most recent call last)", err.getvalue())
 
     def test_observe_reads_the_key_from_the_configured_path(self):
         tmp = self.enterContext(_TmpDir())
@@ -222,12 +225,15 @@ class ZaiCollectorTests(ObservationShapeMixin, unittest.TestCase):
         cred = tmp.path / "zai-coding-plan.json"
         cred.write_text(json.dumps({"api_key": "fake-key"}))
         config = {"zai_credential_path": str(cred)}
-        obs = zai.observe(raise_(RuntimeError()), config)
-        self.assertEqual((obs["status"], obs["error"]), ("unknown", "RuntimeError"))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            obs = zai.observe(raise_(RuntimeError()), config)
+        self.assertEqual((obs["status"], obs["error"]), ("error", "RuntimeError"))
+        self.assertIn("Traceback (most recent call last)", err.getvalue())
         obs = zai.observe(
             raise_(RuntimeError()), {"zai_credential_path": str(tmp.path / "missing.json")}
         )
-        self.assertEqual((obs["status"], obs["error"]), ("unknown", "FileNotFoundError"))
+        self.assertEqual((obs["status"], obs["error"]), ("error", "FileNotFoundError"))
 
     def test_write_updates_the_ledger_quota_only_when_ok(self):
         tmp = self.enterContext(_TmpDir())
@@ -297,6 +303,22 @@ class CodexCollectorTests(ObservationShapeMixin, unittest.TestCase):
         self.assertEqual((obs["status"], obs["error"]), ("auth_required", "HTTP_403"))
         self.assertEqual(obs["windows"], [])
 
+    def test_observe_unhandled_exception_logs_a_traceback_and_is_not_unknown(self):
+        tmp = self.enterContext(_TmpDir())
+        home = tmp.path / ".codex"
+        home.mkdir()
+        (home / "auth.json").write_text(json.dumps({"tokens": {"access_token": "fake-token"}}))
+
+        def fetch(url, headers, timeout):
+            raise RuntimeError("connection reset")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            obs = codex.observe(fetch, {}, homes=[home])
+        self.assertEqual((obs["status"], obs["error"]), ("error", "RuntimeError"))
+        self.assertIn("RuntimeError: connection reset", err.getvalue())
+        self.assertIn("Traceback (most recent call last)", err.getvalue())
+
 
 class GoatCollectorTests(ObservationShapeMixin, unittest.TestCase):
     def credential(self):
@@ -354,14 +376,17 @@ class GoatCollectorTests(ObservationShapeMixin, unittest.TestCase):
         def org_fetch(url, headers, timeout):
             return {"org": "some-org"}
 
-        obs = goat.observe(org_fetch, config, status_cmd=ok_status)
-        self.assertEqual((obs["status"], obs["error"]), ("unknown", "ValueError"))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            obs = goat.observe(org_fetch, config, status_cmd=ok_status)
+        self.assertEqual((obs["status"], obs["error"]), ("error", "ValueError"))
+        self.assertIn("Traceback (most recent call last)", err.getvalue())
 
         def closed_status():
             return {"authenticated": False}
 
         obs = goat.observe(org_fetch, config, status_cmd=closed_status)
-        self.assertEqual(obs["status"], "unknown")
+        self.assertEqual(obs["status"], "error")
 
     def test_observe_sends_the_bearer_key(self):
         tmp, cred = self.credential()
@@ -421,6 +446,20 @@ class ClineCollectorTests(ObservationShapeMixin, unittest.TestCase):
         self.assertEqual(seen["url"], cline.API_URL)
         self.assertEqual(seen["headers"]["Authorization"], "Bearer fake-key")
 
+    def test_observe_unhandled_exception_logs_a_traceback_and_is_not_unknown(self):
+        tmp = self.enterContext(_TmpDir())
+        env = tmp.path / ".env.local"
+        env.write_text("CLINE_API_KEY=fake-key\n")
+
+        def fetch(url, headers, timeout):
+            raise RuntimeError("timed out")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            obs = cline.observe(fetch, {"cline_credential_path": str(env)})
+        self.assertEqual((obs["status"], obs["error"]), ("error", "RuntimeError"))
+        self.assertIn("Traceback (most recent call last)", err.getvalue())
+
 
 class RefreshClaudeTests(unittest.TestCase):
     NOW = 1_000_000.0
@@ -468,10 +507,21 @@ class RefreshClaudeTests(unittest.TestCase):
     def test_any_failure_carries_prior_windows_stale(self):
         prior = {"windows": [{"id": "weekly", "used_percent": 2.0, "resets_at": None}]}
         a, delay, _ = self.observe(raise_(RuntimeError("socket")), prior=prior)
-        self.assertEqual(a["status"], "unknown")
+        self.assertEqual(a["status"], "error")
         self.assertEqual(a["windows"], prior["windows"])
         self.assertTrue(a["stale"])
         self.assertEqual(delay, 900)
+
+    def test_an_unhandled_exception_logs_a_timestamped_traceback(self):
+        """02-A4: grep -c unknown claude-collector.log must stop growing, and a failure
+        must be diagnosable from the log alone, not just a status word."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.observe(raise_(RuntimeError("socket exploded")))
+        logged = err.getvalue()
+        self.assertIn("ERROR claude poll failed", logged)
+        self.assertIn("RuntimeError: socket exploded", logged)
+        self.assertIn("Traceback (most recent call last)", logged)
 
     def test_rate_limit_backs_off_and_honours_retry_after(self):
         err = urllib.error.HTTPError(

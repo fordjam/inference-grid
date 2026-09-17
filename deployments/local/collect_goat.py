@@ -8,6 +8,8 @@ supplies the version header, so it is injected (``status_cmd``) the same way the
 import json
 import os
 import subprocess
+import sys
+import traceback
 import urllib.request
 import datetime
 from pathlib import Path
@@ -87,10 +89,12 @@ def observe(fetch, config, now=None, status_cmd=None):
             raise ValueError("organization billing not configured")
         return parse(fetch(API_BASE + "billing/credits", headers=headers, timeout=20), now)
     except Exception as exc:
+        print(f"{now.isoformat()} ERROR goat observe failed:", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return {
             "provider": "command-code",
             "observed_at": now.isoformat(),
-            "status": "unknown",
+            "status": "error",
             "windows": [],
             "monthly_remaining": None,
             "error": type(exc).__name__,

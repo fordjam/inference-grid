@@ -9,6 +9,8 @@ logged and never appears in this file.
 import json
 import math
 import os
+import sys
+import traceback
 import urllib.request
 import datetime
 from pathlib import Path
@@ -69,6 +71,11 @@ def parse(body, now=None):
         seen = {w["id"] for w in obs["windows"]}
         obs["status"] = "ok" if seen == {"five_hour", "weekly"} else "unknown"
     except Exception as exc:
+        # 02-A4: used to leave status at its "unknown" default with only the exception
+        # class name recorded, no log line at all.
+        print(f"{obs['observed_at']} ERROR zai parse failed:", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        obs["status"] = "error"
         obs["error"] = type(exc).__name__
     return obs
 
@@ -89,10 +96,12 @@ def observe(fetch, config, now=None):
         )
         return parse(body, now)
     except Exception as exc:
+        print(f"{now.isoformat()} ERROR zai observe failed:", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return {
             "provider": "zai",
             "observed_at": now.isoformat(),
-            "status": "unknown",
+            "status": "error",
             "windows": [],
             "error": type(exc).__name__,
         }
