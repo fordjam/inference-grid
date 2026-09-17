@@ -451,7 +451,6 @@ class Ledger:
                     updated=time.time(),
                 )
             )
-            con.execute(outbox.insert().values(attempt=aid))
             self.event(con, aid, "admitted", generation=gen)
             return aid, gen
 

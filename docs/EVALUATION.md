@@ -4,7 +4,7 @@ Initial local evaluation: Python 3.12, SQLite write serialization, synthetic ada
 
 Covered: shared account aliases; competing claims; cross-account workspace exclusion; all-window quota reservations; stale admission; immutable specs; duplicate and stale start; stale completion rejection; ambiguous hold; conservative quota debit; output/timeout/nonzero/invalid JSON; changed input manifest; artifact traversal/symlink/hash rejection; independent-family operator attestation; transactional outbox publish failure; priority routing; no implicit retry.
 
-The real-broker test is opt-in and skipped without `GRID_RUN_BROKER_TEST=1`. The PostgreSQL version of the admission suite runs when `GRID_TEST_DATABASE_URL` names a disposable database. CI defines both services, but a checked-in workflow is not an executed evaluation.
+(Historical, superseded by B1 2026-09-17: the real-broker test was opt-in and skipped without `GRID_RUN_BROKER_TEST=1`, and the PostgreSQL version of the admission suite ran when `GRID_TEST_DATABASE_URL` named a disposable database. Both the broker path and its CI services were deleted; CI now runs the SQLite-backed suite only.)
 
 This Mac had no PostgreSQL, RabbitMQ or Docker runtime during initial implementation. Therefore no claim is made that distributed crash recovery or Linux service integration has passed. Before production, complete SPEC stages 0.2–0.5, including worker-kill and broker-restart evaluations and native provider receipt reconciliation. Local tests now include two separately spawned processes competing through account aliases, and a process exiting after durable dispatch intent. These do not replace multi-host or broker-restart tests.
 

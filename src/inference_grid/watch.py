@@ -20,9 +20,11 @@ state file. Every alarm carries ``kind``, ``key``, ``since`` and ``detail``:
   endpoint that cannot be reached at all.
 
 The module never reads a credential, never assumes a home directory and never
-imports a chat-bot client: notification is the operator's script, run with the
-printed delta on stdin. Alarms route to email and the needs-you page
-(operator_queue.py reads this module's state file); there is no other channel.
+imports a chat-bot client: notification is whatever the operator points
+``spec["notify"]`` at (point it at an email-sending script; there is no vendor
+chat-bot integration here). Every alarm also lands on the needs-you page
+regardless of ``notify`` — operator_queue.py's ``_alarm_rows`` reads this
+module's state file independently of whether a notify script ran or exists.
 """
 
 import json

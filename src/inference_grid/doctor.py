@@ -248,9 +248,6 @@ def diagnose(
             )
             states = list(con.execute(select(attempts.c.state)).scalars())
             specs = list(con.execute(select(tasks.c.spec)).scalars())
-            pending = len(
-                list(con.execute(select(outbox.c.attempt).where(outbox.c.sent.is_(None))))
-            )
             lane_rows = list(con.execute(select(lanes.c.provider, lanes.c.record)).mappings())
             held_rows = [
                 {"attempt": r["id"], "workspace": r["workspace"]}
@@ -277,7 +274,6 @@ def diagnose(
             "dispatching": states.count("dispatching"),
             "held": states.count("held"),
             "resolved": states.count("abandoned") + states.count("failed"),
-            "pending_publications": pending,
             "missing_executables": sum(executable_state(s) == "missing" for s in specs),
             "unresolved_executables": sum(executable_state(s) == "unresolved" for s in specs),
             "invalid_adapter_specs": sum(executable_state(s) == "invalid" for s in specs),

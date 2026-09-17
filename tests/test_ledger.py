@@ -121,6 +121,12 @@ def test_expired_before_start(grid):
     assert next(r for r in grid[0].status() if r["id"] == aid)["state"] == "held"
 
 
+def test_repeat_execute_after_completion_is_a_no_op(grid):
+    aid, gen = claim(grid, submit(grid))
+    assert execute(grid[0], aid, gen) == "completed"
+    assert execute(grid[0], aid, gen) == "duplicate_or_stale"
+
+
 def test_complete_is_not_accepted(grid):
     aid, gen = claim(grid, submit(grid))
     assert execute(grid[0], aid, gen) == "completed"

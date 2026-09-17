@@ -71,10 +71,9 @@ Alarms, each with `kind`, `key`, `since`, `detail`:
   triggering (raise, silent while unchanged, clear, renotify after the interval); the notify
   hook receives exactly the delta; `/healthz` JSON in `deployments/capacity/test_cloud.py`.
 - Size: medium.
-- Operator step: write `notify.sh` that pipes stdin to the operator's own chat-bot script (a
-  vendor-specific bridge is not part of this package), and add `watch` to the scheduler loop
-  delivered by A2 at a 60 s cadence. Superseded by B2 (2026-09-17): alarms route to email and
-  the needs-you page only.
+- Operator step (as of B2, 2026-09-17): point `notify.sh` at an email-sending script if
+  desired — the needs-you page already surfaces every alarm regardless of `notify` — and
+  add `watch` to the scheduler loop delivered by A2 at a 60 s cadence.
 
 #### A2. Version the operations layer: `deployments/local/`
 The collectors, overlay builder, ledger refresh, scheduler loop, board tick loops and launchd

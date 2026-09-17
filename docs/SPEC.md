@@ -8,7 +8,7 @@ The project must be independent of any finance application. Project adapters pro
 
 ## Target decision
 
-Use a SQL ledger (SQLite locally; any SQLAlchemy-supported database in production) as the authoritative policy/attempt ledger, with the board runner dispatching directly to a bounded worker process — no message broker. Build the small policy layer specific to account quotas, aliases, output validation and independent review. Do not fork an entire coding-agent platform for scheduling. Add an HTTP inference proxy such as Plano only if measured routing savings justify it; it is not the task ledger or recovery coordinator.
+Use SQLite as the authoritative policy/attempt ledger (Ledger(url) is SQLAlchemy, so another backend is an operator's own untested choice, not a qualified one — CI exercises SQLite only), with the board runner dispatching directly to a bounded worker process — no message broker. Build the small policy layer specific to account quotas, aliases, output validation and independent review. Do not fork an entire coding-agent platform for scheduling. Add an HTTP inference proxy such as Plano only if measured routing savings justify it; it is not the task ledger or recovery coordinator.
 
 This decision follows negative-control evaluations of competing claim/dispatch behavior and ambiguous session recovery. The generic repository contains its own repeatable tests, not private pilot records or vendored upstream source.
 

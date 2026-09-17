@@ -81,9 +81,9 @@ Not pushed.
   `deployments/capacity` (operator step, as for every cloud change) before the endpoint
   answers JSON; until then the watcher reports `cloud_health_unversioned` for it, which
   is the intended behaviour for the current server.
-- Operator step from the packet, not done here: write `notify.sh` piping stdin to the
-  operator's own chat-bot script, and add `watch` to A2's scheduler loop at a 60 s
-  cadence. Superseded by B2 (2026-09-17): alarms route to email and the needs-you page only.
+- Operator step from the packet, not done here (as of B2, 2026-09-17): point `notify.sh`
+  at an email-sending script if desired — the needs-you page already surfaces every alarm
+  regardless of `notify` — and add `watch` to A2's scheduler loop at a 60 s cadence.
 
 ## Defects found in existing code
 

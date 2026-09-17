@@ -5,8 +5,8 @@ Two lists for the capacity dashboard overlay:
 - `operator` — every item waiting on a human: a board task `blocked` whose reason names
   an operator decision (`operator`, `owner`, `resolve with evidence`; `superseded`
   excluded), a ledger attempt `held` for resolution, an alarm currently raised in the
-  watch state file (packet A1's `watch` CLI; absent until that packet lands), a packet
-  the plan node drafted and nobody has released (`draft`, brief 20 M1's fix packets
+  watch state file (the `watch` CLI's own state, when `watch_state` is configured), a
+  packet the plan node drafted and nobody has released (`draft`, brief 20 M1's fix packets
   among them), and every row of the operator's hand-kept `owner-decisions.json`. Rows
   are `{kind, id, reason, since}`.
 - `accepted_work` — per subscription per ISO week, from the ledger: attempts completed
@@ -162,10 +162,9 @@ def _draft_rows(board_dirs):
 
 
 def _alarm_rows(watch_state):
-    """Alarms currently raised in A1's state file.
+    """Alarms currently raised in the `watch` CLI's state file (src/inference_grid/watch.py).
 
-    The `watch` packet has not landed, so its state format is taken from the brief:
-    alarms are `{kind, key, since, detail}` under `"alarms"` (a bare list is also
+    Alarms are `{kind, key, since, detail}` under `"alarms"` (a bare list is also
     accepted). If the file is missing or unreadable there are no alarm rows — a missing
     state file must never invent operator work.
     """
