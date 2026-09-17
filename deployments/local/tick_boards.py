@@ -276,13 +276,15 @@ def run(
     calibrate=None,
     drain=None,
 ):
-    """Prepare before every board; the ready count decides the sleep. Returns the last count.
+    """Each board's thread prepares, then ticks; the ready count decides the sleep.
 
     Each board's tick runs in its own thread and the pass joins them at its end (brief J6),
     so a board whose packet runs for an hour no longer delays the reviews on the next one:
     the loop moves on as soon as a board's tick has been started, not when it has settled.
-    The ready count is summed after the joins, and the pass never starts a board once a
-    drain is running — the ticks already in flight still finish.
+    The prepare runs inside that same thread: a failing board-prepare blocks only its own
+    board for the pass, with the reason printed, and the loop continues (the next pass
+    retries it). The ready count is summed after the joins, and the pass never starts a
+    board once a drain is running — the ticks already in flight still finish.
 
     ``calibrate`` (optional) runs once per pass before the boards: the weekly calibration
     author is idempotent per run, so a pass that finds a run in flight authors nothing.
@@ -295,8 +297,23 @@ def run(
             calibrate()
         counts = []
         failures = []
+        blocked = []
 
         def one(board):
+            # board-prepare runs inside the board's own thread: a failing refresh (stale
+            # accounts, a refused ledger) blocks that board for this pass, with the reason
+            # printed unbuffered, and the pass's other boards still tick. The next pass
+            # retries the prepare. Before, prepare() ran on the loop's own thread with
+            # check=True, so one bad refresh killed the whole runtime.
+            try:
+                prepare()
+            except Exception as exc:  # noqa: BLE001 - a blocked board is not a dead loop
+                blocked.append(board)
+                print(
+                    f"{board}: board-prepare failed; board blocked this pass: {exc!r}",
+                    flush=True,
+                )
+                return
             try:
                 counts.append(tick(board))
             except BaseException as exc:  # noqa: BLE001 - re-raised on the loop's own thread
@@ -306,7 +323,6 @@ def run(
         for board in boards:
             if drain and drain.draining:
                 break
-            prepare()
             thread = threading.Thread(target=one, args=(board,), daemon=True)
             threads.append(thread)
             thread.start()

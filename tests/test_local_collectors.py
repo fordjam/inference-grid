@@ -1295,6 +1295,62 @@ class TickTimeoutTests(unittest.TestCase):
     def test_the_default_timeout_outlasts_the_longest_admissible_packet(self):
         self.assertGreaterEqual(tick_boards.TICK_TIMEOUT, 8 * 3600)
 
+    def test_a_failing_board_prepare_blocks_the_board_not_the_loop(self):
+        clock = FakeClock()
+        ticked = []
+        out = io.StringIO()
+
+        def prepare():
+            raise RuntimeError("ledger refused the refresh")
+
+        def tick(board):
+            ticked.append(board)
+            return 1
+
+        with contextlib.redirect_stdout(out):
+            tick_boards.run(
+                ["a", "b"],
+                deadline=1000,
+                prepare=prepare,
+                tick=tick,
+                sleep=clock.sleep,
+                clock=clock.clock,
+            )
+        # No board ever ticked, but the loop itself survived and kept retrying each pass.
+        self.assertEqual(ticked, [])
+        self.assertEqual(out.getvalue().count("board-prepare failed"), 2)  # one per board
+        self.assertIn("ledger refused the refresh", out.getvalue())
+        self.assertGreater(clock.now, 0)  # it slept and went around again
+
+    def test_a_board_prepare_failure_is_per_board_and_per_pass(self):
+        clock = FakeClock()
+        ticked = []
+        out = io.StringIO()
+        first = threading.Lock()  # exactly one prepare call fails: the very first
+
+        def prepare():
+            if first.acquire(False):
+                raise RuntimeError("one bad refresh")
+            return None
+
+        def tick(board):
+            ticked.append(board)
+            return 0
+
+        with contextlib.redirect_stdout(out):
+            tick_boards.run(
+                ["a", "b"],
+                deadline=7200,
+                prepare=prepare,
+                tick=tick,
+                sleep=clock.sleep,
+                clock=clock.clock,
+            )
+        self.assertEqual(out.getvalue().count("board-prepare failed"), 1)
+        # Whichever board lost the first prepare, every later prepare still ticked:
+        # 8 prepare calls (2 boards x 4 passes) minus the one that blocked.
+        self.assertEqual(len(ticked), 7)
+
 
 class HeartbeatTests(unittest.TestCase):
     def test_write_heartbeat_is_atomic_and_names_the_process_and_boards(self):
