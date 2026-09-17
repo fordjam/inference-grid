@@ -590,6 +590,21 @@ class TickBoardsTests(unittest.TestCase):
         self.assertEqual(events.count("tick:b"), 4)
         self.assertEqual(clock.now, 7200)
 
+    def test_on_pass_fires_once_per_completed_pass(self):
+        clock = FakeClock()
+        passes = []
+
+        tick_boards.run(
+            ["a", "b"],
+            deadline=7200,
+            prepare=lambda: None,
+            tick=lambda board: 0,
+            sleep=clock.sleep,
+            clock=clock.clock,
+            on_pass=lambda: passes.append(clock.now),
+        )
+        self.assertEqual(passes, [0, 1800, 3600, 5400])
+
     def test_boards_tick_concurrently_and_the_ready_count_is_summed(self):
         clock = FakeClock()
         rendezvous = threading.Barrier(2, timeout=10)
@@ -1310,17 +1325,21 @@ class TickTimeoutTests(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             tick_boards.run(
                 ["a", "b"],
-                deadline=1000,
+                deadline=7200,
                 prepare=prepare,
                 tick=tick,
                 sleep=clock.sleep,
                 clock=clock.clock,
             )
-        # No board ever ticked, but the loop itself survived and kept retrying each pass.
+        # No board ever ticked, and the loop genuinely retries rather than giving up
+        # after the first failed pass: 4 passes (clock 0, 1800, 3600, 5400) x 2 boards
+        # = 8 failed prepares. (A deadline of 1000 with the default 1800s idle sleep
+        # would end after exactly one pass and pass this test even if run() never
+        # retried at all -- this reproduces and fixes that gap.)
         self.assertEqual(ticked, [])
-        self.assertEqual(out.getvalue().count("board-prepare failed"), 2)  # one per board
+        self.assertEqual(out.getvalue().count("board-prepare failed"), 8)
         self.assertIn("ledger refused the refresh", out.getvalue())
-        self.assertGreater(clock.now, 0)  # it slept and went around again
+        self.assertEqual(clock.now, 7200)
 
     def test_a_board_prepare_failure_is_per_board_and_per_pass(self):
         clock = FakeClock()
@@ -1351,6 +1370,33 @@ class TickTimeoutTests(unittest.TestCase):
         # 8 prepare calls (2 boards x 4 passes) minus the one that blocked.
         self.assertEqual(len(ticked), 7)
 
+    def test_a_tick_exception_blocks_only_that_board_not_the_loop(self):
+        """A malformed task file (KeyError/ValueError in count_ready) on one board must
+        not take the whole runtime down with it -- reproduces the reviewer's finding
+        that only prepare() was wrapped and a tick failure still killed every board."""
+        clock = FakeClock()
+        ticked = []
+        out = io.StringIO()
+
+        def tick(board):
+            if board == "bad":
+                raise KeyError("state")
+            ticked.append(board)
+            return 1
+
+        with contextlib.redirect_stdout(out):
+            ready = tick_boards.run(
+                ["bad", "good"],
+                deadline=1,
+                prepare=lambda: None,
+                tick=tick,
+                sleep=clock.sleep,
+                clock=clock.clock,
+            )
+        self.assertEqual(ticked, ["good"])
+        self.assertEqual(ready, 1)
+        self.assertIn("bad: tick failed; board blocked this pass", out.getvalue())
+
 
 class HeartbeatTests(unittest.TestCase):
     def test_write_heartbeat_is_atomic_and_names_the_process_and_boards(self):
@@ -1378,10 +1424,22 @@ class HeartbeatTests(unittest.TestCase):
     def test_start_heartbeat_keeps_the_file_fresh_until_stopped(self):
         tmp = self.enterContext(_TmpDir())
         path = tmp.path / "hb.json"
-        stop = tick_boards.start_heartbeat({"heartbeat_path": str(path)}, interval=0.05)
+        stop, mark_pass = tick_boards.start_heartbeat({"heartbeat_path": str(path)}, interval=0.05)
         self.assertTrue(_await(lambda: path.exists()), "first beat within a second")
         first = path.read_text()
         self.assertTrue(_await(lambda: path.read_text() != first), "a later beat lands")
+        stop.set()
+
+    def test_beat_carries_last_pass_at_only_after_a_pass_completes(self):
+        tmp = self.enterContext(_TmpDir())
+        path = tmp.path / "hb.json"
+        stop, mark_pass = tick_boards.start_heartbeat(
+            {"heartbeat_path": str(path)}, interval=0.05, clock=lambda: 1789000000
+        )
+        self.assertTrue(_await(lambda: path.exists()))
+        self.assertNotIn("last_pass_at", json.loads(path.read_text()))
+        mark_pass()
+        self.assertTrue(_await(lambda: "last_pass_at" in json.loads(path.read_text())))
         stop.set()
 
     def test_the_default_heartbeat_lives_beside_the_state_not_the_log(self):

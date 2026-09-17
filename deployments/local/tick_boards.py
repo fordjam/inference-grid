@@ -49,8 +49,15 @@ DEFAULT_HEARTBEAT = Path.home() / ".local/share/inference-grid/heartbeat/tick-bo
 HEARTBEAT_INTERVAL = 300
 
 
-def write_heartbeat(path, boards=None, now=None):
-    """One atomic heartbeat write: tmp file, then rename. Never raises past OSError."""
+def write_heartbeat(path, boards=None, now=None, last_pass_at=None):
+    """One atomic heartbeat write: tmp file, then rename. Never raises past OSError.
+
+    ``written_at`` proves only that the process is alive -- a board thread wedged
+    inside an hours-long tick subprocess still lets the daemon beat on schedule.
+    ``last_pass_at`` (when given) is the last time a full pass actually completed,
+    which a wedged pass cannot fake; a consumer watching for a silently dead loop
+    should key off ``last_pass_at``, not ``written_at``.
+    """
     path = Path(path)
     payload = {
         "written_at": time.strftime("%FT%TZ", time.gmtime(now if now is not None else time.time())),
@@ -58,6 +65,8 @@ def write_heartbeat(path, boards=None, now=None):
     }
     if boards is not None:
         payload["boards"] = list(boards)
+    if last_pass_at is not None:
+        payload["last_pass_at"] = last_pass_at
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
@@ -73,18 +82,26 @@ def heartbeat_path(config):
     return Path(raw).expanduser() if isinstance(raw, str) else Path(raw)
 
 
-def start_heartbeat(config, interval=HEARTBEAT_INTERVAL):
-    """Beat for as long as this process lives; returns the stop event for a clean exit."""
+def start_heartbeat(config, interval=HEARTBEAT_INTERVAL, clock=time.time):
+    """Beat for as long as this process lives; returns ``(stop, mark_pass)``.
+
+    ``mark_pass()`` records that a pass just completed, so the beat can carry
+    ``last_pass_at`` -- call it once per finished ``run()`` pass (see ``main``).
+    """
     path = heartbeat_path(config)
     boards = [b["name"] if isinstance(b, dict) else b for b in config.get("boards") or []]
     stop = threading.Event()
+    state = {"last_pass_at": None}
+
+    def mark_pass():
+        state["last_pass_at"] = time.strftime("%FT%TZ", time.gmtime(clock()))
 
     def beat():
         while not stop.wait(interval):
-            write_heartbeat(path, boards)
+            write_heartbeat(path, boards, last_pass_at=state["last_pass_at"])
 
     threading.Thread(target=beat, daemon=True, name="tick-boards-heartbeat").start()
-    return stop
+    return stop, mark_pass
 
 
 def default_prepare(config):
@@ -275,6 +292,7 @@ def run(
     busy=BUSY_SECONDS,
     calibrate=None,
     drain=None,
+    on_pass=None,
 ):
     """Each board's thread prepares, then ticks; the ready count decides the sleep.
 
@@ -316,8 +334,12 @@ def run(
                 return
             try:
                 counts.append(tick(board))
-            except BaseException as exc:  # noqa: BLE001 - re-raised on the loop's own thread
-                failures.append(exc)
+            except Exception as exc:  # noqa: BLE001 - a blocked board is not a dead loop
+                failures.append((board, exc))
+                print(
+                    f"{board}: tick failed; board blocked this pass: {exc!r}",
+                    flush=True,
+                )
 
         threads = []
         for board in boards:
@@ -328,9 +350,9 @@ def run(
             thread.start()
         for thread in threads:
             thread.join()
-        if failures:
-            raise failures[0]
         ready = sum(counts)
+        if on_pass:
+            on_pass()
         if drain and drain.draining:
             break
         print(
@@ -358,7 +380,7 @@ def main(argv=None):
     # One synchronous beat proves the loop started; the thread keeps it fresh through the
     # long board-tick subprocesses, so a stale file means the process itself is gone.
     write_heartbeat(heartbeat_path(config), boards)
-    stop_heartbeat = start_heartbeat(config)
+    stop_heartbeat, mark_pass = start_heartbeat(config)
     try:
         run(
             boards,
@@ -368,6 +390,7 @@ def main(argv=None):
             time.sleep,
             calibrate=lambda: default_calibrate(config),
             drain=drain,
+            on_pass=mark_pass,
         )
     finally:
         stop_heartbeat.set()
