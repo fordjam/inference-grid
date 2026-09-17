@@ -6,12 +6,17 @@ here ever points at a real repo or ~/.local/share.
 
 import pytest
 
+from inference_grid.board.new import BOARD_README_TEMPLATE
 from inference_grid.state_migrate import board_gates, migration_plan, state_migrate
 
 
-def make_repo(tmp_path, board=True, briefs=True, handoffs=(), reports=False, readme=None):
-    repo = tmp_path / "product-repo"
+def make_repo(
+    tmp_path, board=True, briefs=True, handoffs=(), reports=False, readme=None, name="product-repo", git=True
+):
+    repo = tmp_path / name
     repo.mkdir()
+    if git:
+        (repo / ".git").mkdir()
     if board:
         (repo / "grid" / "board" / "review").mkdir(parents=True)
         (repo / "grid" / "board" / "t1.json").write_text("{}")
@@ -31,12 +36,11 @@ def make_repo(tmp_path, board=True, briefs=True, handoffs=(), reports=False, rea
     return repo
 
 
-README = """# Board rules — product-repo
-
-- Repository tier: T1. T0 boards (package-only) may run work tasks; T1 boards
-  (first-party research and product code) run only reviews.
-- Allowed input prefixes for `--review-branch` and task staging: src/, tests/, docs/.
-"""
+# Rendered from the real board_init template (board/new.py), not hand-copied, so a
+# template edit that would silently change gate parsing shows up here too.
+README = BOARD_README_TEMPLATE.format(
+    project="product-repo", tier="T1", prefixes="src/, tests/, docs/"
+)
 
 
 def test_plan_lists_every_present_state_path_and_nothing_absent(tmp_path):
@@ -160,3 +164,50 @@ def test_plan_never_writes_anything(tmp_path):
     after = sorted(str(p) for p in repo.rglob("*"))
     assert before == after
     assert not (tmp_path / "state").exists()
+
+
+def test_refuses_a_repo_path_that_does_not_exist(tmp_path):
+    with pytest.raises(ValueError):
+        migration_plan(tmp_path / "does-not-exist", state_root=tmp_path / "state")
+
+
+def test_refuses_a_directory_that_is_not_a_git_repository(tmp_path):
+    repo = make_repo(tmp_path, board=True, briefs=False, git=False)
+    with pytest.raises(ValueError):
+        migration_plan(repo, state_root=tmp_path / "state")
+
+
+def test_refuses_a_file_path_masquerading_as_a_repo(tmp_path):
+    not_a_repo = tmp_path / "README.md"
+    not_a_repo.write_text("not a repo\n")
+    with pytest.raises(ValueError):
+        migration_plan(not_a_repo, state_root=tmp_path / "state")
+
+
+def test_refuses_an_ambiguous_destination_that_already_exists(tmp_path):
+    # Two repos sharing a basename must not silently collapse into one state/<name>/ —
+    # the plan refuses once that destination already exists, rather than guessing it's
+    # the same repo as before.
+    repo = make_repo(tmp_path, board=True, briefs=False)
+    state_root = tmp_path / "state"
+    (state_root / "product-repo").mkdir(parents=True)
+    with pytest.raises(ValueError):
+        migration_plan(repo, state_root=state_root)
+    # An explicit --board name is the operator's own disambiguation and is honored.
+    plan = migration_plan(repo, state_root=state_root, board="product-repo-worktree")
+    assert plan["state_root"] == str(state_root / "product-repo-worktree")
+    assert plan["grid_json"]["board"] == "product-repo-worktree"
+
+
+def test_cli_scopes_repo_dry_run_and_board_to_state_migrate_only(tmp_path, monkeypatch):
+    import sys
+
+    from inference_grid import cli
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["inference-grid", "status", "--repo", str(tmp_path), "--database", "sqlite:///:memory:"],
+    )
+    with pytest.raises(SystemExit):
+        cli.main()

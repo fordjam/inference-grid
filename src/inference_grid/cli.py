@@ -220,7 +220,14 @@ def main():
         action="store_true",
         help="state-migrate only: required tonight (B6) — no mover exists yet",
     )
+    parser.add_argument(
+        "--board",
+        help="state-migrate only: explicit board/destination name, "
+        "required when the auto-derived state/<repo-name>/ already exists",
+    )
     args = parser.parse_args()
+    if args.command != "state-migrate" and (args.repo or args.dry_run or args.board):
+        parser.error("--repo/--dry-run/--board are state-migrate only")
     if args.command == "doctor":
         from .doctor import diagnose
 
@@ -279,7 +286,7 @@ def main():
 
         if not args.repo:
             parser.error("state-migrate requires --repo")
-        plan = state_migrate(args.repo, dry_run=args.dry_run)
+        plan = state_migrate(args.repo, dry_run=args.dry_run, board=args.board)
         print(json.dumps(plan, indent=2))
         return
     ledger = Ledger(args.database)
