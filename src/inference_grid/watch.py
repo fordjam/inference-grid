@@ -20,8 +20,9 @@ state file. Every alarm carries ``kind``, ``key``, ``since`` and ``detail``:
   endpoint that cannot be reached at all.
 
 The module never reads a credential, never assumes a home directory and never
-imports a Telegram client: notification is the operator's script, run with the
-printed delta on stdin.
+imports a chat-bot client: notification is the operator's script, run with the
+printed delta on stdin. Alarms route to email and the needs-you page
+(operator_queue.py reads this module's state file); there is no other channel.
 """
 
 import json

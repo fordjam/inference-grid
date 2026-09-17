@@ -63,7 +63,7 @@ Alarms, each with `kind`, `key`, `since`, `detail`:
 - Alarms are **edge-triggered** against `state`: raised once when they appear, `cleared` once
   when they go, re-raised after `renotify_s` (default 4 h) while they persist. The CLI prints the
   delta as JSON and, for each entry in `notify`, runs it with the message on stdin. It never
-  imports a Telegram client: the notifier is the operator's script (see operator step).
+  imports a chat-bot client: the notifier is the operator's script (see operator step).
 - `cloud_server.py::/healthz` returns `{"ok": true, "commit": <RAILWAY_GIT_COMMIT_SHA or
   GRID_DEPLOY_COMMIT env, or null>}` with `Content-Type: application/json`; the existing tests
   that expect `ok` are updated, not weakened.
@@ -71,8 +71,10 @@ Alarms, each with `kind`, `key`, `since`, `detail`:
   triggering (raise, silent while unchanged, clear, renotify after the interval); the notify
   hook receives exactly the delta; `/healthz` JSON in `deployments/capacity/test_cloud.py`.
 - Size: medium.
-- Operator step: write `notify.sh` that pipes stdin to the Telegram bot the desktop plugin already
-  uses, and add `watch` to the scheduler loop delivered by A2 at a 60 s cadence.
+- Operator step: write `notify.sh` that pipes stdin to the operator's own chat-bot script (a
+  vendor-specific bridge is not part of this package), and add `watch` to the scheduler loop
+  delivered by A2 at a 60 s cadence. Superseded by B2 (2026-09-17): alarms route to email and
+  the needs-you page only.
 
 #### A2. Version the operations layer: `deployments/local/`
 The collectors, overlay builder, ledger refresh, scheduler loop, board tick loops and launchd

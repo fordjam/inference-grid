@@ -43,7 +43,7 @@ Not pushed.
   is non-empty. The delta entries are `{"event": "raised"|"renotified"|"cleared", …}`.
 - Notification: the CLI prints `{"errors": [...], "delta": [...]}` as JSON, and for each
   script in `spec["notify"]` runs it with exactly that text on stdin (30 s timeout, one
-  notifier failing recorded in `errors` without stopping the others). No Telegram client
+  notifier failing recorded in `errors` without stopping the others). No chat-bot client
   anywhere in the package — the notifier is the operator's script.
 - CLI: `watch` added to `cli.py`'s choices and to the requires-`--json` set; the spec is
   the `--json` payload and carries its own `database` url.
@@ -82,8 +82,8 @@ Not pushed.
   answers JSON; until then the watcher reports `cloud_health_unversioned` for it, which
   is the intended behaviour for the current server.
 - Operator step from the packet, not done here: write `notify.sh` piping stdin to the
-  Telegram bot the desktop plugin uses, and add `watch` to A2's scheduler loop at a 60 s
-  cadence.
+  operator's own chat-bot script, and add `watch` to A2's scheduler loop at a 60 s
+  cadence. Superseded by B2 (2026-09-17): alarms route to email and the needs-you page only.
 
 ## Defects found in existing code
 
