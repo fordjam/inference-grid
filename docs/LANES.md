@@ -195,6 +195,120 @@ classifies the event stream with `classify_codex`. Family `openai`; reviews are
 explicit-only (the runner never picks `claude`/`openai` lanes unless the task names
 them), which is what lets first-party T1 repositories run under the family rules.
 
+## Codex three-seat trio — `codex-luna`, `codex-terra`, `codex-sol`
+
+Three `codex_cli` lanes on three separate Codex CLI logins (`~/.codex`, `~/.codex-seat1`,
+`~/.codex-seat2`), each its own lane id so the tier table and the scorecard track them
+independently even though they draw on the same underlying account's quota (see
+`deployments/local/collect_codex.py`'s `observe_seats`, below).
+
+| Lane id | Model | Tier | Seat home | Note |
+| --- | --- | --- | --- | --- |
+| `codex-luna` | `gpt-5.6-luna` | build | `~/.codex` | Primary build lane for this trio |
+| `codex-terra` | `gpt-5.6-terra` | build | `~/.codex-seat1` | Same categories as `codex-luna`; the operator's convention (not a runner feature — see below) is to name this lane explicitly for a packet's next round when `codex-luna`'s attempt failed its gate, rather than retrying `codex-luna` itself |
+| `codex-sol` | `gpt-5.6-sol` | review | `~/.codex-seat2` | Reviews Codex-family builds from a distinct login so a `codex-luna`/`codex-terra` attempt is never graded by its own seat |
+
+```json
+"codex-luna": {
+  "provider": "codex", "family": "openai", "model": "gpt-5.6-luna",
+  "kind": "codex_cli", "credential_path": "/path/from/operator/.codex/auth.json",
+  "executable": "/path/from/operator/codex", "plan_units": {"five_hour": 1},
+  "window": null, "max_concurrency": 1, "wall_seconds": 900,
+  "categories": ["pure_function", "independent_review"]
+},
+"codex-terra": {
+  "provider": "codex", "family": "openai", "model": "gpt-5.6-terra",
+  "kind": "codex_cli", "credential_path": "/path/from/operator/.codex-seat1/auth.json",
+  "executable": "/path/from/operator/codex", "plan_units": {"five_hour": 1},
+  "window": null, "max_concurrency": 1, "wall_seconds": 900,
+  "categories": ["pure_function", "independent_review"]
+},
+"codex-sol": {
+  "provider": "codex", "family": "openai", "model": "gpt-5.6-sol",
+  "kind": "codex_cli", "credential_path": "/path/from/operator/.codex-seat2/auth.json",
+  "executable": "/path/from/operator/codex", "plan_units": {"five_hour": 1},
+  "window": null, "max_concurrency": 1, "wall_seconds": 900,
+  "categories": ["independent_review"]
+}
+```
+
+`tier` is written above as intent (matching the "Model tiers" table's own convention) but
+is not yet a field `lanes/config.py` will accept — see that section for the pending
+key-set change.
+
+**The `executable` field cannot select the seat, and a same-executable wrapper alone does
+not work either — read this before wiring three seats up.** `lanes/config.py` has no
+env-map field a lane record could carry (`allowed` is a fixed key set), so `CODEX_HOME`
+cannot be declared as a lane field today. The fallback the operator might reach for — an
+`executable` pointing at a small wrapper script that does
+`exec env CODEX_HOME=~/.codex-seat1 /path/to/codex "$@"` — looks plausible but does not
+actually work with this lane as shipped: `lanes/codex.py::run()` builds its sandbox
+profile from a Python-level `home` parameter (`extra_write_roots=(home / ".codex",)`),
+and `lanes/runner.py`'s dispatch never passes `home` for the `codex` kind — its `options`
+dict overrides `executable` for `zai` only, so every `codex_cli` attempt sandboxes against
+the real `$HOME/.codex`, whatever the wrapper's own `CODEX_HOME` says. A wrapper's writes
+to `~/.codex-seat1/` would be sandbox-denied, and `codex-luna`/`codex-terra`/`codex-sol`
+attempts running concurrently would otherwise race on the one real `~/.codex`.
+
+Landing per-seat isolation is **not** a `lanes/runner.py`-only change — a first draft of
+this section proposed passing `home=Path(lane["credential_path"]).parent.parent` at the
+dispatch site and left `lanes/codex.py` untouched; on review that resolves to the same
+real `~/.codex` for all three lanes; regardless of `home`, `run()` always derives its
+sandbox root and effective login directory as `home / ".codex"` — a fixed, one-name-only
+suffix — so no value of `home` alone can point it at a seat directory named
+`.codex-seat1`. Two designs would actually work, and the choice affects what shape the
+operator's `~/.codex-seat*` directories need to be in:
+
+1. **Reshape the seats to fit the existing convention.** Keep `lanes/codex.py::run()`
+   unchanged; instead of `~/.codex`, `~/.codex-seat1`, `~/.codex-seat2` directly under the
+   operator's real home, each seat becomes its own fake home whose only child is a
+   `.codex` directory (e.g. `~/.grid-codex-homes/luna/.codex`,
+   `.../terra/.codex`, `.../sol/.codex` — the current `~/.codex-seat1` content moved
+   to `.../terra/.codex`). `lanes/runner.py` then only needs `options = {"home":
+   Path(lane["credential_path"]).parent.parent}` for the `codex` kind, matching the
+   pattern above (now correct because the parent-of-parent really is the fake home). No
+   `lanes/codex.py` change. This is the smaller change, but it means restructuring
+   `deployments/local/collect_codex.py`'s own `default_homes()` / `codex_homes` config
+   to the new paths too, everywhere they're used.
+2. **Make `lanes/codex.py::run()` take the seat directory directly**, independent of
+   `home` — e.g. a `codex_home=None` keyword defaulting to `home / ".codex"` when absent,
+   used for both the sandbox `extra_write_roots` and (if the installed Codex CLI honours
+   it — **unconfirmed**, matching this document's existing "pending operator
+   confirmation" caveat on the single `codex` lane above; check before relying on it) a
+   `CODEX_HOME` environment variable alongside the existing `HOME`. `lanes/runner.py`
+   then passes `options = {"codex_home": Path(lane["credential_path"]).parent}` for the
+   `codex` kind — that parent (`~/.codex-seat1`) is exactly the seat directory as the
+   table above already names it, no reshaping needed.
+
+Either way this is a coordinator edit to package code (not the operator's private
+`lanes.json`), in the same spirit as the pending `tier` and `opencode_cli` key-set
+patches above, sized past what this row's brief (docs + the collector's read side) covers
+— it is not applied in this checkout. **Until one of these two lands, do not run more
+than one of `codex-luna`/`codex-terra`/`codex-sol` at a time**: each `max_concurrency: 1`
+above bounds concurrency *within* one lane, not across the three, and as configured today
+all three attempts would sandbox against the same real `~/.codex` regardless of which
+seat's login the operator intended.
+
+**Canary.** Bring each lane up the same way every lane does (top of this document):
+`inference-grid lane-init --json {"lane_id": "codex-luna", "board_dir": ...}`, then one
+tick — repeated for `codex-terra` and `codex-sol`. `lane_init` writes the brief at
+`grid/briefs/canary-<lane-id>.txt` (content: the fixed `CANARY_BRIEF`, "Reply with exactly
+OK") and the matching task at `<board_dir>/canary-<lane-id>.json`; it refuses only when
+that task file already exists (the brief itself is overwritten unconditionally, no
+exists-check). No canary brief or task for these three lanes is pre-created in this
+repository: `board_dir` is real board state (this run's hard rule against touching `grid/`
+board state, plus this project's own rule that runtime board state lives outside product
+repos) that only the operator's own `lane-init` run can correctly place.
+
+**Collector.** `deployments/local/collect_codex.py`'s `observe` (unchanged) keeps reporting
+one merged reading — first home that answers — for the account-level dashboard figure. A
+new `observe_seats` reads every configured home without stopping at the first success and
+returns one reading per seat, folded into `codex-observation.json` under a `seats` key by
+`write(obs, config, seats=...)` (additive; a reader that only knows the old shape is
+unaffected). This is what shows a caller which of the three seats' logins is actually
+healthy — `codex-luna`'s own login expiring must not read as "codex is fine" just because
+`codex-terra`'s home still answers.
+
 ## First-party Claude — `claude_headless` on the operator's Max login
 
 ```json

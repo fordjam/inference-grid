@@ -292,6 +292,29 @@ class CodexCollectorTests(ObservationShapeMixin, unittest.TestCase):
         self.assertEqual((obs["status"], obs["error"]), ("auth_required", "HTTP_403"))
         self.assertEqual(obs["windows"], [])
 
+    def test_observe_a_home_that_answers_with_no_recognized_windows_still_wins(self):
+        """First home that answers wins, even when its answer has no windows this
+        module recognizes (status "unknown") -- observe() must not fall through to a
+        later home just because the winning reading's own status isn't "ok"."""
+        tmp = self.enterContext(_TmpDir())
+        answers_but_empty = tmp.path / ".codex"
+        answers_but_empty.mkdir()
+        (answers_but_empty / "auth.json").write_text(
+            json.dumps({"tokens": {"access_token": "t", "account_id": "a"}})
+        )
+        never_home = tmp.path / ".codex-seat1"
+
+        def fetch(url, headers, timeout):
+            return {"rate_limit": {"primary_window": {"limit_window_seconds": 60, "used_percent": 5.0}},
+                    "rate_limit_reached_type": {"type": "usage_limit"}, "plan_type": "pro"}
+
+        obs = codex.observe(fetch, {}, homes=[answers_but_empty, never_home])
+        self.assertEqual(obs["status"], "unknown")
+        self.assertEqual(obs["source_home"], ".codex")
+        self.assertEqual(obs["plan_type"], "pro")
+        self.assertEqual(obs["source_reason"], "usage_limit")
+        self.assertNotIn("error", obs)
+
     def test_observe_unhandled_exception_logs_a_traceback_and_is_not_unknown(self):
         tmp = self.enterContext(_TmpDir())
         home = tmp.path / ".codex"
@@ -307,6 +330,72 @@ class CodexCollectorTests(ObservationShapeMixin, unittest.TestCase):
         self.assertEqual((obs["status"], obs["error"]), ("error", "RuntimeError"))
         self.assertIn("RuntimeError: connection reset", err.getvalue())
         self.assertIn("Traceback (most recent call last)", err.getvalue())
+
+    def _seat_home(self, tmp, name, account_id, token="fake-token"):
+        home = tmp.path / name
+        home.mkdir()
+        (home / "auth.json").write_text(
+            json.dumps({"tokens": {"access_token": token, "account_id": account_id}})
+        )
+        return home
+
+    def test_observe_seats_reads_every_home_even_after_one_succeeds(self):
+        """Unlike observe() (first home that answers wins), the codex-luna/terra/sol trio
+        (docs/LANES.md) needs every seat's own status, so observe_seats must not stop early."""
+        tmp = self.enterContext(_TmpDir())
+        main_home = self._seat_home(tmp, ".codex", "acc-main")
+        seat1 = self._seat_home(tmp, ".codex-seat1", "acc-seat1")
+        seen_homes = []
+
+        def fetch(url, headers, timeout):
+            seen_homes.append(headers["ChatGPT-Account-Id"])
+            return CODEX_BODY
+
+        seats = codex.observe_seats(fetch, {}, homes=[main_home, seat1])
+        self.assertEqual(seen_homes, ["acc-main", "acc-seat1"])
+        self.assertEqual([s["home"] for s in seats], [".codex", ".codex-seat1"])
+        self.assertTrue(all(s["status"] == "ok" for s in seats))
+
+    def test_observe_seats_reports_each_homes_own_status_independently(self):
+        """One seat's expired login must not hide the other seats' readings, and must not
+        make observe_seats stop -- the whole point is per-seat visibility."""
+        tmp = self.enterContext(_TmpDir())
+        good = self._seat_home(tmp, ".codex", "acc-main")
+        expired = self._seat_home(tmp, ".codex-seat1", "acc-seat1")
+        missing = tmp.path / ".codex-seat2"  # no auth.json at all
+
+        def fetch(url, headers, timeout):
+            if headers["ChatGPT-Account-Id"] == "acc-seat1":
+                raise urllib.error.HTTPError(url, 401, "expired", {}, None)
+            return CODEX_BODY
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            seats = codex.observe_seats(fetch, {}, homes=[good, expired, missing])
+        by_home = {s["home"]: s for s in seats}
+        self.assertEqual(by_home[".codex"]["status"], "ok")
+        self.assertEqual(by_home[".codex-seat1"]["status"], "auth_required")
+        self.assertEqual(by_home[".codex-seat2"]["status"], "error")
+        self.assertEqual(by_home[".codex-seat2"]["error"], "FileNotFoundError")
+
+    def test_write_folds_seats_in_without_disturbing_the_merged_shape(self):
+        tmp = self.enterContext(_TmpDir())
+        config = {"output_dir": str(tmp.path)}
+        obs = {"provider": "codex", "status": "ok", "observed_at": "t", "windows": []}
+        seats = [{"home": ".codex", "status": "ok", "windows": []}]
+        codex.write(obs, config, seats=seats)
+        written = json.loads((tmp.path / "codex-observation.json").read_text())
+        self.assertEqual(written["provider"], "codex")
+        self.assertEqual(written["status"], "ok")
+        self.assertEqual(written["seats"], seats)
+
+    def test_write_without_seats_keeps_the_old_shape(self):
+        tmp = self.enterContext(_TmpDir())
+        config = {"output_dir": str(tmp.path)}
+        obs = {"provider": "codex", "status": "ok", "observed_at": "t", "windows": []}
+        codex.write(obs, config)
+        written = json.loads((tmp.path / "codex-observation.json").read_text())
+        self.assertNotIn("seats", written)
 
 
 class GoatCollectorTests(ObservationShapeMixin, unittest.TestCase):
