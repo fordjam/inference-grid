@@ -127,4 +127,56 @@ def test_scorecard_defaults_to_empty_without_an_overlay():
     result = project({"accounts": [], "scorecard": [{"family": "upstream"}]}, [])
     assert result["scorecard"] == []
     assert project({"accounts": []}, [])["scorecard"] == []
+
+
+def test_capacity_panel_overlay_is_sanitized():
+    rows = [
+        {
+            "provider": "zai",
+            "landed_count": 3,
+            "landed_consumed": 5.5,
+            "failed_abandoned_count": 1,
+            "failed_abandoned_consumed": 2.0,
+            "secret": "DO_NOT_SHARE",  # unknown key: stripped
+        },
+        {"provider": "not-a-real-provider", "landed_count": 1},  # unrecognized: dropped
+        "junk",  # not a dict: dropped
+    ]
+    result = project({"accounts": []}, {"capacity_panel": rows})
+    assert result["capacity_panel"] == [
+        {
+            "provider": "zai",
+            "landed_count": 3,
+            "landed_consumed": 5.5,
+            "failed_abandoned_count": 1,
+            "failed_abandoned_consumed": 2.0,
+        }
+    ]
+    assert "secret" not in str(result["capacity_panel"])
+
+
+def test_capacity_panel_bad_numbers_become_zero_not_dropped():
+    rows = [
+        {
+            "provider": "zai",
+            "landed_count": "not a number",
+            "landed_consumed": float("nan"),
+            "failed_abandoned_count": -1,
+            "failed_abandoned_consumed": -5.0,
+        }
+    ]
+    result = project({"accounts": []}, {"capacity_panel": rows})
+    assert result["capacity_panel"] == [
+        {
+            "provider": "zai",
+            "landed_count": 0,
+            "landed_consumed": 0.0,
+            "failed_abandoned_count": 0,
+            "failed_abandoned_consumed": 0.0,
+        }
+    ]
+
+
+def test_capacity_panel_defaults_to_empty_without_an_overlay():
+    assert project({"accounts": []}, [])["capacity_panel"] == []
     assert project({"accounts": []}, {"attempts": []})["scorecard"] == []

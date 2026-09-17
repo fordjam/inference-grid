@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 import datetime
 from pathlib import Path
 
@@ -265,6 +266,86 @@ def attempts(board_db):
     return rows
 
 
+CAPACITY_PANEL_WINDOW_SECONDS = 86400  # "this window": the last 24h of resolved attempts
+
+
+def capacity_panel(board_db, now=None, window_seconds=CAPACITY_PANEL_WINDOW_SECONDS):
+    """02-B5: per subscription, capacity consumed this window by attempts that landed
+    vs failed/abandoned. Read-only: no write to board.sqlite anywhere here.
+
+    "Landed" here is attempts.state == "accepted", the ledger's own terminal success
+    state -- true board-level "landed" status lives in grid/board/*.json task files,
+    out of scope for this sqlite-only, read-only panel (rule: never touch grid/ board
+    state). "Consumed" prefers the outcome_recorded event's usage dict for that
+    attempt (the actual recorded usage) when one exists, else falls back to the
+    attempt's own pre-run estimate dict. A failed attempt's estimate was debited from
+    the account's windows (ledger.py's resolve(), outcome="consumed"); an abandoned
+    attempt's was released and never debited (outcome="released" -- state="abandoned"
+    follows only from that path), so an abandoned attempt always contributes 0.
+    """
+    now = time.time() if now is None else now
+    floor = now - window_seconds
+    try:
+        con = sqlite3.connect("file:" + str(board_db) + "?mode=ro", uri=True)
+        attempt_rows = con.execute(
+            "select id, account, state, estimate, updated from attempts "
+            "where state in ('accepted','failed','abandoned') and updated >= ?",
+            (floor,),
+        ).fetchall()
+        usage_by_attempt = {}
+        for aid, detail_raw in con.execute(
+            "select attempt, detail from events where kind='outcome_recorded'"
+        ):
+            try:
+                detail = json.loads(detail_raw) if isinstance(detail_raw, str) else detail_raw
+            except (TypeError, ValueError):
+                continue
+            usage = detail.get("usage") if isinstance(detail, dict) else None
+            if isinstance(usage, dict):
+                usage_by_attempt[aid] = usage
+        con.close()
+    except (sqlite3.Error, ValueError):
+        return []
+
+    def numeric_sum(mapping):
+        if not isinstance(mapping, dict):
+            return 0.0
+        return sum(v for v in mapping.values() if isinstance(v, (int, float)))
+
+    by_provider = {}
+    for aid, account, state, estimate_raw, _updated in attempt_rows:
+        lane = account.replace("-account", "")
+        provider = LANE_PROVIDER.get(lane, "unknown")
+        bucket = "landed" if state == "accepted" else "failed_abandoned"
+        if state == "abandoned":
+            consumed = 0.0
+        else:
+            usage = usage_by_attempt.get(aid)
+            if usage:
+                consumed = numeric_sum(usage)
+            else:
+                try:
+                    estimate = (
+                        json.loads(estimate_raw) if isinstance(estimate_raw, str) else estimate_raw
+                    )
+                except (TypeError, ValueError):
+                    estimate = {}
+                consumed = numeric_sum(estimate)
+        entry = by_provider.setdefault(
+            provider,
+            {
+                "provider": provider,
+                "landed_consumed": 0.0,
+                "landed_count": 0,
+                "failed_abandoned_consumed": 0.0,
+                "failed_abandoned_count": 0,
+            },
+        )
+        entry[bucket + "_consumed"] += consumed
+        entry[bucket + "_count"] += 1
+    return sorted(by_provider.values(), key=lambda r: r["provider"])
+
+
 def build(config):
     out_dir = Path(config.get("output_dir", DEFAULT_DIR))
     accounts = prior_accounts(
@@ -298,6 +379,7 @@ def build(config):
     }
     overlay.update(operator_lists(config))
     overlay["boards"] = boards_section(config)
+    overlay["capacity_panel"] = capacity_panel(config.get("board_db", BOARD_DB))
     return overlay
 
 

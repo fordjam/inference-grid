@@ -14,6 +14,7 @@ import json
 import os
 import plistlib
 import signal
+import sqlite3
 import tempfile
 import threading
 import time
@@ -1030,6 +1031,134 @@ class OverlayBuildTests(unittest.TestCase):
         )
         accounts = overlay.prior_accounts(tmp.path / "prior.json")
         self.assertEqual([a["provider"] for a in accounts], ["claude"])
+
+
+def make_board_db(path, attempt_rows=(), event_rows=()):
+    """A throwaway board.sqlite with just the two tables capacity_panel reads.
+
+    attempt_rows: (id, account, state, estimate_dict, updated_epoch)
+    event_rows: (attempt, kind, detail_dict)
+    """
+    con = sqlite3.connect(str(path))
+    con.execute(
+        "create table attempts (id text, task text, account text, generation int, "
+        "state text, estimate text, workspace text, receipt text, reason text, updated real)"
+    )
+    con.execute("create table events (id text, attempt text, kind text, detail text, at real)")
+    for i, (aid, account, state, estimate, updated) in enumerate(attempt_rows):
+        con.execute(
+            "insert into attempts (id, task, account, generation, state, estimate, updated) "
+            "values (?, ?, ?, 1, ?, ?, ?)",
+            (aid, "t" + str(i), account, state, json.dumps(estimate), updated),
+        )
+    for i, (aid, kind, detail) in enumerate(event_rows):
+        con.execute(
+            "insert into events (id, attempt, kind, detail, at) values (?, ?, ?, ?, ?)",
+            ("e" + str(i), aid, kind, json.dumps(detail), 0.0),
+        )
+    con.commit()
+    con.close()
+
+
+class CapacityPanelTests(unittest.TestCase):
+    """02-B5: per subscription, capacity consumed this window by attempts that
+    landed vs failed/abandoned, from board.sqlite attempts+events, read-only."""
+
+    def test_landed_and_failed_are_bucketed_and_summed_per_provider(self):
+        tmp = self.enterContext(_TmpDir())
+        db = tmp.path / "board.sqlite"
+        make_board_db(
+            db,
+            attempt_rows=[
+                ("a1", "zai-account", "accepted", {"five_hour": 3.0}, time.time()),
+                ("a2", "zai-account", "accepted", {"five_hour": 2.0}, time.time()),
+                ("a3", "goat-account", "failed", {"monthly": 5.0}, time.time()),
+            ],
+        )
+        rows = {r["provider"]: r for r in overlay.capacity_panel(db)}
+        self.assertEqual(rows["zai"]["landed_count"], 2)
+        self.assertAlmostEqual(rows["zai"]["landed_consumed"], 5.0)
+        self.assertEqual(rows["zai"]["failed_abandoned_count"], 0)
+        self.assertEqual(rows["command-code"]["failed_abandoned_count"], 1)
+        self.assertAlmostEqual(rows["command-code"]["failed_abandoned_consumed"], 5.0)
+
+    def test_abandoned_always_consumes_zero_even_with_an_estimate(self):
+        """ledger.py's resolve(): state="abandoned" follows only outcome="released",
+        which never debits the account -- an abandoned attempt's reservation was
+        given back, regardless of what its pre-run estimate said."""
+        tmp = self.enterContext(_TmpDir())
+        db = tmp.path / "board.sqlite"
+        make_board_db(
+            db,
+            attempt_rows=[("a1", "cline-account", "abandoned", {"weekly": 40.0}, time.time())],
+        )
+        rows = {r["provider"]: r for r in overlay.capacity_panel(db)}
+        self.assertEqual(rows["clinepass"]["failed_abandoned_count"], 1)
+        self.assertEqual(rows["clinepass"]["failed_abandoned_consumed"], 0.0)
+
+    def test_active_attempts_are_excluded_entirely(self):
+        tmp = self.enterContext(_TmpDir())
+        db = tmp.path / "board.sqlite"
+        make_board_db(
+            db,
+            attempt_rows=[
+                ("a1", "zai-account", "queued", {"five_hour": 3.0}, time.time()),
+                ("a2", "zai-account", "dispatching", {"five_hour": 3.0}, time.time()),
+                ("a3", "zai-account", "held", {"five_hour": 3.0}, time.time()),
+            ],
+        )
+        self.assertEqual(overlay.capacity_panel(db), [])
+
+    def test_outcome_recorded_usage_is_preferred_over_the_pre_run_estimate(self):
+        tmp = self.enterContext(_TmpDir())
+        db = tmp.path / "board.sqlite"
+        make_board_db(
+            db,
+            attempt_rows=[("a1", "zai-account", "accepted", {"five_hour": 3.0}, time.time())],
+            event_rows=[("a1", "outcome_recorded", {"usage": {"five_hour": 9.5}})],
+        )
+        rows = {r["provider"]: r for r in overlay.capacity_panel(db)}
+        self.assertAlmostEqual(rows["zai"]["landed_consumed"], 9.5)
+
+    def test_outside_the_window_is_excluded(self):
+        tmp = self.enterContext(_TmpDir())
+        db = tmp.path / "board.sqlite"
+        now = time.time()
+        make_board_db(
+            db,
+            attempt_rows=[("a1", "zai-account", "accepted", {"five_hour": 3.0}, now - 200000)],
+        )
+        self.assertEqual(overlay.capacity_panel(db, now=now, window_seconds=86400), [])
+        rows = {r["provider"]: r for r in overlay.capacity_panel(db, now=now, window_seconds=300000)}
+        self.assertEqual(rows["zai"]["landed_count"], 1)
+
+    def test_unmapped_lane_becomes_unknown_provider(self):
+        tmp = self.enterContext(_TmpDir())
+        db = tmp.path / "board.sqlite"
+        make_board_db(
+            db, attempt_rows=[("a1", "mystery-account", "accepted", {}, time.time())]
+        )
+        rows = {r["provider"]: r for r in overlay.capacity_panel(db)}
+        self.assertIn("unknown", rows)
+
+    def test_missing_database_returns_empty_not_raise(self):
+        self.assertEqual(overlay.capacity_panel("/no/such/board.sqlite"), [])
+
+    def test_build_includes_the_panel_in_the_overlay(self):
+        tmp = self.enterContext(_TmpDir())
+        db = tmp.path / "board.sqlite"
+        make_board_db(
+            db, attempt_rows=[("a1", "zai-account", "accepted", {"five_hour": 1.0}, time.time())]
+        )
+        config = {
+            "output_dir": str(tmp.path),
+            "claude_overlay_path": str(tmp.path / "no-prior-overlay.json"),
+            "go_live_path": str(tmp.path / "no-go-live.json"),
+            "board_db": str(db),
+            "codex_homes": [str(tmp.path / "no-codex-home")],
+        }
+        result = overlay.build(config)
+        self.assertEqual([r["provider"] for r in result["capacity_panel"]], ["zai"])
 
 
 def feed_account(provider, used):

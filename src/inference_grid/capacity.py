@@ -157,6 +157,44 @@ def clean_reviewer_recall(rows):
     return clean
 
 
+CAPACITY_PANEL_ROW_COUNTS = (
+    "landed_count",
+    "failed_abandoned_count",
+)
+CAPACITY_PANEL_ROW_AMOUNTS = (
+    "landed_consumed",
+    "failed_abandoned_consumed",
+)
+
+
+def clean_capacity_panel(rows):
+    """Sanitize the 02-B5 capacity panel: provider plus two counts and two amounts.
+
+    Unknown keys are stripped; rows without a recognized provider are dropped.
+    """
+    if not isinstance(rows, list):
+        return []
+    clean = []
+    for row in rows[:50]:
+        if not isinstance(row, dict) or row.get("provider") not in PROVIDERS:
+            continue
+        entry = {"provider": row["provider"]}
+        for key in CAPACITY_PANEL_ROW_COUNTS:
+            value = row.get(key)
+            if type(value) is int and not isinstance(value, bool) and 0 <= value <= 10**9:
+                entry[key] = value
+            else:
+                entry[key] = 0
+        for key in CAPACITY_PANEL_ROW_AMOUNTS:
+            value = row.get(key)
+            if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                entry[key] = float(value)
+            else:
+                entry[key] = 0.0
+        clean.append(entry)
+    return clean
+
+
 def _clean_board_row(row):
     entry = {}
     for key in BOARD_ROW_STRINGS:
@@ -238,6 +276,7 @@ def project(raw, overlays=()):
     overlay_accepted = overlays.get("accepted_work") if isinstance(overlays, dict) else None
     overlay_recall = overlays.get("reviewer_recall") if isinstance(overlays, dict) else None
     overlay_boards = overlays.get("boards") if isinstance(overlays, dict) else None
+    overlay_capacity_panel = overlays.get("capacity_panel") if isinstance(overlays, dict) else None
     accounts = {}
     for a in [*raw.get("accounts", []), *overlay_accounts]:
         if not isinstance(a, dict) or a.get("provider") not in PROVIDERS:
@@ -288,6 +327,7 @@ def project(raw, overlays=()):
         accepted_work=clean_accepted_work(overlay_accepted),
         reviewer_recall=clean_reviewer_recall(overlay_recall),
         boards=clean_boards(overlay_boards),
+        capacity_panel=clean_capacity_panel(overlay_capacity_panel),
         served_at=datetime.now(timezone.utc).isoformat(),
     )
 
