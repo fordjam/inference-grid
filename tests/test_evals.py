@@ -507,3 +507,29 @@ def test_evals_round_trips_through_main(tmp_path, monkeypatch):
     assert report["project_root"] == str(project)
     assert [row["case"] for row in report["authored"]] == ["review-a"]
     assert (board / (report["authored"][0]["task"] + ".json")).is_file()
+
+
+def test_a_packet_case_run_stays_ready_when_admission_is_refused(tmp_path):
+    from inference_grid.ledger import Refused
+
+    ledger, board, project = ladder(tmp_path, None)
+    created = calibration.calibration_task(
+        board, str(EXAMPLE), ["go"], "e-20260916-busy1234", case=PACKET_CASE
+    )
+    path = Path(created["task"])
+
+    def fake_dispatch(*args, **kwargs):
+        raise Refused("account busy")
+
+    result = step(
+        path,
+        board,
+        project,
+        ledger,
+        tmp_path / "packets",
+        dispatch_fn=fake_dispatch,
+        accounts_by_lane={"go": "go-alias"},
+    )
+    assert result["result"] == "refused: account busy" and result["lane"] == "go"
+    saved = json.loads(path.read_text())
+    assert saved["state"] == "ready" and saved.get("blocked_reason") is None

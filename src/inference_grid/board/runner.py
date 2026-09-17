@@ -1403,6 +1403,17 @@ def step_eval_case(
                 packet_dir,
                 accounts_by_lane[lane_id],
             )
+        except Refused as exc:
+            # Admission refused before any attempt existed (`account busy`, `quota stale`):
+            # the same transient the ordinary packet path leaves `ready` for the next tick.
+            # On 2026-09-16 twenty eval runs settled `blocked` on it and never ran.
+            save_task(path, task, state="ready", blocked_reason=None)
+            return {
+                "task": task["id"],
+                "lane": lane_id,
+                "attempt": None,
+                "result": "refused: " + str(exc)[:200],
+            }
         except Exception as exc:  # noqa: BLE001 — a bad case blocks the run, not the tick
             return settle("blocked", "blocked", ("eval packet: " + str(exc))[:300])
         if state != "completed":

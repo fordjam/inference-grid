@@ -26,6 +26,6 @@
   "output_bytes": 2000000,
   "thinking_tokens": 24000
  },
- "state": "ready",
+ "state": "passed",
  "blocked_reason": null
 }
