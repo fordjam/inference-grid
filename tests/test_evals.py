@@ -377,3 +377,38 @@ def test_a_packet_case_run_blocks_when_the_attempt_is_held(tmp_path):
     )
     assert result["result"] == "blocked"
     assert "held" in json.loads(path.read_text())["blocked_reason"]
+
+
+# --- admission refusal (main, 8e26e4c) ---------------------------------------------
+#
+# B4 deleted the `inference-grid evals` CLI command and its authoring entry points, so
+# main's own `test_evals_round_trips_through_main` (a CLI round-trip through that
+# command) does not apply on this branch and is not carried over by this merge; the
+# runner-level admission-refusal behavior it was added alongside is independent of the
+# CLI and is kept below.
+
+
+def test_a_packet_case_run_stays_ready_when_admission_is_refused(tmp_path):
+    from inference_grid.ledger import Refused
+
+    ledger, board, project = ladder(tmp_path, None)
+    created = calibration.calibration_task(
+        board, str(EXAMPLE), ["go"], "e-20260916-busy1234", case=PACKET_CASE
+    )
+    path = Path(created["task"])
+
+    def fake_dispatch(*args, **kwargs):
+        raise Refused("account busy")
+
+    result = step(
+        path,
+        board,
+        project,
+        ledger,
+        tmp_path / "packets",
+        dispatch_fn=fake_dispatch,
+        accounts_by_lane={"go": "go-alias"},
+    )
+    assert result["result"] == "refused: account busy" and result["lane"] == "go"
+    saved = json.loads(path.read_text())
+    assert saved["state"] == "ready" and saved.get("blocked_reason") is None

@@ -544,22 +544,44 @@ class FakeClock:
         self.now += seconds
 
 
+class ThreadClock:
+    """A fake clock per thread: each board loop of tick_boards.run sleeps on its own
+    thread, so its deadline arithmetic must not see the other boards' sleeps."""
+
+    def __init__(self, start=0.0):
+        self._start = start
+        self._local = threading.local()
+        self.sleeps = []
+        self._lock = threading.Lock()
+
+    @property
+    def now(self):
+        return getattr(self._local, "now", self._start)
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        with self._lock:
+            self.sleeps.append(seconds)
+        self._local.now = self.now + seconds
+
+
 class TickBoardsTests(unittest.TestCase):
-    def test_prepare_runs_before_every_board(self):
-        clock = FakeClock()
+    def test_prepare_runs_before_every_tick_of_every_board(self):
+        clock = ThreadClock()
         events = []
         lock = threading.Lock()
 
         def prepare():
             with lock:
-                events.append("prepare")
+                events.append(("prepare", threading.current_thread().name))
 
         def tick(board):
-            # Each board's tick runs in its own thread (J6): the pass moves on as soon as
-            # a board's tick has been started, so the order between a pass's two ticks is
-            # not fixed. Every pass still prepares before it starts each of its boards.
+            # Each board loops on its own thread: its ticks are preceded by its own
+            # prepares, and the two boards' loops interleave however they like.
             with lock:
-                events.append("tick:" + board)
+                events.append(("tick:" + board, threading.current_thread().name))
             return 0
 
         tick_boards.run(
@@ -570,28 +592,37 @@ class TickBoardsTests(unittest.TestCase):
             sleep=clock.sleep,
             clock=clock.clock,
         )
-        self.assertEqual(events.count("prepare"), 8)  # one per board per pass
-        self.assertEqual(events.count("tick:a"), 4)
-        self.assertEqual(events.count("tick:b"), 4)
-        self.assertEqual(clock.now, 7200)
+        for board in ("a", "b"):
+            own = [kind for kind, thread in events if thread == board]
+            self.assertEqual(own, ["prepare", "tick:" + board] * 4)  # 7200 s of idle sleeps
+        self.assertEqual(sorted(clock.sleeps), [tick_boards.IDLE_SECONDS] * 8)
 
-    def test_on_pass_fires_once_per_completed_pass(self):
-        clock = FakeClock()
+    def test_on_pass_fires_once_per_successful_board_tick(self):
+        # With each board looping on its own thread there is no synchronized "pass"
+        # shared across boards any more (unlike the old single-loop-thread design);
+        # on_pass now fires once per board's own successful tick, so two boards each
+        # completing two idle passes before the deadline fire it four times in total.
+        clock = ThreadClock()
         passes = []
+        lock = threading.Lock()
+
+        def on_pass():
+            with lock:
+                passes.append(1)
 
         tick_boards.run(
             ["a", "b"],
-            deadline=7200,
+            deadline=3600,
             prepare=lambda: None,
             tick=lambda board: 0,
             sleep=clock.sleep,
             clock=clock.clock,
-            on_pass=lambda: passes.append(clock.now),
+            on_pass=on_pass,
         )
-        self.assertEqual(passes, [0, 1800, 3600, 5400])
+        self.assertEqual(len(passes), 4)
 
     def test_boards_tick_concurrently_and_the_ready_count_is_summed(self):
-        clock = FakeClock()
+        clock = ThreadClock()
         rendezvous = threading.Barrier(2, timeout=10)
 
         def tick(board):
@@ -607,37 +638,100 @@ class TickBoardsTests(unittest.TestCase):
             sleep=clock.sleep,
             clock=clock.clock,
         )
-        self.assertEqual(ready, 2)  # the ready count is summed after the joins
-        self.assertEqual(clock.now, tick_boards.BUSY_SECONDS)  # one pass, then the busy sleep
+        self.assertEqual(ready, 2)  # the boards' last counts, summed
+        self.assertEqual(clock.sleeps, [tick_boards.BUSY_SECONDS] * 2)  # one tick each
+
+    def test_a_slow_board_never_holds_the_others(self):
+        # A failed assertion raised inside `tick` would be swallowed by run()'s own
+        # except Exception (a's "packet" appearing to fail and get retried) and the
+        # test would still pass vacuously -- so the wait's own result is recorded
+        # here and asserted only after run() returns, outside tick's exception scope.
+        clock = ThreadClock()
+        released = threading.Event()
+        ticks = {"a": 0, "b": 0}
+        lock = threading.Lock()
+        waited = []
+        out = io.StringIO()
+
+        def tick(board):
+            with lock:
+                ticks[board] += 1
+                b_done = ticks["b"]
+            if board == "a":
+                # a's first tick is a long packet: it returns only once b has ticked
+                # four times on its own — the pass-and-join loop would deadlock here.
+                waited.append(released.wait(10))
+            elif b_done == 4:
+                released.set()
+            return 0
+
+        with contextlib.redirect_stdout(out):
+            tick_boards.run(
+                ["a", "b"],
+                deadline=7200,
+                prepare=lambda: None,
+                tick=tick,
+                sleep=clock.sleep,
+                clock=clock.clock,
+            )
+        self.assertEqual(ticks["b"], 4)
+        self.assertGreaterEqual(ticks["a"], 1)
+        self.assertTrue(waited and all(waited))
+        self.assertNotIn("tick failed", out.getvalue())
+
+    def test_a_failing_board_never_stops_another_board(self):
+        # Merged from main (which had one board's tick exception stop every board's
+        # loop and re-raise) with the branch's own, stronger isolation guarantee
+        # (c634f8a): a board's own failure -- prepare or tick -- blocks only that
+        # board for that pass and is never allowed to touch another board's loop.
+        # b keeps ticking on its own schedule while a fails once and then recovers.
+        clock = ThreadClock()
+        ticked = {"a": 0, "b": 0}
+        lock = threading.Lock()
+        failed_once = threading.Event()
+
+        def tick(board):
+            with lock:
+                ticked[board] += 1
+            if board == "a" and not failed_once.is_set():
+                failed_once.set()
+                raise RuntimeError("transient failure on a")
+            return 0
+
+        ready = tick_boards.run(
+            ["a", "b"],
+            deadline=3600,
+            prepare=lambda: None,
+            tick=tick,
+            sleep=clock.sleep,
+            clock=clock.clock,
+        )
+        # a's first tick failed and was retried; b was never blocked by it.
+        self.assertEqual(ticked["a"], 2)
+        self.assertEqual(ticked["b"], 2)
+        self.assertEqual(ready, 0)  # both boards' last successful count was 0
 
     def test_ready_count_chooses_the_sleep_interval(self):
-        sleeps = []
-        clock = FakeClock()
-
-        def nap(seconds):
-            sleeps.append(seconds)
-            clock.sleep(seconds)
-
+        clock = ThreadClock()
         tick_boards.run(
             ["a"],
             deadline=1000,
             prepare=lambda: None,
             tick=lambda board: 2,
-            sleep=nap,
+            sleep=clock.sleep,
             clock=clock.clock,
         )
-        self.assertEqual(sleeps, [tick_boards.BUSY_SECONDS] * 4)
-        sleeps.clear()
-        clock = FakeClock()
+        self.assertEqual(clock.sleeps, [tick_boards.BUSY_SECONDS] * 4)
+        clock = ThreadClock()
         tick_boards.run(
             ["a"],
             deadline=1000,
             prepare=lambda: None,
             tick=lambda board: 0,
-            sleep=nap,
+            sleep=clock.sleep,
             clock=clock.clock,
         )
-        self.assertEqual(sleeps, [tick_boards.IDLE_SECONDS])
+        self.assertEqual(clock.sleeps, [tick_boards.IDLE_SECONDS])
 
     def test_count_ready_reads_the_board_directory(self):
         tmp = self.enterContext(_TmpDir())
@@ -666,6 +760,14 @@ class TickBoardsTests(unittest.TestCase):
         def send():
             rendezvous.wait()  # both ticks started: the tick in flight is the whole pass
             os.kill(os.getpid(), signal.SIGTERM)
+            # The handler runs asynchronously on the main thread; wait for it to have
+            # actually landed (drain.draining true) before releasing the ticks in
+            # flight, or a board could see draining() still False and start a second
+            # tick before the signal is processed.
+            deadline = time.time() + 5
+            while not drain.draining and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(drain.draining)
             finish.set()
 
         sender = threading.Thread(target=send)
@@ -771,8 +873,8 @@ class CalibrationTriggerTests(unittest.TestCase):
         self.assertTrue(tick_boards.calibration_due(now - 7 * 86400, 7, now))
         self.assertTrue(tick_boards.calibration_due(now - 30 * 86400, 7, now))
 
-    def test_every_pass_runs_the_trigger_before_the_boards(self):
-        clock = FakeClock()
+    def test_the_trigger_runs_before_the_boards(self):
+        clock = ThreadClock()
         events = []
         tick_boards.run(
             ["a"],
@@ -783,8 +885,44 @@ class CalibrationTriggerTests(unittest.TestCase):
             clock=clock.clock,
             calibrate=lambda: events.append("calibrate"),
         )
-        self.assertEqual(events.count("calibrate"), 4)
+        # This uses the boards' own injected (fake, per-thread) clock, which the outer
+        # joining thread's own next-interval check never advances -- so this proves only
+        # the one call before the boards start, not the recurring schedule; see
+        # test_calibrate_recurs_on_the_outer_thread_at_the_idle_interval below for that.
+        self.assertEqual(events.count("calibrate"), 1)
         self.assertEqual(events[:3], ["calibrate", "prepare", "tick:a"])
+        self.assertEqual(events.count("tick:a"), 4)
+
+    def test_calibrate_recurs_on_the_outer_thread_at_the_idle_interval(self):
+        # Unlike the test above, this uses the real wall clock (the outer loop's own
+        # `next_calibrate` check is always against real time via its hardcoded
+        # thread.join(1.0) poll, regardless of what clock/sleep a caller injects for
+        # the boards) with a tiny real idle, so the recurring schedule genuinely fires
+        # more than once within the test's short real deadline.
+        calls = []
+        lock = threading.Lock()
+
+        def calibrate():
+            with lock:
+                calls.append(time.time())
+
+        def tick(board):
+            time.sleep(0.05)
+            return 0
+
+        tick_boards.run(
+            ["a"],
+            deadline=time.time() + 2.5,
+            prepare=lambda: None,
+            tick=tick,
+            sleep=time.sleep,
+            clock=time.time,
+            idle=0.3,
+            calibrate=calibrate,
+        )
+        # One call before the boards start, and at least one more from the recurring
+        # schedule -- not just the single up-front call the test above covers.
+        self.assertGreaterEqual(len(calls), 2)
 
     def test_default_calibrate_reads_the_ledger_clock(self):
         tmp = self.enterContext(_TmpDir())
@@ -1371,7 +1509,7 @@ class TickTimeoutTests(unittest.TestCase):
         self.assertGreaterEqual(tick_boards.TICK_TIMEOUT, 8 * 3600)
 
     def test_a_failing_board_prepare_blocks_the_board_not_the_loop(self):
-        clock = FakeClock()
+        clock = ThreadClock()  # each board loops on its own thread; the clock must too
         ticked = []
         out = io.StringIO()
 
@@ -1399,13 +1537,14 @@ class TickTimeoutTests(unittest.TestCase):
         self.assertEqual(ticked, [])
         self.assertEqual(out.getvalue().count("board-prepare failed"), 8)
         self.assertIn("ledger refused the refresh", out.getvalue())
-        self.assertEqual(clock.now, 7200)
+        # Both boards' own loops ran all four idle passes through to the deadline.
+        self.assertEqual(sorted(clock.sleeps), [tick_boards.IDLE_SECONDS] * 8)
 
     def test_on_pass_never_fires_while_every_board_is_permanently_blocked(self):
         """A loop where every board's prepare() fails forever (stale accounts, a
         refused ledger) is alive but doing zero real work -- exactly the case the
         dead-man exists to catch. on_pass must not fire and mask it."""
-        clock = FakeClock()
+        clock = ThreadClock()  # each board loops on its own thread; the clock must too
         passes = []
 
         tick_boards.run(
@@ -1415,12 +1554,15 @@ class TickTimeoutTests(unittest.TestCase):
             tick=lambda board: 0,
             sleep=clock.sleep,
             clock=clock.clock,
-            on_pass=lambda: passes.append(clock.now),
+            on_pass=lambda: passes.append(1),
         )
         self.assertEqual(passes, [])
+        # Both boards' own loops genuinely retried to the deadline rather than one
+        # racing the other's shared clock past it after a single failed prepare.
+        self.assertEqual(sorted(clock.sleeps), [tick_boards.IDLE_SECONDS] * 4)
 
     def test_a_board_prepare_failure_is_per_board_and_per_pass(self):
-        clock = FakeClock()
+        clock = ThreadClock()  # each board loops on its own thread; the clock must too
         ticked = []
         out = io.StringIO()
         first = threading.Lock()  # exactly one prepare call fails: the very first
@@ -1452,7 +1594,7 @@ class TickTimeoutTests(unittest.TestCase):
         """A malformed task file (KeyError/ValueError in count_ready) on one board must
         not take the whole runtime down with it -- reproduces the reviewer's finding
         that only prepare() was wrapped and a tick failure still killed every board."""
-        clock = FakeClock()
+        clock = ThreadClock()  # each board loops on its own thread; the clock must too
         ticked = []
         out = io.StringIO()
 

@@ -25,6 +25,6 @@
   "output_bytes": 2000000,
   "thinking_tokens": 14230
  },
- "state": "ready",
- "blocked_reason": null
+ "state": "blocked",
+ "blocked_reason": "attempt 3dadd989-ebaf-4e1d-982c-9caecc734060 held: transport_error: TimeoutError (transport 400 s, task 600 s, lane 400 s); resolve with evidence"
 }

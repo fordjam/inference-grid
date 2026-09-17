@@ -14,8 +14,8 @@
   "output_bytes": 100000,
   "thinking_tokens": null
  },
- "state": "blocked",
- "blocked_reason": "eval packet: quota stale or model ineligible",
+ "state": "ready",
+ "blocked_reason": null,
  "spec": {
   "corpus_dir": "/Users/fordjam/.config/inference-grid/calibration/history",
   "lanes": [
