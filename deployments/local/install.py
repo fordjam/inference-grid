@@ -32,6 +32,9 @@ import sys
 from pathlib import Path
 
 DEFAULT_DIR = Path.home() / ".local/share/inference-grid-capacity"
+# 02-A3: no grid logs under any product repo, and never /tmp (portfolio rule 3);
+# tick-boards.log used to default beside the capacity state under DEFAULT_DIR.
+DEFAULT_TICK_BOARDS_LOG = Path.home() / "Library/Logs/inference-grid/tick-boards.log"
 DOMAIN = "com.inference-grid"
 # lanes/config.py caps a lane's wall_seconds at 3600, so without a lanes.json that is the
 # longest packet wall clock there can be.
@@ -190,7 +193,8 @@ def main(argv=None):
             script_flags.append("--script")
             log_flags.append("--log")
         parser.add_argument(*script_flags, dest=f"{key}_script", default=str(DEFAULT_DIR / script))
-        parser.add_argument(*log_flags, dest=f"{key}_log", default=str(DEFAULT_DIR / log))
+        log_default = DEFAULT_TICK_BOARDS_LOG if name == "tick-boards" else DEFAULT_DIR / log
+        parser.add_argument(*log_flags, dest=f"{key}_log", default=str(log_default))
     args = parser.parse_args(argv)
     timeout = exit_timeout(json.loads(Path(args.lanes).read_text()) if args.lanes else None)
 

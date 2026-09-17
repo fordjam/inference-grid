@@ -1167,6 +1167,18 @@ class InstallTests(unittest.TestCase):
         plist = tmp.path / "out" / "com.inference-grid.tick-boards.plist"
         self.assertEqual(plistlib.loads(plist.read_bytes())["ExitTimeOut"], 660)
 
+    def test_tick_boards_log_defaults_under_library_logs_not_the_capacity_state_dir(self):
+        """02-A3: no grid logs under any product repo, and never /tmp. The other three
+        runtimes still default beside the capacity state; only tick-boards moved."""
+        tmp = self.enterContext(_TmpDir())
+        installer.main(["--out-dir", str(tmp.path), "--python", "/usr/bin/python3"])
+        tick = plistlib.loads((tmp.path / "com.inference-grid.tick-boards.plist").read_bytes())
+        self.assertEqual(tick["StandardOutPath"], str(installer.DEFAULT_TICK_BOARDS_LOG))
+        self.assertEqual(str(installer.DEFAULT_TICK_BOARDS_LOG),
+                          str(Path.home() / "Library/Logs/inference-grid/tick-boards.log"))
+        loop = plistlib.loads((tmp.path / "com.inference-grid.capacity-loop.plist").read_bytes())
+        self.assertEqual(loop["StandardOutPath"], str(installer.DEFAULT_DIR / "capacity-loop.log"))
+
     def test_no_rendered_plist_carries_a_start_interval(self):
         tmp = self.enterContext(_TmpDir())
         installer.main(["--out-dir", str(tmp.path), "--python", "/usr/bin/python3"])
@@ -1307,6 +1319,27 @@ class TickTimeoutTests(unittest.TestCase):
             self.assertEqual(ready, 0)
             self.assertIn("exceeded 1s", (tmp / "log").read_text())
 
+    def test_default_tick_creates_a_missing_log_directory(self):
+        """02-A3 moved the default log under ~/Library/Logs/inference-grid/, which does
+        not exist on a fresh install; the log open must not fail because of that."""
+        import subprocess as sp
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            (tmp / "board").mkdir()
+            out = tmp / "tick-b.json"
+            out.write_text(json.dumps({"board_dir": str(tmp / "board")}))
+            nested_log = tmp / "nested" / "not" / "yet" / "created" / "tick-boards.log"
+            config = {"tick_dir": str(tmp), "log_path": str(nested_log)}
+
+            def fake_run(argv, **kw):
+                return sp.CompletedProcess(argv, 0, stdout="[]", stderr="")
+
+            with mock.patch.object(tick_boards.subprocess, "run", fake_run):
+                tick_boards.default_tick("b", config)
+            self.assertTrue(nested_log.exists())
+
     def test_the_default_timeout_outlasts_the_longest_admissible_packet(self):
         self.assertGreaterEqual(tick_boards.TICK_TIMEOUT, 8 * 3600)
 
@@ -1446,6 +1479,12 @@ class HeartbeatTests(unittest.TestCase):
         self.assertEqual(
             tick_boards.DEFAULT_HEARTBEAT,
             Path.home() / ".local/share/inference-grid/heartbeat/tick-boards.json",
+        )
+
+    def test_the_default_log_lives_under_library_logs_not_the_capacity_state_dir(self):
+        self.assertEqual(
+            tick_boards.DEFAULT_LOG_PATH,
+            Path.home() / "Library/Logs/inference-grid/tick-boards.log",
         )
 
 

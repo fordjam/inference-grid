@@ -37,6 +37,9 @@ from pathlib import Path
 
 DEFAULT_CONFIG = Path.home() / ".local/share/inference-grid-capacity/config.json"
 DEFAULT_DIR = Path.home() / ".local/share/inference-grid-capacity"
+# 02-A3: no grid logs under any product repo, and never /tmp (portfolio rule 3).
+# tick-boards.log used to default beside the capacity state under DEFAULT_DIR.
+DEFAULT_LOG_PATH = Path.home() / "Library/Logs/inference-grid/tick-boards.log"
 IDLE_SECONDS = 1800
 BUSY_SECONDS = 300
 CALIBRATION_EVERY_DAYS = 7
@@ -111,7 +114,9 @@ def default_prepare(config):
     argv = [python, str(here / "board_prepare.py")]
     if config.get("_config_path"):
         argv.append(str(config["_config_path"]))
-    with open(config.get("log_path", DEFAULT_DIR / "tick-boards.log"), "a") as log:
+    log_path = Path(config.get("log_path", DEFAULT_LOG_PATH))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a") as log:
         subprocess.run(argv, stdout=log, stderr=log, timeout=300, check=True)
 
 
@@ -126,7 +131,8 @@ def default_tick(board, config):
     its state says so. Each dispatched result is logged with its lane and outcome.
     """
     out = Path(config.get("tick_dir", "/tmp")) / f"tick-{board}.json"
-    log_path = Path(config.get("log_path", DEFAULT_DIR / "tick-boards.log"))
+    log_path = Path(config.get("log_path", DEFAULT_LOG_PATH))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a") as log:
         stamp = time.strftime("%FT%TZ", time.gmtime())
         log.write(f"=== {stamp} tick {board}\n")
@@ -374,7 +380,7 @@ def main(argv=None):
     # loop runs a day and lets launchd start it again.
     boards = [b["name"] if isinstance(b, dict) else b for b in config["boards"]]
     deadline = config.get("deadline") or time.time() + 86400
-    log_path = Path(config.get("log_path", DEFAULT_DIR / "tick-boards.log"))
+    log_path = Path(config.get("log_path", DEFAULT_LOG_PATH))
     drain = install_drain(Drain(log_path.with_suffix(".draining")))
     drain.clear()
     # One synchronous beat proves the loop started; the thread keeps it fresh through the
