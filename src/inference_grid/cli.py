@@ -310,6 +310,19 @@ def main():
         else:
             print(document, end="")
         return
+    if args.command == "report":
+        # 02-C1: markdown, always to stdout *and* to the log path (config `out`,
+        # default ~/Library/Logs/inference-grid/report-<week>.md) — both, not either/or.
+        document, _path = report_command(
+            ledger,
+            week=args.week,
+            lanes=data.get("lanes"),
+            accounts_by_lane=data.get("accounts_by_lane"),
+            prices=data.get("prices"),
+            out=data.get("out"),
+        )
+        print(document, end="")
+        return
     commands = {
         "init": ledger.initialize,
         "defer": ledger.defer,
@@ -336,7 +349,6 @@ def main():
         "board-init": lambda **kw: board_init(**kw),
         "digest": lambda **kw: digest(ledger, **kw),
         "boards": lambda **kw: boards_command(ledger, **kw),
-        "report": lambda **kw: report_command(ledger, week=args.week, **kw),
         "watch": lambda **kw: watch(kw),
         "needs-you": lambda **kw: needs_you_command(ledger, **kw),
         "inbox-integrate": lambda **kw: inbox_integrate(
@@ -397,10 +409,70 @@ def digest(ledger, boards_dir, since=None):
     return render(ledger, boards_dir, now=since)
 
 
-def report_command(ledger, week=None, lanes=None, accounts_by_lane=None, prices=None):
+DEFAULT_REPORT_LOG_DIR = Path.home() / "Library/Logs/inference-grid"
+DEFAULT_PRICES_PATH = Path.home() / ".config/inference-grid/prices.json"
+
+
+def _load_prices(explicit):
+    """`prices` from the `--json` arg file when given; otherwise the operator's own
+    `~/.config/inference-grid/prices.json` if present -- read-only, never created or
+    written here. Shape: `{"<account or alias>": <USD monthly price>, ...}`. A file
+    that parses but isn't that shape (a list, a number, ...) degrades to no prices,
+    same as a missing or unparseable one -- report()'s own `prices.items()` would
+    otherwise crash the whole command over one malformed config file."""
+    if explicit is not None:
+        return explicit
+    try:
+        loaded = json.load(open(DEFAULT_PRICES_PATH))
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _report_week_label(rep):
+    """The ISO week the report's window falls in, for the log filename -- even when
+    `week` was not given (the default last-7-days window still names a real week).
+
+    Labeled from `start`, never `end`: the window is the seven days *ending* now, so a
+    run right at a week boundary (the Monday 07:00 scheduled report chief among them)
+    has an `end` already in the new ISO week while every event in the report is from
+    the week before it -- labeling from `end` would name the file one week ahead of
+    the report it actually holds.
+    """
+    if rep["week"]:
+        return rep["week"]
+    from datetime import datetime, timezone
+
+    year, week, _ = datetime.fromtimestamp(rep["start"], timezone.utc).isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def report_command(ledger, week=None, lanes=None, accounts_by_lane=None, prices=None, out=None):
+    """Render the weekly markdown report and write it to the log path; returns
+    `(document, path)` so the CLI can print the same text it just wrote."""
+    from .report import render_markdown
     from .report import report as render
 
-    return render(ledger, week=week, lanes=lanes, accounts_by_lane=accounts_by_lane, prices=prices)
+    rep = render(
+        ledger,
+        week=week,
+        lanes=lanes,
+        accounts_by_lane=accounts_by_lane,
+        prices=_load_prices(prices),
+    )
+    document = render_markdown(rep)
+    if out:
+        path = Path(out).expanduser()
+        if path.suffix != ".md":
+            # `out` is operator-supplied config, not user input off a form, but a
+            # weekly report is always markdown -- refusing anything else is a cheap
+            # guard against a typo'd config path clobbering an unrelated file.
+            raise ValueError(f"report out path must end in .md, got {path}")
+    else:
+        path = DEFAULT_REPORT_LOG_DIR / f"report-{_report_week_label(rep)}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(document)
+    return document, path
 
 
 def boards_command(

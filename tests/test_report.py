@@ -5,7 +5,7 @@ import time
 import pytest
 
 from inference_grid.ledger import Ledger, digest
-from inference_grid.report import report, week_bounds
+from inference_grid.report import render_markdown, report, week_bounds
 
 
 @pytest.fixture
@@ -16,14 +16,14 @@ def ledger(tmp_path):
     return ledger
 
 
-def submit_and_claim(ledger, task_id, account="acct"):
+def submit_and_claim(ledger, task_id, account="acct", family="fam"):
     ledger.submit(
         task_id,
         "p",
         dict(
             authorized=True,
             model="m1",
-            family="fam",
+            family=family,
             argv=["/bin/true"],
             workspace="/tmp/" + task_id,
             timeout=1,
@@ -94,9 +94,7 @@ def test_lanes_without_a_resolvable_account_fall_back_to_family_model(ledger):
 def test_two_lanes_on_the_same_model_do_not_merge(ledger):
     # Exactly the shape B4's quota tiebreak exists for: one model, two accounts. Without
     # per-account disambiguation these would collapse into a single "fam/m1" row.
-    ledger.configure_account(
-        "acct2", 1, {"five_hour": 5, "weekly": 5}, time.time() + 600, ["m1"]
-    )
+    ledger.configure_account("acct2", 1, {"five_hour": 5, "weekly": 5}, time.time() + 600, ["m1"])
     now = time.time()
     aid1, gen1 = submit_and_claim(ledger, "t1", account="acct")
     finish(ledger, aid1, gen1)
@@ -119,13 +117,19 @@ def test_two_lanes_on_the_same_model_do_not_merge(ledger):
 
 
 def test_reviews_performed_vs_rejected(ledger):
+    # A review attempt's own ledger *state* is never accepted -- accept_reviewed()
+    # (board/runner.py) calls ledger.accept() on the *source* packet attempt, never
+    # the review attempt itself -- so the real verdict is the runner's own
+    # record_outcome(aid, "independent_review", accepted, ...) call, the same one
+    # every settled review gets in production.
     now = time.time()
     aid, gen = submit_and_claim(ledger, "review-approved")
-    receipt = finish(ledger, aid, gen)
-    ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+    finish(ledger, aid, gen)
+    ledger.record_outcome(aid, "independent_review", True)
 
     aid2, gen2 = submit_and_claim(ledger, "review-blocked")
-    finish(ledger, aid2, gen2)  # completed but never accepted: rejected
+    finish(ledger, aid2, gen2)
+    ledger.record_outcome(aid2, "independent_review", False)
 
     # A non-review attempt never counts as a review either way.
     aid3, gen3 = submit_and_claim(ledger, "copy-ok")
@@ -133,7 +137,20 @@ def test_reviews_performed_vs_rejected(ledger):
     ledger.accept(aid3, digest(receipt3), "operator-attested-independent", "approved")
 
     out = report(ledger, now=now + 10)
-    assert out["reviews"] == {"performed": 2, "rejected": 1}
+    assert out["reviews"] == {"performed": 2, "rejected": 1, "waived": 0}
+
+
+def test_a_review_attempt_accepted_directly_is_not_counted_rejected_without_an_outcome(ledger):
+    # Belt-and-suspenders for the same fact test_reviews_performed_vs_rejected checks:
+    # even if a review- attempt somehow reached "accepted" directly (it structurally
+    # shouldn't, but this report must never invent a rejection out of thin air), with
+    # no outcome_recorded event on it, it counts as performed but not rejected.
+    now = time.time()
+    aid, gen = submit_and_claim(ledger, "review-x")
+    receipt = finish(ledger, aid, gen)
+    ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+    out = report(ledger, now=now + 10)
+    assert out["reviews"] == {"performed": 1, "rejected": 0, "waived": 0}
 
 
 def test_held_and_resolved_carry_the_resolver(ledger):
@@ -222,3 +239,216 @@ def test_week_bounds_refuses_a_malformed_week(ledger):
         week_bounds("not-a-week", now=0)
     with pytest.raises(ValueError):
         report(ledger, week="")
+
+
+# --- 02-C1: packets landed, unattended-land rate, waived, Claude Max share ---
+
+
+def test_packets_landed_counts_accepted_non_review_attempts(ledger):
+    now = time.time()
+    for name in ("t1", "t2"):
+        aid, gen = submit_and_claim(ledger, name)
+        receipt = finish(ledger, aid, gen)
+        ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+    aid3, gen3 = submit_and_claim(ledger, "t3")
+    finish(ledger, aid3, gen3)  # completed, never accepted: not landed
+    out = report(ledger, now=now + 10)
+    assert out["packets_landed"] == 2
+
+
+def test_a_review_attempt_accepted_directly_never_counts_as_a_packet_landed(ledger):
+    # accept_reviewed() (board/runner.py) always calls ledger.accept() on the *source*
+    # packet attempt, never the review attempt itself -- but if a review- id were ever
+    # accepted directly (this fixture forces it), it still must not inflate the count.
+    now = time.time()
+    aid, gen = submit_and_claim(ledger, "review-x")
+    receipt = finish(ledger, aid, gen)
+    ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+    out = report(ledger, now=now + 10)
+    assert out["packets_landed"] == 0
+
+
+def test_unattended_land_rate_is_none_without_any_landed_packet(ledger):
+    assert report(ledger, now=time.time() + 10)["unattended_land_rate"] is None
+
+
+def test_unattended_land_rate_is_full_when_no_operator_ever_touched_the_attempt(ledger):
+    now = time.time()
+    aid, gen = submit_and_claim(ledger, "t1")
+    receipt = finish(ledger, aid, gen)
+    ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+    out = report(ledger, now=now + 10)
+    assert out["unattended_land_rate"] == 1.0
+
+
+def test_unattended_land_rate_counts_an_attempt_the_operator_touched_before_it_landed(ledger):
+    now = time.time()
+    # t1 lands untouched; t2 was held and resolved by a human before it went on to land.
+    aid1, gen1 = submit_and_claim(ledger, "t1")
+    receipt1 = finish(ledger, aid1, gen1)
+    ledger.accept(aid1, digest(receipt1), "operator-attested-independent", "approved")
+
+    aid2, gen2 = submit_and_claim(ledger, "t2")
+    ledger.start(aid2, gen2)
+    ledger.hold(aid2, "ambiguous")
+    ledger.resolve(aid2, "consumed", "confirmed it ran", "james")
+    # resolve(outcome="consumed") settles "failed", not accepted -- force accepted to
+    # isolate exactly what's under test: an attempt an operator touched, that later
+    # lands, must not count as unattended, regardless of how it got there.
+    with ledger.tx() as con:
+        from sqlalchemy import update
+
+        from inference_grid.ledger import attempts as attempts_table
+
+        con.execute(
+            update(attempts_table).where(attempts_table.c.id == aid2).values(state="accepted")
+        )
+
+    out = report(ledger, now=now + 10)
+    assert out["packets_landed"] == 2
+    assert out["unattended_land_rate"] == 0.5
+
+
+def test_claude_max_share_is_none_without_a_review_this_window(ledger):
+    assert report(ledger, now=time.time() + 10)["claude_max_share"] is None
+
+
+def test_claude_max_share_is_the_fraction_of_review_attempts_on_claude(ledger):
+    now = time.time()
+    aid1, gen1 = submit_and_claim(ledger, "review-1", family="claude")
+    finish(ledger, aid1, gen1)
+    aid2, gen2 = submit_and_claim(ledger, "review-2", family="go-kimi")
+    finish(ledger, aid2, gen2)
+    out = report(ledger, now=now + 10)
+    assert out["claude_max_share"] == 0.5
+
+
+def test_review_waived_events_are_counted_should_always_be_zero(ledger):
+    now = time.time()
+    aid, gen = submit_and_claim(ledger, "review-1")
+    finish(ledger, aid, gen)
+    with ledger.tx() as con:
+        ledger.event(con, aid, "review_waived", reason="test-only: this must never happen live")
+    out = report(ledger, now=now + 10)
+    assert out["reviews"]["waived"] == 1
+
+
+# --- render_markdown: the page a human actually reads ---
+
+
+def test_render_markdown_includes_every_required_line(ledger):
+    now = time.time()
+    aid, gen = submit_and_claim(ledger, "t1")
+    receipt = finish(ledger, aid, gen)
+    ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+    aid2, gen2 = submit_and_claim(ledger, "t2")
+    ledger.start(aid2, gen2)
+    ledger.hold(aid2, "still stuck")
+    out = report(ledger, prices={"acct": 14.0}, now=now + 10)
+    document = render_markdown(out)
+    assert "# Inference Grid — weekly report" in document
+    assert "Packets landed: **1**" in document
+    assert "Unattended-land rate: **100%**" in document
+    assert "fam/m1" in document
+    assert "still stuck" in document
+    assert "$14.00" in document
+    assert "Waived: **0**" in document
+
+
+def test_report_command_writes_markdown_to_the_given_path_and_returns_it_too(ledger, tmp_path):
+    from inference_grid.cli import report_command
+
+    aid, gen = submit_and_claim(ledger, "t1")
+    receipt = finish(ledger, aid, gen)
+    ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+    out_path = tmp_path / "report.md"
+    document, written = report_command(ledger, out=str(out_path))
+    assert written == out_path
+    assert out_path.read_text() == document
+    assert "Packets landed: **1**" in document
+
+
+def test_report_command_defaults_the_log_path_to_library_logs_inference_grid(
+    ledger, tmp_path, monkeypatch
+):
+    from inference_grid import cli
+
+    # Point the default log dir at a fixture, never the operator's real ~/Library/Logs.
+    monkeypatch.setattr(cli, "DEFAULT_REPORT_LOG_DIR", tmp_path / "Logs" / "inference-grid")
+    document, written = cli.report_command(ledger, week="2026-W38")
+    assert written == tmp_path / "Logs" / "inference-grid" / "report-2026-W38.md"
+    assert written.read_text() == document
+
+
+def test_report_command_reads_the_default_prices_file_when_present(ledger, tmp_path, monkeypatch):
+    import json as jsonlib
+
+    from inference_grid import cli
+
+    prices_path = tmp_path / "prices.json"
+    prices_path.write_text(jsonlib.dumps({"acct": 14.0}))
+    monkeypatch.setattr(cli, "DEFAULT_PRICES_PATH", prices_path)
+    aid, gen = submit_and_claim(ledger, "t1")
+    receipt = finish(ledger, aid, gen)
+    ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+    document, _written = cli.report_command(ledger, out=str(tmp_path / "out.md"))
+    assert "$14.00" in document
+
+
+def test_report_command_ignores_a_malformed_default_prices_file(ledger, tmp_path, monkeypatch):
+    # Valid JSON, wrong shape (a list, not {account: price}) -- must degrade to no
+    # prices, never crash the whole command over one malformed config file.
+    import json as jsonlib
+
+    from inference_grid import cli
+
+    prices_path = tmp_path / "prices.json"
+    prices_path.write_text(jsonlib.dumps([1, 2, 3]))
+    monkeypatch.setattr(cli, "DEFAULT_PRICES_PATH", prices_path)
+    document, _written = cli.report_command(ledger, out=str(tmp_path / "out.md"))
+    assert "no prices on file" in document
+
+
+def test_report_command_refuses_a_non_markdown_out_path(ledger, tmp_path):
+    from inference_grid.cli import report_command
+
+    target = tmp_path / "not-markdown.txt"
+    with pytest.raises(ValueError):
+        report_command(ledger, out=str(target))
+    assert not target.exists()
+
+
+def test_report_week_label_uses_the_windows_start_not_its_end(ledger):
+    # The Monday 07:00 scheduled run's own case: `end` (now) has already crossed into
+    # the new ISO week, but the report's content is entirely the week before it -- the
+    # filename must match the content, not the moment the report was generated.
+    from inference_grid.cli import _report_week_label
+
+    # A Monday 2026-09-21 07:00 UTC run, no --week: window is the 7 days ending then,
+    # i.e. 2026-09-14 07:00 (still ISO week 38) through 2026-09-21 07:00 (ISO week 39).
+    import datetime
+
+    end = datetime.datetime(2026, 9, 21, 7, 0, tzinfo=datetime.timezone.utc).timestamp()
+    out = report(ledger, now=end)
+    assert out["week"] is None
+    assert _report_week_label(out) == "2026-W38"
+
+
+def test_render_markdown_never_crashes_on_an_empty_window():
+    empty = {
+        "week": None,
+        "start": 0,
+        "end": 0,
+        "lanes": [],
+        "reviews": {"performed": 0, "rejected": 0, "waived": 0},
+        "held": [],
+        "resolved": [],
+        "packets_landed": 0,
+        "unattended_land_rate": None,
+        "claude_max_share": None,
+        "cost_per_landed_packet_usd": {},
+    }
+    document = render_markdown(empty)
+    assert "no attempts settled" in document
+    assert "nothing held right now" in document
+    assert "no prices on file" in document
