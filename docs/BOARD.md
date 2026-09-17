@@ -221,11 +221,13 @@ repository shows the format — clean cases to catch false positives beside case
 planted defect — each holding a `diff.patch`, the changed files and a brief, plus an
 `answer.json` that is never staged. A real corpus is built from the defect classes an
 operator's own gates have caught; it lives outside the repository (pass its path as
-`corpus_dir`) because it is a record of that operator's projects. `inference-grid calibrate --json
-{board_dir, project_root, corpus_dir, lanes, run_id}` authors one independent_review task
+`corpus_dir`) because it is a record of that operator's projects. B4 removed the manual
+`inference-grid calibrate` CLI command (the deleted eval-corpus authoring); the function
+it wrapped, `inference_grid.board.calibration.author_calibration(board_dir, project_root,
+corpus_dir, lanes, run_id)`, is unchanged and still authors one independent_review task
 per case (`calib-<run_id>-<case>`, `author_family: "calibration"` — a sentinel no lane
 declares, so every listed lane stays eligible) and writes the answer keys plus a manifest
-under `<board_dir>/calibration/<run_id>/`. After the board settles the replies,
+under `<board_dir>/calibration/<run_id>/` when called directly. After the board settles the replies,
 `inference-grid calibration-score --json {board_dir, run_id, packets_root, record}` reads
 each packet's reply.txt through the runner's own verdict reader and reports per lane:
 cases, defects, recall, false positives, precision and severity-weighted recall
@@ -247,23 +249,17 @@ Board inputs are sent to third-party models, so only files a task lists are stag
 
 Providers without a usage API (the Z.ai Coding Plan) are admitted from an operator-attested console reading kept in a private file with its true observation time. Policy, not measurement: such a reading stays valid for 24 hours for admission and lane readiness; ZCode consumes no plan quota inside the campaign window. Every other lane uses a collector reading no older than 15 minutes, refreshed by the board's prepare step before each dispatch.
 
-## Routing on quality per dollar (brief 21 O1–O3)
+## Routing: a static tier table (B4, superseding brief 21's quality-per-dollar bandit)
 
-With a recorded model catalogue (`deployments/local/collect_catalogue.py`; `inference-grid
-catalogue`, `deals`) the route ranks every candidate that passes the hard constraints —
-category, the cross-family rule for reviews, tier/lane policy, readiness, window — by
-
-    value = quality(model, category) / expected_cost(lane, task)
-
-`quality` is a Beta posterior (`board/priors.py`): a published benchmark prior from
-`~/.config/inference-grid/benchmarks.json` (8 pseudo-outcomes; flat without one) overridden
-by the grid's own outcomes — the scorecard for builds, calibration recall for reviewers,
-never "the review completed". `expected_cost` prices the task's expected tokens on the
-catalogue row (promo multiplier and free applied). A trusted lane (3+ outcomes) below the
-category's quality floor (`lanes/value.py::QUALITY_FLOOR`, reviews 0.6) is not a candidate
-however cheap; an untrusted lane is explored with a Thompson draw, and with probability
-`explore` (0.1) the whole choice is a draw. Every plan and tick row carries `value_rows`
-(quality, evidence_n, cost, value, chosen_by). A board turns it off with
-`"value_routing": false`; without a catalogue the legacy Laplace score routes as before.
-`inference-grid quality` prints the estimates with their sources.
+The route ranks every candidate that passes the hard constraints — category, the
+cross-family rule for reviews, tier/lane policy, readiness, window — by remaining
+window quota: the tightest of the winning lane's account's configured windows
+(five_hour/weekly/monthly), the same reading the capacity dashboard's headline uses.
+No learned score. The catalogue module, the benchmark-prior/Beta-posterior quality
+estimate, the Thompson-draw exploration and the quality-per-dollar value ranking this
+section used to describe are all deleted — `board/priors.py`, `lanes/value.py`,
+`catalogue.py` and its collector are gone, along with the `catalogue`, `catalogue-record`,
+`deals` and `quality` CLI commands. Every plan and tick row carries `quota_rows` (the
+reading behind every offered candidate) and `tier`; `board-tick --dry-run` explains a
+choice by tier and quota alone, never "explore" or "value".
 

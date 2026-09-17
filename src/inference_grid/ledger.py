@@ -11,7 +11,6 @@ import uuid
 from contextlib import contextmanager
 
 from sqlalchemy import (
-    delete,
     JSON,
     Column,
     Float,
@@ -775,55 +774,6 @@ class Ledger:
             self.event(con, aid, "external_recorded", provenance="operator")
         self.record_outcome(aid, category, accepted, usage=usage, repairs=repairs, note=note)
         return {"attempt": aid, "task": task, "category": category, "accepted": accepted}
-
-    def record_catalogue(self, provider, rows, observed_at=None):
-        """Append one observation of a plan's model catalogue; returns rows written.
-
-        `rows` are catalogue.normalise() records (validated there); the ledger stores
-        them as read. A re-run with identical rows appends again — the series is what
-        answers "what did the plan charge on the 14th", and de-duplication would erase it.
-        """
-        observed_at = time.time() if observed_at is None else float(observed_at)
-        written = 0
-        with self.tx() as con:
-            for row in rows:
-                model = row.get("model")
-                if not isinstance(model, str) or not model:
-                    raise Refused("catalogue row without a model id")
-                # Re-recording the same reading (a collector re-run, a list that names a
-                # model twice) replaces that row rather than refusing the whole reading.
-                con.execute(
-                    delete(model_catalogue).where(
-                        model_catalogue.c.provider == provider,
-                        model_catalogue.c.model == model,
-                        model_catalogue.c.observed_at == observed_at,
-                    )
-                )
-                con.execute(
-                    model_catalogue.insert().values(
-                        provider=provider, model=model, observed_at=observed_at, record=row
-                    )
-                )
-                written += 1
-            self.event(con, None, "catalogue_recorded", provider=provider, rows=written)
-        return written
-
-    def catalogue(self, provider=None, at=None):
-        """The newest catalogue row per (provider, model) as of `at` (default now)."""
-        at = time.time() if at is None else float(at)
-        query = select(model_catalogue).where(model_catalogue.c.observed_at <= at)
-        if provider is not None:
-            query = query.where(model_catalogue.c.provider == provider)
-        newest = {}
-        with self.engine.connect() as con:
-            for r in con.execute(query.order_by(model_catalogue.c.observed_at)).mappings():
-                newest[(r["provider"], r["model"])] = dict(
-                    r["record"],
-                    provider=r["provider"],
-                    model=r["model"],
-                    observed_at=r["observed_at"],
-                )
-        return sorted(newest.values(), key=lambda r: (r["provider"], r["model"]))
 
     def scorecard(self, account=None):
         """Per model/family/category evidence from this ledger; missing usage stays absent."""

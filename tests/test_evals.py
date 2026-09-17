@@ -1,4 +1,9 @@
-"""`inference-grid evals`: the due-set, the authored runs, the digest section and the step.
+"""Eval freshness reporting (board/evals.py), the calibration_run task and its runner step.
+
+B4 deleted the authoring side (`inference-grid evals`, `due_evals`/`author_evals`): no
+calibration_run task is ever authored automatically anymore. What is left — reading
+recorded eval outcomes for the digest, and the runner's own execution of a calibration_run
+task if one already exists on a board — is still covered here.
 
 Offline throughout: the ledger is a temp sqlite, the corpus is a temp directory, and the
 packet case's build is a fake dispatch that writes the lane's tree — no lane, no network.
@@ -130,83 +135,7 @@ def add_attempt(ledger, task_id, aid, state="completed"):
         )
 
 
-def run_task(board, run_id, case):
-    return json.loads((board / ("calibration-" + run_id + ".json")).read_text())
-
-
-# --- the due-set ------------------------------------------------------------------
-
-
-def test_a_new_lane_authors_every_case(tmp_path):
-    ledger, board, _project = ladder(tmp_path, None)
-    root = corpus(tmp_path, ["review-a", "review-b", PACKET_CASE])
-    due = evals.due_evals(str(root), lanes(), ledger, now=NOW)
-    assert sorted((row["lane"], row["case"], row["kind"]) for row in due) == sorted(
-        [
-            ("go", "review-a", "review"),
-            ("go", "review-b", "review"),
-            ("go", PACKET_CASE, "packet"),
-        ]
-    )
-    authored = evals.author_evals(board, root, lanes(), ledger, now=NOW)
-    assert [row["task"] for row in authored] == ["calibration-" + row["run_id"] for row in authored]
-    assert all(row["existing"] is False for row in authored)
-    for row in authored:
-        task = json.loads((board / (row["task"] + ".json")).read_text())
-        assert task["spec"]["case"] == row["case"]
-        assert task["spec"]["lanes"] == ["go"]
-        assert task["category"] == "calibration_run"
-
-
-def fresh_ledger(tmp_path, name):
-    ledger = Ledger("sqlite:///" + str(tmp_path / (name + ".sqlite")))
-    ledger.initialize()
-    return ledger
-
-
-def test_fresh_rows_skip_and_stale_rows_author(tmp_path):
-    root = corpus(tmp_path, ["review-a", PACKET_CASE])
-    # A fresh review result: the review case is not due, the packet case still is.
-    ledger = fresh_ledger(tmp_path, "one")
-    seed_outcome(ledger, "a1", "glm", "glm-5.3-flash", "review", at=NOW - DAY)
-    due = evals.due_evals(str(root), lanes(), ledger, now=NOW)
-    assert [(row["case"], row["kind"]) for row in due] == [(PACKET_CASE, "packet")]
-
-    # A stale review result is due again (nothing fresh for the lane).
-    stale = fresh_ledger(tmp_path, "two")
-    seed_outcome(stale, "b1", "glm", "glm-5.3-flash", "review", at=NOW - 8 * DAY)
-    due = evals.due_evals(str(root), lanes(), stale, now=NOW)
-    assert sorted((row["case"], row["kind"]) for row in due) == [
-        ("review-a", "review"),
-        (PACKET_CASE, "packet"),
-    ]
-
-    # Both kinds freshly scored: nothing is due, nothing is authored.
-    full = fresh_ledger(tmp_path, "three")
-    seed_outcome(full, "c1", "glm", "glm-5.3-flash", "review", at=NOW - DAY)
-    seed_outcome(full, "c2", "glm", "glm-5.3-flash", "packet", at=NOW - DAY)
-    assert evals.due_evals(str(root), lanes(), full, now=NOW) == []
-    _ledger, board, _project = ladder(tmp_path, None)
-    assert evals.author_evals(board, root, lanes(), full, now=NOW) == []
-
-
-def test_a_second_lane_is_measured_on_its_own_rows(tmp_path):
-    ledger, board, _project = ladder(tmp_path, None)
-    root = corpus(tmp_path, ["review-a"])
-    seed_outcome(ledger, "b1", "glm", "glm-5.3-flash", "review", at=NOW - DAY)
-    both = lanes() | {"kimi": {"family": "kimi", "model": "kimi-k3", "categories": []}}
-    due = evals.due_evals(str(root), both, ledger, now=NOW)
-    assert [(row["lane"], row["case"]) for row in due] == [("kimi", "review-a")]
-
-
-def test_authoring_the_same_day_twice_returns_the_existing_run(tmp_path):
-    ledger, board, _project = ladder(tmp_path, None)
-    root = corpus(tmp_path, ["review-a"])
-    first = evals.author_evals(board, root, lanes(), ledger, now=NOW)
-    again = evals.author_evals(board, root, lanes(), ledger, now=NOW)
-    assert first[0]["task"] == again[0]["task"]
-    assert again[0]["existing"] is True
-    assert sorted(p.stem for p in board.glob("calibration-*.json")) == [first[0]["task"]]
+# --- the ledger-side eval rows ----------------------------------------------------
 
 
 def test_eval_rows_aggregate_accepted_and_cases(tmp_path):
@@ -448,62 +377,3 @@ def test_a_packet_case_run_blocks_when_the_attempt_is_held(tmp_path):
     )
     assert result["result"] == "blocked"
     assert "held" in json.loads(path.read_text())["blocked_reason"]
-
-
-# --- the CLI ----------------------------------------------------------------------
-
-
-def test_evals_round_trips_through_main(tmp_path, monkeypatch):
-    import io
-    import sys
-
-    from inference_grid import cli
-
-    ledger, board, project = ladder(tmp_path, None)
-    root = corpus(tmp_path, ["review-a"])
-    lanes_path = tmp_path / "lanes.json"
-    lanes_path.write_text(
-        json.dumps(
-            {
-                "lanes": {
-                    "go": {
-                        "provider": "opencode",
-                        "family": "glm",
-                        "model": "glm-5.3-flash",
-                        "kind": "go_http",
-                        "credential_path": None,
-                        "executable": None,
-                        "plan_units": {},
-                        "window": None,
-                        "max_concurrency": 1,
-                        "wall_seconds": 60,
-                        "categories": ["independent_review"],
-                    }
-                }
-            }
-        )
-    )
-    payload = {
-        "corpus_dir": str(root),
-        "lanes": str(lanes_path),
-        "board_dir": str(board),
-        "project_root": str(project),
-    }
-    argfile = tmp_path / "evals.json"
-    argfile.write_text(json.dumps(payload))
-    database = "sqlite:///" + str(tmp_path / "cli.sqlite")
-    Ledger(database).initialize()
-    monkeypatch.setattr(
-        sys, "argv", ["inference-grid", "--database", database, "evals", "--json", str(argfile)]
-    )
-    buffer = io.StringIO()
-    real = sys.stdout
-    sys.stdout = buffer
-    try:
-        cli.main()
-    finally:
-        sys.stdout = real
-    report = json.loads(buffer.getvalue())
-    assert report["project_root"] == str(project)
-    assert [row["case"] for row in report["authored"]] == ["review-a"]
-    assert (board / (report["authored"][0]["task"] + ".json")).is_file()

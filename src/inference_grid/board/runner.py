@@ -459,83 +459,37 @@ def refresh_stale_lanes(
     return readiness, stale_files
 
 
-def priced_fields(choice, plan=False):
-    """The value route's fields for a row, or nothing when the legacy route decided —
-    a row never says `cost: None` for a board that was not routing on cost."""
-    if not choice.get("chosen_by"):
+def quota_fields(choice, plan=False):
+    """B4: the row's quota-explanation fields, or nothing when nothing was selected —
+    a row never carries a stale quota_rows list for a refusal that named no candidates."""
+    if choice.get("reason") != "selected":
         return {}
-    out = {"chosen_by": choice.get("chosen_by"), "cost": choice.get("cost")}
+    out = {}
     if plan:
-        out["value_rows"] = choice.get("value_rows", [])
-        out["value"] = choice.get("value")
+        out["quota_rows"] = choice.get("quota_rows", [])
     return out
 
 
-def pricing_context(ledger, value_routing=True, explore=0.1, benchmarks_path=None):
-    """The catalogue, priors and RNG the value route reads, or None to keep the legacy
-    score. None when the board turns it off, when the ledger holds no catalogue, or when
-    the benchmarks file is malformed — the tick then says so in its log rather than
-    routing on a broken prior."""
-    if not value_routing:
-        return None
-    try:
-        catalogue = ledger.catalogue()
-    except Exception:  # noqa: BLE001 — a ledger without the table is a legacy ledger
-        catalogue = []
-    if not catalogue:
-        return None
-    import random
-    from datetime import date as _date
-
-    from .priors import load_benchmarks
-
-    try:
-        benchmarks = load_benchmarks(benchmarks_path)
-    except ValueError as exc:
-        print(f"benchmarks file refused: {exc}; routing without priors", file=sys.stderr)
-        benchmarks = {"models": {}, "aliases": {}}
-    return {
-        "catalogue": catalogue,
-        "benchmarks": benchmarks,
-        "rng": random.Random(),
-        "explore": float(explore),
-        "at": _date.today(),
-    }
-
-
-def calibration_reports(ledger):
-    """Per (family, model) aggregate of the ledger's calibration/eval outcomes.
-
-    score_calibration records one outcome per case, category `eval:review` (the legacy
-    `calibration` still counts; board/calibration/score.py) and accepted = all defects
-    recalled and no false positives, so a lane's acceptance rate over those outcomes is
-    the strict recall the calibration gate measured. A packet case's `eval:packet`
-    outcome counts the same way. route blends that rate into the selection score; the
-    rows match a scorecard row's identity minus the category.
+def quota_context(ledger, accounts_by_lane):
+    """Each lane's account's remaining quota, the tightest of its configured windows —
+    B4's routing tiebreak, the same reading the capacity dashboard's headline uses
+    (min remaining across five_hour/weekly/monthly). A lane whose account is unknown or
+    unconfigured is simply absent — route treats a missing reading as last, not dropped.
     """
-    from .calibration import is_calibration_outcome
-
+    if not accounts_by_lane:
+        return {}
     with ledger.engine.connect() as con:
-        specs = {t["id"]: t["spec"] for t in con.execute(select(task_records)).mappings()}
-        rows = list(con.execute(select(attempt_records)).mappings())
-        outcomes = {}
-        for e in con.execute(
-            select(ledger_events).where(ledger_events.c.kind == "outcome_recorded")
-        ).mappings():
-            detail = e["detail"]
-            if isinstance(detail, dict) and is_calibration_outcome(detail.get("category")):
-                outcomes[e["attempt"]] = detail
-    agg = {}
-    for row in rows:
-        detail = outcomes.get(row["id"])
-        if detail is None:
-            continue
-        spec = specs.get(row["task"], {})
-        key = (spec.get("family", "?"), spec.get("model", "?"))
-        entry = agg.setdefault(key, {"family": key[0], "model": key[1], "cases": 0, "accepted": 0})
-        entry["cases"] += 1
-        entry["accepted"] += bool(detail.get("accepted"))
-    return [agg[key] for key in sorted(agg)]
+        windows_by_account = {
+            row["id"]: row["windows"] for row in con.execute(select(account_records)).mappings()
+        }
+        alias_map = {r["id"]: r["account"] for r in con.execute(select(alias_records)).mappings()}
+    quota = {}
+    for lane_id, alias in accounts_by_lane.items():
+        account = alias_map.get(alias, alias)
+        windows = windows_by_account.get(account)
+        if windows:
+            quota[lane_id] = min(windows.values())
+    return quota
 
 
 def packet_bytes(project_root, task):
@@ -1703,18 +1657,15 @@ def tick(
     package_src=None,
     owner_only=None,
     require_lane_meta=None,
-    value_routing=True,
-    explore=0.1,
-    benchmarks_path=None,
 ):
     """One pass over ready tasks. Returns a list of {task, lane, attempt, result} records.
 
-    Selection goes through lanes.route, which defaults and budget-filters the candidate
-    set and hands select_lane a scorecard whose Laplace scores carry the calibration
-    blend; every record for a task that reached route also carries the choice's
-    `candidates` (rows naming each offered lane and the max_tokens cap it would run
-    under), `dropped` (lanes filtered out with reasons and the two token numbers,
-    budget_unfit foremost) and `score`.
+    Selection goes through lanes.route (B4: a static tier table — tier, then
+    cross-family, then remaining window quota; no learned score); every record for a
+    task that reached route also carries the choice's `candidates` (rows naming each
+    offered lane and the max_tokens cap it would run under), `dropped` (lanes filtered
+    out with reasons and the two token numbers, budget_unfit foremost), `tier` and
+    `score` (the winning lane's quota reading).
 
     With `require_lane_meta` (the board config's hosting/retention requirement,
     {"residency": ["us", "eu"], "retention": ["zero"]}) the sidecar `lanes-meta.json` is
@@ -1776,11 +1727,9 @@ def tick(
             for lane_id, lane in view.items()
         }
     scorecard = ledger.scorecard()
-    calibration = calibration_reports(ledger)
     readiness = readiness_view(ledger, lanes, now, accounts_by_lane, scorecard)
-    # O2: with a recorded catalogue the route is quality per dollar; without one the
-    # legacy score decides, and the row says nothing about money because nothing is known.
-    pricing = pricing_context(ledger, value_routing, explore, benchmarks_path)
+    # B4: each lane's account's tightest remaining window, the routing tiebreak.
+    quota = quota_context(ledger, accounts_by_lane)
     # A stale lane record is re-read from its provider's observation file before it is
     # allowed to refuse work: the collectors' file is usually fresher than a record a
     # pass-length-old board_prepare wrote (brief L1).
@@ -1967,7 +1916,8 @@ def tick(
                 "lane": lane_id,
                 "attempt": aid,
                 "result": "passed",
-                **priced_fields(choice),
+                "tier": choice["tier"],
+                **quota_fields(choice),
             }
             return
         try:
@@ -2062,7 +2012,8 @@ def tick(
             "candidates": choice["candidates"],
             "dropped": choice["dropped"],
             "score": choice["score"],
-            **priced_fields(choice),
+            "tier": choice["tier"],
+            **quota_fields(choice),
         }
 
     for index, (task_id, (path, task)) in enumerate(board.items()):
@@ -2271,11 +2222,9 @@ def tick(
                 },
                 lanes_view,
                 task_readiness,
-                scorecard,
-                calibration,
                 now,
                 packet_bytes(project_root, task),
-                pricing=pricing,
+                quota=quota,
             )
 
         choice = route_now(readiness)
@@ -2330,6 +2279,7 @@ def tick(
                 "candidates": candidates,
                 "dropped": choice["dropped"],
                 "score": choice["score"],
+                "tier": choice["tier"],
             }
             continue
         lane_id = choice["lane"]
@@ -2343,8 +2293,9 @@ def tick(
                 "candidates": choice["candidates"],
                 "dropped": choice["dropped"],
                 "score": choice["score"],
-                # O2: the priced, scored candidates and why the winner won.
-                **priced_fields(choice, plan=True),
+                "tier": choice["tier"],
+                # B4: the quota reading for every candidate and why the winner won.
+                **quota_fields(choice, plan=True),
             }
             continue
         packet_dir = Path(packets_root) / task_id / time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
@@ -2440,7 +2391,8 @@ def tick(
                     "candidates": r.get("candidates", []),
                     "dropped": r.get("dropped", []),
                     "score": r.get("score"),
-                    **{k: r[k] for k in ("value_rows", "chosen_by", "cost", "value") if k in r},
+                    "tier": r.get("tier"),
+                    **{k: r[k] for k in ("quota_rows",) if k in r},
                 }
                 for r in ordered
             ],

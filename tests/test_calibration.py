@@ -759,28 +759,6 @@ def run_cli(monkeypatch, tmp_path, name, payload, database):
     return buffer.getvalue()
 
 
-def test_calibrate_round_trips_through_main(tmp_path, monkeypatch):
-    board, project = board_and_project(tmp_path)
-    out = run_cli(
-        monkeypatch,
-        tmp_path,
-        "calibrate",
-        {
-            "board_dir": str(board),
-            "project_root": str(project),
-            "corpus_dir": str(CORPUS_V1),
-            "lanes": ["go"],
-            "run_id": "cli-v1",
-        },
-        "sqlite:///" + str(tmp_path / "board.sqlite"),
-    )
-    payload = json.loads(out)
-    assert [t["id"] for t in payload["tasks"]] == [
-        f"calib-cli-v1-{c}" for c in ("clean-normalize", "sum-drops-last")
-    ]
-    assert (board / "calibration" / "cli-v1" / "manifest.json").is_file()
-
-
 def test_calibration_score_round_trips_through_main(tmp_path, monkeypatch):
     board, packets = scoring_board(tmp_path)
     out = run_cli(

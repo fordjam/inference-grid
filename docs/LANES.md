@@ -20,6 +20,15 @@ the packet, a lane declaring another tier is not offered and appears in the plan
 out. With no lane of the asked tier offered, every fitting lane stays in play — which is how a
 board whose records predate the key routes as it always did — and an absent key is `build`.
 
+**Choosing among lanes of the same tier (B4).** The router is a static tier table, not a
+learned score: no acceptance rate, no benchmark prior, no quality-per-dollar bandit. Once
+tier, the cross-family rule (a review may not be graded by its own author) and readiness
+have narrowed the field, the lane whose account has the most remaining quota this window
+wins — the tightest of its configured windows (five_hour/weekly/monthly), the same reading
+the capacity dashboard's headline uses. Ties break on lane id. A dry run's `score` is that
+winning quota number and `quota_rows` names every candidate's reading; neither `explore`
+nor `value` appears anywhere in a dry run's output.
+
 The key is what a lane view carries; the packaged `lanes.json` key set cannot hold it yet
 (`lanes/config.py` accepts exactly its own field list), so the operator cannot declare a tier until
 that set grows by one entry — the one-line coordinator edit, patch in the J2 report. The runner's
@@ -342,5 +351,7 @@ corpus (`calibration/example/` in this repository; the operator's own corpus liv
 caught after approvals (a Playwright mock matching the wrong request path, a DELETE
 branch nested under a list-path condition, a count that does not sum, an abatement base
 that includes the grant) plus a clean case for false positives — and scores each lane's
-settled replies for recall, precision and severity-weighted recall. Run it before
-trusting a lane's acceptance rate for `independent_review` routing.
+settled replies for recall, precision and severity-weighted recall. B4 stopped feeding
+this into routing (the router is a static tier table now); what a calibration run scores
+still lands on the needs-you page's reviewer-recall panel, an operator signal for
+deciding whether to keep trusting a reviewer lane by hand, not an input the tick reads.

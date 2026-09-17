@@ -187,9 +187,14 @@ the base and an `external` record. The flags still take exactly one lane.
 
 ### Measure a reviewer
 
+B4 removed the `inference-grid calibrate` CLI command (eval-corpus authoring, deleted);
+`author_calibration` itself is unchanged, called directly instead of through the CLI:
+
 ```sh
-inference-grid calibrate --json '{"board_dir": "grid/board", "project_root": ".",
-  "corpus_dir": "calibration/example", "lanes": ["go-kimi"], "run_id": "kimi-20260914"}'
+python3 -c "
+from inference_grid.board.calibration import author_calibration
+author_calibration('grid/board', '.', 'calibration/example', ['go-kimi'], 'kimi-20260914')
+"
 # ...after the board settles them:
 inference-grid calibration-score --json '{"board_dir": "grid/board", "run_id": "kimi-20260914",
   "packets_root": "~/.grid-workspaces/packets", "record": true}'

@@ -399,6 +399,7 @@ def test_tick_dispatches_tests_and_records(world):
             "candidates": [{"lane": "go", "cap": 22000}],  # REVIEW_BUDGET: 3 * 6000 + 4000
             "dropped": [],
             "score": None,
+            "tier": "review",
         }
     ]
 
@@ -919,6 +920,7 @@ def test_tree_task_keeps_paths_and_discovers_tests(world):
             "candidates": [{"lane": "go", "cap": 16000}],
             "dropped": [],
             "score": results[0]["score"],
+            "tier": "build",
         }
     ]
     packet = next((world["packets"] / "tree-ok").iterdir())
@@ -1283,7 +1285,9 @@ def test_dry_run_plans_without_touching_anything(world):
             "reason": "selected",
             "candidates": [{"lane": "go", "cap": 16000}, {"lane": "zai", "cap": 16000}],
             "dropped": [],
-            "score": 0.5,
+            "score": 10.0,
+            "tier": "build",
+            "quota_rows": [{"lane": "zai", "quota": 10.0}],
         },
         {
             "task": "copy-wrong",
@@ -1292,6 +1296,7 @@ def test_dry_run_plans_without_touching_anything(world):
             "candidates": [{"lane": "go", "cap": 16000}],
             "dropped": [],
             "score": None,
+            "tier": "build",
         },
         {
             "task": "review-fam",
@@ -1300,6 +1305,7 @@ def test_dry_run_plans_without_touching_anything(world):
             "candidates": [{"lane": "zai", "cap": 16000}],
             "dropped": [],
             "score": None,
+            "tier": "review",
         },
     ]
     # Nothing was dispatched, written or staged.
@@ -1503,6 +1509,7 @@ def test_a_dry_run_reports_the_requeue_and_changes_nothing(world):
             "candidates": [],
             "dropped": [],
             "score": None,
+            "tier": None,
         }
     ]
     assert (world["board"] / "copy-ok.json").read_bytes() == before

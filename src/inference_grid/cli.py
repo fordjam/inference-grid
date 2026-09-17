@@ -57,9 +57,6 @@ def board_tick(
                             "package_src",
                             "owner_only",
                             "require_lane_meta",
-                            "value_routing",
-                            "explore",
-                            "benchmarks_path",
                         )
                         if key in config
                     },
@@ -200,19 +197,12 @@ def main():
             "board-status",
             "inbox-integrate",
             "lane-init",
-            "catalogue-record",
-            "catalogue",
-            "deals",
-            "quality",
-            "case-from-landed",
-            "case-from-review",
             "board-init",
-            "calibrate",
             "calibration-score",
-            "evals",
             "digest",
             "boards",
             "evaluation",
+            "report",
             "tick",
             "watch",
             "verify-merge",
@@ -220,6 +210,9 @@ def main():
         ],
     )
     parser.add_argument("--json", help="JSON argument file; never store credentials here")
+    parser.add_argument(
+        "--week", help="report only: an ISO week (2026-W38); default the last 7 days"
+    )
     args = parser.parse_args()
     if args.command == "doctor":
         from .doctor import diagnose
@@ -255,9 +248,7 @@ def main():
             "inbox-integrate",
             "lane-init",
             "board-init",
-            "calibrate",
             "calibration-score",
-            "evals",
             "defer",
             "cooldown",
             "watch",
@@ -315,25 +306,18 @@ def main():
         "scorecard": ledger.scorecard,
         "board-tick": lambda **kw: board_tick(ledger, **kw),
         "board-new": lambda **kw: board_new(**kw),
-        "calibrate": lambda **kw: calibrate(**kw),
         "calibration-score": lambda **kw: calibration_score(ledger, **kw),
-        "evals": lambda **kw: evals(ledger, **kw),
         "board-status": lambda **kw: board_status(ledger, **kw),
         "lane-init": lambda **kw: lane_init(**kw),
         "board-init": lambda **kw: board_init(**kw),
         "digest": lambda **kw: digest(ledger, **kw),
         "boards": lambda **kw: boards_command(ledger, **kw),
+        "report": lambda **kw: report_command(ledger, week=args.week, **kw),
         "watch": lambda **kw: watch(kw),
         "inbox-integrate": lambda **kw: inbox_integrate(
             kw["project_root"], kw["task_id"], dry_run=kw.get("dry_run", True)
         ),
         "land": lambda **kw: land_command(ledger, **kw),
-        "catalogue-record": lambda **kw: catalogue_record(ledger, **kw),
-        "catalogue": lambda **kw: ledger.catalogue(**kw),
-        "deals": lambda **kw: deals_command(ledger, **kw),
-        "quality": lambda **kw: quality_command(ledger, **kw),
-        "case-from-landed": lambda **kw: case_from_landed(**kw),
-        "case-from-review": lambda **kw: case_from_review(**kw),
     }
     report = commands[args.command](**data)
     if args.command == "land":
@@ -363,40 +347,10 @@ def board_status(ledger, board_dir=None, suggest=False, boards=None):
     return status(ledger, board_dir, suggest=suggest, boards=boards)
 
 
-def calibrate(board_dir, project_root, corpus_dir, lanes, run_id):
-    from .board.calibration import author_calibration
-
-    return author_calibration(board_dir, project_root, corpus_dir, lanes, run_id)
-
-
 def calibration_score(ledger, board_dir, run_id, packets_root, record=False):
     from .board.calibration import score_calibration
 
     return score_calibration(board_dir, run_id, packets_root, record=record, ledger=ledger)
-
-
-def evals(ledger, corpus_dir, lanes, board_dir, project_root, every_days=None):
-    """Author the calibration_run tasks every lane's stale evals are due.
-
-    `lanes` is the operator's lanes.json path (the lane set the freshness is measured
-    against); `project_root` is the board's project, where the runner stages a case's
-    review task — the authoring itself writes under `board_dir` and its grid root. The
-    command is idempotent per day and per (lane, case), so an hourly launchd job is safe.
-    """
-    from .board.evals import EVAL_EVERY_DAYS, author_evals
-    from .lanes.runner import load_lanes
-
-    if not corpus_dir or not board_dir or not project_root or not lanes:
-        raise ValueError("evals needs corpus_dir, lanes, board_dir and project_root")
-    lane_specs = load_lanes(lanes) if isinstance(lanes, (str, os.PathLike)) else lanes
-    authored = author_evals(
-        board_dir,
-        corpus_dir,
-        lane_specs,
-        ledger,
-        every_days=every_days or EVAL_EVERY_DAYS,
-    )
-    return {"project_root": str(project_root), "authored": authored}
 
 
 def lane_init(lane_id, board_dir, project_root=None):
@@ -412,85 +366,16 @@ def board_init(project_root, board_name=None, allowed_prefixes=None, tier="T0"):
     return init(project_root, board_name=board_name, allowed_prefixes=allowed_prefixes, tier=tier)
 
 
-def catalogue_record(ledger, provider, path=None, rows=None, observed_at=None):
-    """Record one plan's catalogue reading: `rows` inline or a JSON file of rows."""
-    from .catalogue import normalise
-
-    if rows is None:
-        if not path:
-            raise ValueError("catalogue-record needs rows or a path")
-        with open(path) as handle:
-            document = json.load(handle)
-        rows = document.get("rows", document) if isinstance(document, dict) else document
-        observed_at = observed_at or (
-            document.get("observed_at") if isinstance(document, dict) else None
-        )
-    if isinstance(observed_at, str):
-        from datetime import datetime
-
-        observed_at = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).timestamp()
-    normalised = [normalise(r) for r in rows]
-    return {
-        "provider": provider,
-        "recorded": ledger.record_catalogue(provider, normalised, observed_at),
-    }
-
-
-def deals_command(ledger, lanes_path=None, ending_within_days=3):
-    """Promos and free models across the recorded catalogues, with what using them takes."""
-    from .catalogue import deals, deals_lines
-
-    lanes = {}
-    if lanes_path:
-        from .lanes.config import validate_lane_config
-
-        with open(lanes_path) as handle:
-            lanes = validate_lane_config(json.load(handle))["lanes"]
-    readiness = {}
-    try:
-        from .board.runner import readiness_view
-
-        readiness = (
-            readiness_view(ledger, lanes, time.time(), None, ledger.scorecard()) if lanes else {}
-        )
-    except Exception:  # noqa: BLE001 — readiness is a refinement of the report, not its condition
-        readiness = {}
-    rows = deals(ledger.catalogue(), lanes, readiness, ending_within_days=ending_within_days)
-    return {"deals": rows, "lines": deals_lines(rows)}
-
-
-def quality_command(ledger, benchmarks_path=None, category=None):
-    """Quality estimates per (model, category): prior, evidence and posterior with sources."""
-    from .board.priors import quality_table
-
-    return quality_table(ledger, benchmarks_path=benchmarks_path, category=category)
-
-
-def case_from_landed(project_root, board_dir, task_id, corpus_dir, name=None, prefixes=None):
-    """A packet eval case from a landed packet: base tree, landed patch, its tests."""
-    from .board.calibration.history import DEFAULT_PREFIXES, packet_case_from_landed
-
-    return packet_case_from_landed(
-        project_root,
-        board_dir,
-        task_id,
-        corpus_dir,
-        name=name,
-        prefixes=tuple(prefixes) if prefixes else DEFAULT_PREFIXES,
-    )
-
-
-def case_from_review(board_dir, review_id, corpus_dir, answer, name=None):
-    """A review eval case from a staged review packet and a confirmed answer key."""
-    from .board.calibration.history import review_case_from_staging
-
-    return review_case_from_staging(board_dir, review_id, corpus_dir, answer, name=name)
-
-
 def digest(ledger, boards_dir, since=None):
     from .digest import digest as render
 
     return render(ledger, boards_dir, now=since)
+
+
+def report_command(ledger, week=None, lanes=None, prices=None):
+    from .report import report as render
+
+    return render(ledger, week=week, lanes=lanes, prices=prices)
 
 
 def boards_command(

@@ -1,8 +1,12 @@
-"""Routing that uses the evidence the grid already has, on top of lanes/select.py.
+"""Static tier-table routing (B4): tier, then cross-family, then remaining window quota.
 
-select_lane (integrated unmodified) picks a lane from readiness, category and scorecard
-evidence but knows nothing about packet size or reviewer calibration. route prepares its
-inputs and carries its answer back with the drop report:
+No learned score, no bandit, no per-dollar value: a task's category asks for a tier
+(plan | build | review, docs/LANES.md "Model tiers") and, among the lanes of that tier
+that fit the packet and the board's policy, the one candidate a review must not share
+the task's author family with, and whose account has the most remaining quota this
+window, wins — ties break on lane id, so the choice is always reproducible. route
+prepares select_lane's constraints and the quota tiebreak, and carries the answer back
+with the drop report:
 
 - Defaulting: a task without an explicit `lanes` list is offered every lane declaring
   the task's category, minus explicit_only lanes (first-party families claude/openai,
@@ -15,10 +19,6 @@ inputs and carries its answer back with the drop report:
   selection; the returned `dropped` rows say which lanes and why, carrying the two
   numbers (`prompt`, `cap`) so a dry run can explain the refusal in tokens. The
   `candidates` rows carry the cap each offered lane would run under.
-- Recall blend: select_lane reads scorecard rows keyed by (family, model, category)
-  and scores each lane with the Laplace (accepted + 1) / (attempts + 2). route hands it
-  reshaped rows whose Laplace score equals the packet's blend — see blended_row — so
-  calibration evidence steers selection without touching the provider-authored module.
 - Tier: the lane record's `tier` (plan | build | review) is the operator's statement of
   what a lane is for — SOTA for planning and review, workhorses for building (docs/LANES.md,
   "Model tiers"). Among the lanes that fit the packet, route offers only the lanes whose
@@ -33,9 +33,18 @@ inputs and carries its answer back with the drop report:
   is refused rather than trusted, and a requirement that no lane satisfies refuses the
   task: policy decides where work may go at all, before budgets and tiers say where it
   fits. Without the key, route behaves as if the sidecar did not exist.
+- Selection: among what tier/budget/policy left, a lane not `ready` (readiness view) or
+  sharing the task's `author_family` (the cross-family rule: a review may not be graded
+  by its own author) or with a closed campaign window is not offered at all — this is
+  select_lane's own hard-constraint logic, kept unmodified in lanes/select.py. Of what
+  remains, `quota` (lane id -> that lane's account's tightest remaining window, the same
+  reading the capacity dashboard's headline uses) picks the lane with the most headroom;
+  a lane the caller has no quota reading for is last, not dropped. `score` in the answer
+  is the winning lane's quota reading, so a dry run explains every choice by tier and
+  quota alone — never a learned quality number.
 """
 
-from math import ceil, gcd
+from math import ceil
 
 from .go import CONTENT_ALLOWANCE, REASONING_HEADROOM
 from .meta import policy_drop, validate_requirement
@@ -131,66 +140,7 @@ def default_lanes(category, lanes):
     ]
 
 
-def blended_row(lane, category, scorecard, calibration):
-    """The scorecard row select_lane reads, reshaped so its Laplace score is the blend.
-
-    The blend is 0.5 * acceptance + 0.5 * recall: acceptance is the lane's Laplace score
-    over the (family, model, category) scorecard row, recall is the lane's calibration
-    record — accepted calibration outcomes over recorded calibration outcomes, where a
-    calibration outcome is accepted only when every seeded defect was recalled and no
-    false positive was filed (board/calibration.py). A lane without a calibration record
-    keeps its original row unchanged (acceptance alone); a lane with neither a row nor
-    calibration emits none and select_lane's default score of 1/2 stands.
-
-    The blend is carried exactly: with n attempts / a accepted and c accepted of t
-    calibration outcomes,
-
-        blend = (a+1) / (2(n+2)) + c / (2t) = ((a+1)*t + c*(n+2)) / (2*(n+2)*t)
-
-    so attempts' = 2(n+2)*t / g - 2 and accepted' = ((a+1)*t + c*(n+2)) / g - 1, with
-    g = gcd(numerator, denominator), reproduce the blend at the smallest integers
-    select_lane's arithmetic can read. The reshaped attempt count is synthetic: an exact
-    blend tie falls through select_lane's attempts tie-break to the reshaped count, then
-    lane id — smaller reshaped denominators mean less total evidence behind the tie.
-    """
-    family, model = lane.get("family"), lane.get("model")
-    attempts, accepted, found = 0, 0, False
-    for row in scorecard or []:
-        if (
-            row.get("family") == family
-            and row.get("model") == model
-            and row.get("category") == category
-        ):
-            attempts, accepted, found = row.get("attempts", 0), row.get("accepted", 0), True
-            break
-    cases, cal_accepted = 0, 0
-    for report in calibration or []:
-        if report.get("family") == family and report.get("model") == model:
-            cases, cal_accepted = report.get("cases", 0), report.get("accepted", 0)
-            break
-    if cases <= 0:
-        if not found:
-            return None
-        return {
-            "family": family,
-            "model": model,
-            "category": category,
-            "attempts": attempts,
-            "accepted": accepted,
-        }
-    numerator = (accepted + 1) * cases + cal_accepted * (attempts + 2)
-    denominator = 2 * (attempts + 2) * cases
-    g = gcd(numerator, denominator)
-    return {
-        "family": family,
-        "model": model,
-        "category": category,
-        "attempts": denominator // g - 2,
-        "accepted": numerator // g - 1,
-    }
-
-
-def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes, pricing=None):
+def route(task, lanes, readiness, now, inputs_bytes, quota=None):
     """Prepare select_lane's inputs and return its answer with the drop report.
 
     Returns select_lane's dict with `candidates` replaced by the post-budget candidate
@@ -304,54 +254,35 @@ def route(task, lanes, readiness, scorecard, calibration, now, inputs_bytes, pri
             if lane_tier(lanes[row["lane"]]) != tier
         )
         kept = matching
-    if pricing is not None:
-        # O2: quality per dollar over the same constrained set (lanes/value.py). The
-        # legacy Laplace-score path below stays for a board without a catalogue.
-        from .value import select_by_value
-
-        choice = select_by_value(
-            {"category": cat, "author_family": task.get("author_family")},
-            {lid: lanes[lid] for lid in (row["lane"] for row in kept)},
-            readiness,
-            scorecard,
-            calibration,
-            pricing.get("catalogue") or [],
-            benchmarks=pricing.get("benchmarks"),
-            inputs_bytes=inputs_bytes,
-            rng=pricing.get("rng"),
-            explore=pricing.get("explore", 0.1),
-            at=pricing.get("at"),
-            usage_medians=pricing.get("usage_medians"),
-        )
-        return {
-            "lane": choice["lane"],
-            "score": choice["score"],
-            "reason": choice["reason"],
-            "candidates": sorted(kept, key=lambda row: row["lane"]),
-            "dropped": dropped,
-            "tier": tier,
-            "value_rows": choice.get("rows", []),
-            "chosen_by": choice.get("chosen_by"),
-            "cost": choice.get("cost"),
-            "value": choice.get("value"),
-        }
-    rows = []
-    for lid in sorted(row["lane"] for row in kept):
-        row = blended_row(lanes[lid], cat, scorecard, calibration)
-        if row is not None:
-            rows.append(row)
+    # B4: select_lane's own hard constraints (ready, cross-family, window) decide what
+    # is offered at all — kept unmodified, called with no scorecard so every lane ties
+    # at its default score and `candidates` is exactly the constrained set. The winner
+    # among that set is re-ranked by remaining window quota, not select_lane's score.
     choice = select_lane(
         {"category": cat, "author_family": task.get("author_family")},
         {lid: lanes[lid] for lid in (row["lane"] for row in kept)},
         readiness,
-        rows,
+        [],
         now,
     )
+    if choice["reason"] != "selected":
+        return {
+            "lane": None,
+            "score": None,
+            "reason": choice["reason"],
+            "candidates": sorted(kept, key=lambda row: row["lane"]),
+            "dropped": dropped,
+            "tier": tier,
+        }
+    quota = quota or {}
+    quota_rows = [{"lane": lid, "quota": quota.get(lid)} for lid in choice["candidates"]]
+    winner = sorted(choice["candidates"], key=lambda lid: (-(quota.get(lid) or 0.0), lid))[0]
     return {
-        "lane": choice["lane"],
-        "score": choice["score"],
-        "reason": choice["reason"],
+        "lane": winner,
+        "score": quota.get(winner),
+        "reason": "selected",
         "candidates": sorted(kept, key=lambda row: row["lane"]),
         "dropped": dropped,
         "tier": tier,
+        "quota_rows": quota_rows,
     }

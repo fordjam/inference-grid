@@ -9,7 +9,7 @@ import pytest
 from test_board_runner import make_review_task, make_task, ready_record, world  # noqa: F401 -- binds the world fixture here
 
 from inference_grid.board import runner
-from inference_grid.lanes.route import blended_row, lane_tier, max_tokens_cap, route, wanted_tier
+from inference_grid.lanes.route import lane_tier, max_tokens_cap, route, wanted_tier
 
 LANES = {
     "go": {
@@ -59,46 +59,47 @@ class DefaultingTests(unittest.TestCase):
             raw = task()
             if lanes_key is not None:
                 raw["lanes"] = lanes_key
-            out = route(raw, LANES, READY, [], [], 0, 0)
-            # Both category lanes tie at 1/2; lane id breaks the tie. Each candidate
-            # row carries the cap the lane would run under (unbudgeted go policy: 16k).
+            out = route(raw, LANES, READY, 0, 0)
+            # Both category lanes tie with no quota reading given; lane id breaks the
+            # tie. Each candidate row carries the cap it would run under (unbudgeted
+            # go policy: 16k).
             self.assertEqual(
                 (out["lane"], out["candidates"]),
                 ("go", [{"lane": "go", "cap": 16000}, {"lane": "zcode", "cap": 16000}]),
             )
-            self.assertEqual((out["score"], out["reason"], out["dropped"]), (0.5, "selected", []))
+            self.assertEqual((out["score"], out["reason"], out["dropped"]), (None, "selected", []))
 
     def test_an_explicit_list_still_restricts(self):
-        out = route(task(lanes=["zcode"]), LANES, READY, [], [], 0, 0)
+        out = route(task(lanes=["zcode"]), LANES, READY, 0, 0)
         self.assertEqual(
             (out["lane"], out["candidates"], out["score"]),
-            ("zcode", [{"lane": "zcode", "cap": 16000}], 0.5),
+            ("zcode", [{"lane": "zcode", "cap": 16000}], None),
         )
         # A listed lane that does not declare the category is simply not offered,
         # but it still counts as a candidate: select_lane drops it, not route.
-        out = route(task(lanes=["zcode", "kimi"]), LANES, READY, [], [], 0, 0)
+        out = route(task(lanes=["zcode", "kimi"]), LANES, READY, 0, 0)
         self.assertEqual(
             (out["lane"], out["candidates"]),
             ("zcode", [{"lane": "kimi", "cap": 16000}, {"lane": "zcode", "cap": 16000}]),
         )
 
     def test_explicit_only_lanes_are_never_defaulted_in(self):
-        out = route(task(category="independent_review"), LANES, READY, [], [], 0, 0)
+        out = route(task(category="independent_review"), LANES, READY, 0, 0)
         self.assertEqual(
             (out["lane"], out["candidates"]), ("kimi", [{"lane": "kimi", "cap": 16000}])
         )
         # ... but an author naming one takes it anyway.
         out = route(
-            task(category="independent_review", lanes=["claude"]), LANES, READY, [], [], 0, 0
+            task(category="independent_review", lanes=["claude"]), LANES, READY, 0, 0
         )
         self.assertEqual(
             (out["lane"], out["candidates"]), ("claude", [{"lane": "claude", "cap": 16000}])
         )
 
     def test_inputs_are_not_mutated(self):
-        frozen = (task(lanes=["go"]), LANES, READY, [{"attempts": 8, "accepted": 7}], [])
+        frozen = (task(lanes=["go"]), LANES, READY)
         snapshot = copy.deepcopy(frozen)
-        route(frozen[0], frozen[1], frozen[2], frozen[3], frozen[4], 0, 0)
+        route(frozen[0], frozen[1], frozen[2], 0, 0, quota={"go": 5.0})
         self.assertEqual(frozen, snapshot)
 
 
@@ -111,7 +112,7 @@ class BudgetTests(unittest.TestCase):
 
     def test_a_16k_packet_misses_a_10k_cap_and_fits_22k(self):
         budget = {"wall_seconds": 60, "output_bytes": 100000, "thinking_tokens": 2000}
-        out = route(task(lanes=["go"], budget=budget), LANES, READY, [], [], 0, BIG_PACKET)
+        out = route(task(lanes=["go"], budget=budget), LANES, READY, 0, BIG_PACKET)
         self.assertEqual(
             (out["lane"], out["reason"], out["candidates"]), (None, "budget_unfit", [])
         )
@@ -129,31 +130,31 @@ class BudgetTests(unittest.TestCase):
             ],
         )
         budget = dict(budget, thinking_tokens=6000)  # 3 * 6000 + 4000 = 22000
-        out = route(task(lanes=["go"], budget=budget), LANES, READY, [], [], 0, BIG_PACKET)
+        out = route(task(lanes=["go"], budget=budget), LANES, READY, 0, BIG_PACKET)
         self.assertEqual((out["lane"], out["dropped"]), ("go", []))
         # Under the default candidate set both pure_function lanes miss the 10k cap.
         out = route(
-            task(budget=dict(budget, thinking_tokens=2000)), LANES, READY, [], [], 0, BIG_PACKET
+            task(budget=dict(budget, thinking_tokens=2000)), LANES, READY, 0, BIG_PACKET
         )
         self.assertEqual([d["lane"] for d in out["dropped"]], ["go", "zcode"])
 
     def test_a_lane_view_max_tokens_figure_overrides_the_policy(self):
         lanes = dict(LANES, go=dict(LANES["go"], max_tokens=22000))
-        out = route(task(lanes=["go"]), lanes, READY, [], [], 0, BIG_PACKET)
+        out = route(task(lanes=["go"]), lanes, READY, 0, BIG_PACKET)
         self.assertEqual((out["lane"], out["dropped"]), ("go", []))
         lanes = dict(LANES, go=dict(LANES["go"], max_tokens=10000))
-        out = route(task(lanes=["go"]), lanes, READY, [], [], 0, BIG_PACKET)
+        out = route(task(lanes=["go"]), lanes, READY, 0, BIG_PACKET)
         self.assertEqual((out["lane"], out["reason"]), (None, "budget_unfit"))
 
     def test_a_context_cap_filters_independently_of_max_tokens(self):
         lanes = dict(LANES, go=dict(LANES["go"], max_tokens=22000, context=8000))
-        out = route(task(lanes=["go"]), lanes, READY, [], [], 0, BIG_PACKET)
+        out = route(task(lanes=["go"]), lanes, READY, 0, BIG_PACKET)
         self.assertEqual(out["dropped"][0]["detail"], "prompt ~16384 tokens exceeds context 8000")
         # The row names the limit that actually refused: the context window here.
         self.assertEqual((out["dropped"][0]["prompt"], out["dropped"][0]["cap"]), (16384, 8000))
         lanes = dict(LANES, go=dict(LANES["go"], max_tokens=22000, context=16384))
         self.assertEqual(
-            route(task(lanes=["go"]), lanes, READY, [], [], 0, BIG_PACKET)["lane"], "go"
+            route(task(lanes=["go"]), lanes, READY, 0, BIG_PACKET)["lane"], "go"
         )
 
     def test_a_lane_whose_cap_is_below_the_packet_need_is_refused_with_both_numbers(self):
@@ -164,8 +165,6 @@ class BudgetTests(unittest.TestCase):
             task(category="independent_review"),
             lanes,
             READY,
-            [],
-            [],
             0,
             40008,  # ceil(40008 / 4) = 10002 tokens: need 10002 // 2 + 4000 = 9001, one over the cap
         )
@@ -175,35 +174,23 @@ class BudgetTests(unittest.TestCase):
 
     def test_a_lane_view_max_tokens_figure_is_reported_on_the_candidate_row(self):
         lanes = dict(LANES, kimi=dict(LANES["kimi"], max_tokens=31000))
-        out = route(task(category="independent_review"), lanes, READY, [], [], 0, 0)
+        out = route(task(category="independent_review"), lanes, READY, 0, 0)
         self.assertEqual(out["candidates"], [{"lane": "kimi", "cap": 31000}])
 
     def test_readiness_and_family_reasons_survive_the_pass_through(self):
         cold = {k: {"state": "stale"} for k in LANES}
-        out = route(task(), LANES, cold, [], [], 0, 0)
+        out = route(task(), LANES, cold, 0, 0)
         self.assertEqual((out["lane"], out["reason"]), (None, "no_ready_lane"))
         out = route(
-            task(category="independent_review", author_family="kimi"), LANES, READY, [], [], 0, 0
+            task(category="independent_review", author_family="kimi"), LANES, READY, 0, 0
         )
         self.assertEqual(out["reason"], "no_independent_family")
         with self.assertRaises(ValueError):
-            route(task(), LANES, {}, [], [], 0, 0)
+            route(task(), LANES, {}, 0, 0)
 
 
 class TierTests(unittest.TestCase):
     """The lane record's tier, read by route (J2): plan | build | review."""
-
-    # A lane that declares another tier than the task asks for loses even when its
-    # evidence is the better of the two: 8/8 acceptance for go against nothing for kimi.
-    REVIEW_SCORECARD = [
-        {
-            "family": "glm",
-            "model": "glm-5.3-flash",
-            "category": "independent_review",
-            "attempts": 8,
-            "accepted": 8,
-        }
-    ]
 
     def test_the_lane_of_the_task_tier_wins_and_the_other_is_dropped(self):
         lanes = {
@@ -213,20 +200,19 @@ class TierTests(unittest.TestCase):
             "kimi": dict(LANES["kimi"], tier="review"),
         }
         ready = {k: {"state": "ready"} for k in lanes}
+        # go's quota (100) would have won the selection; the task's tier decides first,
+        # so the only offered lane is the review one, with no quota reading of its own.
         out = route(
             task(category="independent_review", lanes=["go", "kimi"]),
             lanes,
             ready,
-            self.REVIEW_SCORECARD,
-            [],
             0,
             0,
+            quota={"go": 100.0},
         )
-        # go's Laplace 9/10 would have won the selection; the task's tier decides first,
-        # so the only offered lane is the review one, at its default score.
         self.assertEqual(
             (out["lane"], out["score"], out["candidates"]),
-            ("kimi", 0.5, [{"lane": "kimi", "cap": 16000}]),
+            ("kimi", None, [{"lane": "kimi", "cap": 16000}]),
         )
         self.assertEqual(out["tier"], "review")
         self.assertEqual(
@@ -234,9 +220,9 @@ class TierTests(unittest.TestCase):
             [("go", "tier_mismatch", "lane tier build, task wants review")],
         )
 
-    def test_ties_within_the_task_tier_break_on_the_existing_score(self):
+    def test_ties_within_the_task_tier_break_on_remaining_quota(self):
         # Both lanes declare review: the tier filter has nothing to drop, and the
-        # evidence decides — go's 9/10 over kimi's default 1/2.
+        # lane with more remaining window quota wins.
         lanes = {
             "go": dict(
                 LANES["go"], categories=["pure_function", "independent_review"], tier="review"
@@ -249,12 +235,21 @@ class TierTests(unittest.TestCase):
             task(category="independent_review", lanes=["go", "kimi"]),
             lanes,
             ready,
-            self.REVIEW_SCORECARD,
-            [],
             0,
             0,
+            quota={"go": 9.0, "kimi": 4.0},
         )
-        self.assertEqual((out["lane"], out["score"], out["dropped"]), ("go", 0.9, []))
+        self.assertEqual((out["lane"], out["score"], out["dropped"]), ("go", 9.0, []))
+        # A lane with no quota reading at all is not dropped — it is simply last.
+        out = route(
+            task(category="independent_review", lanes=["go", "kimi"]),
+            lanes,
+            ready,
+            0,
+            0,
+            quota={"kimi": 4.0},
+        )
+        self.assertEqual((out["lane"], out["score"]), ("kimi", 4.0))
 
     def test_a_plan_task_prefers_the_lane_marked_tier_plan(self):
         lanes = {
@@ -262,7 +257,7 @@ class TierTests(unittest.TestCase):
             "go": dict(LANES["go"], categories=["plan"], tier="build"),
         }
         ready = {k: {"state": "ready"} for k in lanes}
-        out = route(task(category="plan", lanes=["sota", "go"]), lanes, ready, [], [], 0, 0)
+        out = route(task(category="plan", lanes=["sota", "go"]), lanes, ready, 0, 0)
         self.assertEqual(
             (out["lane"], out["tier"], [d["reason"] for d in out["dropped"]]),
             ("sota", "plan", ["tier_mismatch"]),
@@ -290,7 +285,7 @@ class TierTests(unittest.TestCase):
             "zcode": LANES["zcode"],  # absent tier → build
         }
         ready = {k: {"state": "ready"} for k in lanes}
-        out = route(task(lanes=["go", "zcode"]), lanes, ready, [], [], 0, 0)
+        out = route(task(lanes=["go", "zcode"]), lanes, ready, 0, 0)
         self.assertEqual(
             (out["lane"], out["candidates"]), ("zcode", [{"lane": "zcode", "cap": 16000}])
         )
@@ -303,7 +298,7 @@ class TierTests(unittest.TestCase):
         lanes = {"go": LANES["go"], "kimi": LANES["kimi"]}
         ready = {k: {"state": "ready"} for k in lanes}
         out = route(
-            task(category="independent_review", lanes=["go", "kimi"]), lanes, ready, [], [], 0, 0
+            task(category="independent_review", lanes=["go", "kimi"]), lanes, ready, 0, 0
         )
         self.assertEqual(
             (out["lane"], out["dropped"], out["tier"]),
@@ -311,76 +306,40 @@ class TierTests(unittest.TestCase):
         )
 
 
-class BlendTests(unittest.TestCase):
-    SCORECARD = [
-        {
-            "family": "glm",
-            "model": "glm-5.3-flash",
-            "category": "independent_review",
-            "attempts": 8,
-            "accepted": 7,
-        },
-        {
-            "family": "kimi",
-            "model": "kimi-k3",
-            "category": "independent_review",
-            "attempts": 4,
-            "accepted": 4,
-        },
-    ]
+class QuotaSelectionTests(unittest.TestCase):
+    """B4: among lanes select_lane's own constraints leave standing, quota decides."""
 
-    def test_the_reshaped_row_scores_the_blend_exactly(self):
-        # 0.5 * 8/10 + 0.5 * 3/4 = 31/40: attempts 38, accepted 30.
-        row = blended_row(
-            LANES["go"],
-            "independent_review",
-            self.SCORECARD,
-            [{"family": "glm", "model": "glm-5.3-flash", "cases": 4, "accepted": 3}],
-        )
-        self.assertEqual((row["attempts"], row["accepted"]), (38, 30))
-        self.assertEqual((row["accepted"] + 1) / (row["attempts"] + 2), 0.775)
-
-    def test_no_calibration_keeps_the_original_row(self):
-        row = blended_row(LANES["go"], "independent_review", self.SCORECARD, [])
-        self.assertEqual((row["attempts"], row["accepted"]), (8, 7))
-        self.assertIsNone(blended_row(LANES["kimi"], "independent_review", [], []))
-
-    def test_calibration_without_a_scorecard_row_blends_with_the_default_half(self):
-        row = blended_row(
-            LANES["kimi"],
-            "independent_review",
-            [],
-            [{"family": "kimi", "model": "kimi-k3", "cases": 2, "accepted": 1}],
-        )
-        self.assertEqual((row["attempts"], row["accepted"]), (0, 0))  # 1/2 * 1/2 + 1/2 * 1/2
-
-    def test_a_strong_record_blends_above_its_acceptance(self):
-        # kimi's Laplace is 5/6; a perfect calibration run lifts the blend to 11/12.
-        row = blended_row(
-            LANES["kimi"],
-            "independent_review",
-            self.SCORECARD,
-            [{"family": "kimi", "model": "kimi-k3", "cases": 6, "accepted": 6}],
-        )
-        self.assertEqual((row["accepted"] + 1) / (row["attempts"] + 2), 11 / 12)
-
-    def test_recall_steers_selection(self):
+    def test_quota_steers_selection(self):
         lanes = {
             "go": dict(LANES["go"], categories=["pure_function", "independent_review"]),
             "kimi": LANES["kimi"],
         }
         ready = {"go": READY["go"], "kimi": READY["kimi"]}
         task_dict = task(category="independent_review", lanes=["go", "kimi"])
-        # kimi's plain acceptance (5/6) beats go's default 1/2...
-        self.assertEqual(route(task_dict, lanes, ready, self.SCORECARD, [], 0, 0)["lane"], "kimi")
-        calibration = [
-            {"family": "glm", "model": "glm-5.3-flash", "cases": 4, "accepted": 4},
-            {"family": "kimi", "model": "kimi-k3", "cases": 4, "accepted": 0},
-        ]
-        out = route(task_dict, lanes, ready, self.SCORECARD, calibration, 0, 0)
-        # ... but a perfect calibration record lifts go to 9/10 (0.5 * 8/10 + 0.5 * 1)
-        # while kimi's empty one drags it to 5/12.
-        self.assertEqual((out["lane"], out["score"]), ("go", 0.9))
+        # kimi has more remaining quota...
+        out = route(task_dict, lanes, ready, 0, 0, quota={"go": 2.0, "kimi": 9.0})
+        self.assertEqual((out["lane"], out["score"]), ("kimi", 9.0))
+        # ... but once go's account has more headroom, go wins instead.
+        out = route(task_dict, lanes, ready, 0, 0, quota={"go": 20.0, "kimi": 9.0})
+        self.assertEqual((out["lane"], out["score"]), ("go", 20.0))
+
+    def test_dry_run_never_says_explore_or_value(self):
+        # B4's measure: no bandit vocabulary anywhere in what a dry run explains.
+        lanes = {
+            "go": dict(LANES["go"], categories=["pure_function", "independent_review"]),
+            "kimi": LANES["kimi"],
+        }
+        ready = {"go": READY["go"], "kimi": READY["kimi"]}
+        task_dict = task(category="independent_review", lanes=["go", "kimi"])
+        out = route(task_dict, lanes, ready, 0, 0, quota={"go": 2.0, "kimi": 9.0})
+        blob = json.dumps(out)
+        self.assertNotIn("explore", blob)
+        self.assertNotIn("value", blob)
+        self.assertIn("quota_rows", out)
+        self.assertEqual(
+            sorted((r["lane"], r["quota"]) for r in out["quota_rows"]),
+            [("go", 2.0), ("kimi", 9.0)],
+        )
 
 
 def test_the_tick_reports_dropped_lanes(request):
@@ -496,7 +455,7 @@ class LanePolicyTests(unittest.TestCase):
             "zcode": LANES["zcode"],  # untagged: unknown satisfies nothing
         }
         ready = {k: {"state": "ready"} for k in lanes}
-        out = route(task(require_lane_meta=self.REQUIRE), lanes, ready, [], [], 0, 0)
+        out = route(task(require_lane_meta=self.REQUIRE), lanes, ready, 0, 0)
         self.assertEqual((out["lane"], out["candidates"]), ("go", [{"lane": "go", "cap": 16000}]))
         # The untagged lane's drop row names the first key it fails.
         self.assertEqual(
@@ -516,8 +475,6 @@ class LanePolicyTests(unittest.TestCase):
             task(require_lane_meta=self.REQUIRE),
             lanes,
             {k: {"state": "ready"} for k in lanes},
-            [],
-            [],
             0,
             0,
         )
@@ -530,8 +487,6 @@ class LanePolicyTests(unittest.TestCase):
             task(require_lane_meta=self.REQUIRE),
             lanes,
             {k: {"state": "ready"} for k in lanes},
-            [],
-            [],
             0,
             0,
         )
@@ -541,7 +496,7 @@ class LanePolicyTests(unittest.TestCase):
     def test_no_lane_satisfying_the_requirement_refuses_the_task(self):
         # The policy gate can empty the offer where the tier one never does: a board that
         # must not use a lane refuses the task instead of using the lane.
-        out = route(task(require_lane_meta=self.REQUIRE), LANES, READY, [], [], 0, 0)
+        out = route(task(require_lane_meta=self.REQUIRE), LANES, READY, 0, 0)
         self.assertEqual(
             (out["lane"], out["score"], out["reason"], out["candidates"]),
             (None, None, "lane_policy", []),
@@ -556,8 +511,6 @@ class LanePolicyTests(unittest.TestCase):
             task(lanes=["go"], require_lane_meta=self.REQUIRE),
             lanes,
             {k: {"state": "ready"} for k in lanes},
-            [],
-            [],
             0,
             0,
         )
@@ -584,8 +537,6 @@ class LanePolicyTests(unittest.TestCase):
             ),
             lanes,
             ready,
-            [],
-            [],
             0,
             BIG_PACKET,
         )
@@ -605,15 +556,15 @@ class LanePolicyTests(unittest.TestCase):
             "zcode": dict(LANES["zcode"], lane_meta={"residency": "eu", "retention": "zero"}),
         }
         ready = {k: {"state": "ready"} for k in lanes}
-        out = route(task(), lanes, ready, [], [], 0, 0)
+        out = route(task(), lanes, ready, 0, 0)
         self.assertEqual((out["lane"], out["dropped"]), ("go", []))
         self.assertEqual([c["lane"] for c in out["candidates"]], ["go", "zcode"])
 
     def test_a_malformed_requirement_refuses_instead_of_routing(self):
         with self.assertRaises(ValueError):
-            route(task(require_lane_meta={"retention": ["unknown"]}), LANES, READY, [], [], 0, 0)
+            route(task(require_lane_meta={"retention": ["unknown"]}), LANES, READY, 0, 0)
         with self.assertRaises(ValueError):
-            route(task(require_lane_meta={"hosting": ["us"]}), LANES, READY, [], [], 0, 0)
+            route(task(require_lane_meta={"hosting": ["us"]}), LANES, READY, 0, 0)
 
 
 def test_the_tick_applies_the_board_requirement_from_the_sidecar(request):
