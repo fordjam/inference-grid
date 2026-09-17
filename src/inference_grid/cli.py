@@ -203,6 +203,7 @@ def main():
             "boards",
             "evaluation",
             "report",
+            "state-migrate",
             "tick",
             "watch",
             "verify-merge",
@@ -212,6 +213,12 @@ def main():
     parser.add_argument("--json", help="JSON argument file; never store credentials here")
     parser.add_argument(
         "--week", help="report only: an ISO week (2026-W38); default the last 7 days"
+    )
+    parser.add_argument("--repo", help="state-migrate only: the product repo's path")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="state-migrate only: required tonight (B6) — no mover exists yet",
     )
     args = parser.parse_args()
     if args.command == "doctor":
@@ -266,6 +273,15 @@ def main():
         report = verify_merge_cli(json.load(open(args.json)))
         print(json.dumps(report, indent=2))
         raise SystemExit(0 if report["mergeable"] and all(g["ok"] for g in report["gates"]) else 1)
+    if args.command == "state-migrate":
+        # No ledger: a read-only plan over the repo's own filesystem.
+        from .state_migrate import state_migrate
+
+        if not args.repo:
+            parser.error("state-migrate requires --repo")
+        plan = state_migrate(args.repo, dry_run=args.dry_run)
+        print(json.dumps(plan, indent=2))
+        return
     ledger = Ledger(args.database)
     data = json.load(open(args.json)) if args.json else {}
     if args.command == "evaluation":
