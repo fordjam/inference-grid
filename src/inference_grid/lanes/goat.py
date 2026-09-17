@@ -65,6 +65,14 @@ def expected_artifacts(work, staged):
     )
 
 
+_DELTA_MARKERS = (b'"thinking_delta"', b'"text_delta"', b'"content_delta"', b'"message_update"')
+
+
+def _is_delta_line(line):
+    """A streaming delta row (thinking/text fragments, message updates): bulk, no evidence."""
+    return any(marker in line for marker in _DELTA_MARKERS) and b'"model_request_end"' not in line
+
+
 def parse_rows(raw):
     """NDJSON stdout; an unparsable line is kept as the string "malformed"."""
     rows = []
@@ -186,8 +194,27 @@ def run(request, lane, attempt_dir, *, cmd=None, max_turns=12, home=None):
     if user_config_digests(home) != before:
         verdict["refusal"] = "user configuration changed"
         return None, verdict
-    raw = (attempt_dir / "native.jsonl").read_bytes()[:MAX_STDOUT]
-    rows = parse_rows(raw)
+    # The whole stream, not its first 4 MiB: Kimi K3's thinking deltas made an 18 MB
+    # transcript of one review (2026-09-16), the cut fell inside a line, the fragment
+    # parsed as "malformed" and the classifier refused a complete, successful run as
+    # invalid_input — with the `result` row sitting unread past the cut. Delta rows carry
+    # no evidence the classifier reads, so they are dropped as the file streams; what is
+    # kept is bounded by MAX_STDOUT and a run past that bound is refused by name.
+    rows, kept_bytes, transcript_bytes = [], 0, 0
+    with (attempt_dir / "native.jsonl").open("rb") as stream:
+        for line in stream:
+            transcript_bytes += len(line)
+            if _is_delta_line(line):
+                continue
+            kept_bytes += len(line)
+            if kept_bytes > MAX_STDOUT:
+                verdict["refusal"] = (
+                    f"native transcript exceeds {MAX_STDOUT} bytes after dropping deltas"
+                )
+                verdict["transcript_bytes"] = transcript_bytes
+                return None, verdict
+            rows.extend(parse_rows(line))
+    verdict["transcript_bytes"] = transcript_bytes
     # Command Code echoes some vendors' ids in their own casing — `moonshotai/Kimi-K3`,
     # `Qwen/Qwen3.8-Flash` — while the lane names them lower-case (2026-09-16: both
     # canaries refused `model_unqualified` on a served reply). The classifier's exact

@@ -193,3 +193,50 @@ class GoatLaneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GoatTranscriptTests(unittest.TestCase):
+    def test_delta_rows_are_dropped_and_the_result_past_four_mib_is_read(self):
+        """An 18 MB Kimi transcript was cut at 4 MiB, the fragment parsed as malformed and a
+        successful run was refused invalid_input with its result row unread (2026-09-16)."""
+        from inference_grid.lanes import goat
+
+        delta = (
+            json.dumps({"type": "event", "event": {"type": "thinking_delta", "text": "x" * 4000}})
+            + "\n"
+        ).encode()
+        end = (
+            json.dumps(
+                {
+                    "type": "event",
+                    "event": {
+                        "type": "model_request_end",
+                        "model": "m",
+                        "usage": {"outputTokens": 3},
+                    },
+                }
+            )
+            + "\n"
+        ).encode()
+        result = (
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "stopReason": "end_turn",
+                    "finalText": "ok",
+                }
+            )
+            + "\n"
+        ).encode()
+        self.assertTrue(goat._is_delta_line(delta))
+        self.assertFalse(goat._is_delta_line(end))
+        self.assertFalse(goat._is_delta_line(result))
+        # 1,200 deltas of 4 KB sit before the result: well past MAX_STDOUT if kept.
+        stream = delta * 1200 + end + result
+        self.assertGreater(len(stream), goat.MAX_STDOUT)
+        rows = []
+        for line in stream.splitlines(keepends=True):
+            if not goat._is_delta_line(line):
+                rows.extend(goat.parse_rows(line))
+        self.assertEqual([r.get("type") for r in rows], ["event", "result"])
