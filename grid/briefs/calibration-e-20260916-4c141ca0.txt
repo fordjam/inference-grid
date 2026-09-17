@@ -1,1 +1,0 @@
-Calibration run e-20260916-4c141ca0 for lanes goat-longcat. This is a code node: it runs corpus case inference-grid-packet-l3-3 on lane goat-longcat — authoring the case's own board task, scoring the settled attempt through board/calibration/score.py::score, recording an eval:<kind> outcome and settling itself passed. No lane runs it.

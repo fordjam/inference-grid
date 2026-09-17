@@ -1,1 +1,0 @@
-Calibration run e-20260916-9c8f7cc1 for lanes go-qwen. This is a code node: it runs corpus case inference-grid-review-board-runner-4 on lane go-qwen — authoring the case's own board task, scoring the settled attempt through board/calibration/score.py::score, recording an eval:<kind> outcome and settling itself passed. No lane runs it.
