@@ -254,7 +254,8 @@ Providers without a usage API (the Z.ai Coding Plan) are admitted from an operat
 The route ranks every candidate that passes the hard constraints — category, the
 cross-family rule for reviews, tier/lane policy, readiness, window — by remaining
 window quota: the tightest of the winning lane's account's configured windows
-(five_hour/weekly/monthly), the same reading the capacity dashboard's headline uses.
+(five_hour/weekly/monthly) — the minimum absolute remaining units, not the capacity
+dashboard headline's percentage-used reading of the same "tightest window" idea.
 No learned score. The catalogue module, the benchmark-prior/Beta-posterior quality
 estimate, the Thompson-draw exploration and the quality-per-dollar value ranking this
 section used to describe are all deleted — `board/priors.py`, `lanes/value.py`,

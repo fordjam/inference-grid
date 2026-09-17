@@ -71,8 +71,51 @@ def test_lanes_map_labels_rows_by_lane_id_when_supplied(ledger):
     now = time.time()
     aid, gen = submit_and_claim(ledger, "t1")
     finish(ledger, aid, gen)
-    out = report(ledger, lanes={"go": {"family": "fam", "model": "m1"}}, now=now + 10)
+    out = report(
+        ledger,
+        lanes={"go": {"family": "fam", "model": "m1"}},
+        accounts_by_lane={"go": "acct"},
+        now=now + 10,
+    )
     assert out["lanes"] == [{"lane": "go", "completed": 1, "failed": 0, "abandoned": 0}]
+
+
+def test_lanes_without_a_resolvable_account_fall_back_to_family_model(ledger):
+    # No accounts_by_lane entry for "go": the lane can't be disambiguated from another
+    # lane on the same model, so the row is labeled family/model instead of merging
+    # silently into whatever lane_id happens to match.
+    now = time.time()
+    aid, gen = submit_and_claim(ledger, "t1")
+    finish(ledger, aid, gen)
+    out = report(ledger, lanes={"go": {"family": "fam", "model": "m1"}}, now=now + 10)
+    assert out["lanes"] == [{"lane": "fam/m1", "completed": 1, "failed": 0, "abandoned": 0}]
+
+
+def test_two_lanes_on_the_same_model_do_not_merge(ledger):
+    # Exactly the shape B4's quota tiebreak exists for: one model, two accounts. Without
+    # per-account disambiguation these would collapse into a single "fam/m1" row.
+    ledger.configure_account(
+        "acct2", 1, {"five_hour": 5, "weekly": 5}, time.time() + 600, ["m1"]
+    )
+    now = time.time()
+    aid1, gen1 = submit_and_claim(ledger, "t1", account="acct")
+    finish(ledger, aid1, gen1)
+    aid2, gen2 = submit_and_claim(ledger, "t2", account="acct2")
+    finish(ledger, aid2, gen2)
+
+    out = report(
+        ledger,
+        lanes={
+            "go": {"family": "fam", "model": "m1"},
+            "go-2": {"family": "fam", "model": "m1"},
+        },
+        accounts_by_lane={"go": "acct", "go-2": "acct2"},
+        now=now + 10,
+    )
+    assert sorted(out["lanes"], key=lambda e: e["lane"]) == [
+        {"lane": "go", "completed": 1, "failed": 0, "abandoned": 0},
+        {"lane": "go-2", "completed": 1, "failed": 0, "abandoned": 0},
+    ]
 
 
 def test_reviews_performed_vs_rejected(ledger):
@@ -133,6 +176,27 @@ def test_cost_is_price_over_landed_packets_and_none_without_a_price(ledger):
     assert out["cost_per_landed_packet_usd"] == {"acct": 7.0, "unused-acct": None}
 
 
+def test_prices_keyed_by_alias_resolve_to_the_primary_account(ledger):
+    # attempts.account is always the primary id (ledger.claim() resolves the alias
+    # before recording it); an operator's prices map, like accounts_by_lane, is
+    # naturally keyed however they think of the account — alias included.
+    ledger.configure_account(
+        "acct3",
+        1,
+        {"five_hour": 5, "weekly": 5},
+        time.time() + 600,
+        ["m1"],
+        alias_names=["acct3-alias"],
+    )
+    now = time.time()
+    aid, gen = submit_and_claim(ledger, "t1", account="acct3-alias")
+    receipt = finish(ledger, aid, gen)
+    ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+
+    out = report(ledger, prices={"acct3-alias": 10.0}, now=now + 10)
+    assert out["cost_per_landed_packet_usd"] == {"acct3-alias": 10.0}
+
+
 def test_outcomes_outside_the_window_are_not_counted(ledger):
     now = time.time()
     aid, gen = submit_and_claim(ledger, "t1")
@@ -149,3 +213,12 @@ def test_week_bounds_reads_an_iso_week():
     import datetime
 
     assert datetime.datetime.fromtimestamp(start, datetime.timezone.utc).weekday() == 0
+
+
+def test_week_bounds_refuses_a_malformed_week(ledger):
+    with pytest.raises(ValueError):
+        week_bounds("", now=0)
+    with pytest.raises(ValueError):
+        week_bounds("not-a-week", now=0)
+    with pytest.raises(ValueError):
+        report(ledger, week="")

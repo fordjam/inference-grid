@@ -37,9 +37,11 @@ with the drop report:
   sharing the task's `author_family` (the cross-family rule: a review may not be graded
   by its own author) or with a closed campaign window is not offered at all — this is
   select_lane's own hard-constraint logic, kept unmodified in lanes/select.py. Of what
-  remains, `quota` (lane id -> that lane's account's tightest remaining window, the same
-  reading the capacity dashboard's headline uses) picks the lane with the most headroom;
-  a lane the caller has no quota reading for is last, not dropped. `score` in the answer
+  remains, `quota` (lane id -> that lane's account's tightest remaining window: the
+  minimum of its configured windows' absolute remaining units, not the dashboard's
+  percentage-used headline — same "tightest window" idea, different unit) picks the
+  lane with the most headroom; a lane the caller has no quota reading for is last, not
+  dropped. `score` in the answer
   is the winning lane's quota reading, so a dry run explains every choice by tier and
   quota alone — never a learned quality number.
 """
@@ -276,7 +278,12 @@ def route(task, lanes, readiness, now, inputs_bytes, quota=None):
         }
     quota = quota or {}
     quota_rows = [{"lane": lid, "quota": quota.get(lid)} for lid in choice["candidates"]]
-    winner = sorted(choice["candidates"], key=lambda lid: (-(quota.get(lid) or 0.0), lid))[0]
+    # A lane with no reading at all sorts last, never tied with (and never preferred over)
+    # a lane that is genuinely down to 0 remaining — `or 0.0` would make those the same.
+    winner = sorted(
+        choice["candidates"],
+        key=lambda lid: (quota.get(lid) is None, -(quota.get(lid) or 0.0), lid),
+    )[0]
     return {
         "lane": winner,
         "score": quota.get(winner),

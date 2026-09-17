@@ -230,8 +230,7 @@ def lane_view(lanes, now):
             # config's fixed key set cannot, and route falls back to the go.py policy.
             "max_tokens": lane.get("max_tokens"),
             "context": lane.get("context"),
-            # O2 prices a lane from the catalogue by its plan (provider) and expects the
-            # tokens of its kind (an agent loop is not one call).
+            # Generic lane identity a caller may need beyond selection itself.
             "provider": lane.get("provider"),
             "kind": lane.get("kind"),
         }
@@ -471,10 +470,12 @@ def quota_fields(choice, plan=False):
 
 
 def quota_context(ledger, accounts_by_lane):
-    """Each lane's account's remaining quota, the tightest of its configured windows —
-    B4's routing tiebreak, the same reading the capacity dashboard's headline uses
-    (min remaining across five_hour/weekly/monthly). A lane whose account is unknown or
-    unconfigured is simply absent — route treats a missing reading as last, not dropped.
+    """Each lane's account's remaining quota: the minimum absolute remaining units across
+    its configured windows (five_hour/weekly/monthly) — B4's routing tiebreak. The
+    capacity dashboard's headline picks the same "tightest window" but as a percentage
+    used, not this absolute unit count; the two are related, not the same number. A lane
+    whose account is unknown or unconfigured is simply absent — route treats a missing
+    reading as last, not dropped.
     """
     if not accounts_by_lane:
         return {}
@@ -1898,6 +1899,7 @@ def tick(
                 "candidates": choice["candidates"],
                 "dropped": choice["dropped"],
                 "score": choice["score"],
+                "tier": choice["tier"],
             }
             return
         if task["category"] == "packet":

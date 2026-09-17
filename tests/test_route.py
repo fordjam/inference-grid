@@ -323,6 +323,22 @@ class QuotaSelectionTests(unittest.TestCase):
         out = route(task_dict, lanes, ready, 0, 0, quota={"go": 20.0, "kimi": 9.0})
         self.assertEqual((out["lane"], out["score"]), ("go", 20.0))
 
+    def test_a_lane_truly_at_zero_never_ties_with_an_unread_lane(self):
+        # `quota.get(lid) or 0.0` would have made these indistinguishable — a lane with a
+        # real (even if exhausted) reading must rank ahead of one nobody has checked at
+        # all, not tie with it and fall to an arbitrary lane-id break.
+        lanes = {
+            "go": dict(LANES["go"], categories=["pure_function", "independent_review"]),
+            "kimi": LANES["kimi"],
+        }
+        ready = {"go": READY["go"], "kimi": READY["kimi"]}
+        task_dict = task(category="independent_review", lanes=["go", "kimi"])
+        out = route(task_dict, lanes, ready, 0, 0, quota={"go": 0.0})
+        self.assertEqual((out["lane"], out["score"]), ("go", 0.0))
+        # With go unread too, both are last-tier alike and lane id breaks the tie.
+        out = route(task_dict, lanes, ready, 0, 0, quota={})
+        self.assertEqual((out["lane"], out["score"]), ("go", None))
+
     def test_dry_run_never_says_explore_or_value(self):
         # B4's measure: no bandit vocabulary anywhere in what a dry run explains.
         lanes = {

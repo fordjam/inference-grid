@@ -372,10 +372,12 @@ def digest(ledger, boards_dir, since=None):
     return render(ledger, boards_dir, now=since)
 
 
-def report_command(ledger, week=None, lanes=None, prices=None):
+def report_command(ledger, week=None, lanes=None, accounts_by_lane=None, prices=None):
     from .report import report as render
 
-    return render(ledger, week=week, lanes=lanes, prices=prices)
+    return render(
+        ledger, week=week, lanes=lanes, accounts_by_lane=accounts_by_lane, prices=prices
+    )
 
 
 def boards_command(
