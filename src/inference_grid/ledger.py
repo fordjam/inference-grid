@@ -881,3 +881,18 @@ class Ledger:
     def status(self):
         with self.engine.connect() as con:
             return [dict(r) for r in con.execute(select(attempts)).mappings()]
+
+
+def hold_abandoned(ledger, before):
+    """Operator-selected age triggers a hold, never permission to redispatch."""
+    with ledger.engine.connect() as con:
+        ids = list(
+            con.execute(
+                select(attempts.c.id).where(
+                    attempts.c.state == "dispatching", attempts.c.updated < before
+                )
+            ).scalars()
+        )
+    for aid in ids:
+        ledger.hold(aid, "worker recovery requires native reconciliation")
+    return len(ids)

@@ -5,8 +5,7 @@ import os
 import time
 import uuid
 
-from inference_grid.ledger import Ledger, Refused, digest
-from inference_grid.queue import hold_abandoned
+from inference_grid.ledger import Ledger, Refused, digest, hold_abandoned
 
 
 def competing_claim(url, task, account, ready, start, results):

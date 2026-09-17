@@ -5,8 +5,7 @@ import os
 from pathlib import Path
 
 from .collector import refresh_collect
-from .ledger import Ledger
-from .queue import hold_abandoned, publish
+from .ledger import Ledger, hold_abandoned
 from .scheduler import tick
 from .worker import execute
 
@@ -188,7 +187,6 @@ def main():
             "claim",
             "status",
             "run",
-            "publish",
             "hold-abandoned",
             "accept",
             "resolve",
@@ -212,7 +210,6 @@ def main():
             "calibrate",
             "calibration-score",
             "evals",
-            "tick-all",
             "digest",
             "boards",
             "evaluation",
@@ -308,7 +305,6 @@ def main():
         "claim": ledger.claim,
         "status": ledger.status,
         "run": lambda **kw: execute(ledger, **kw),
-        "publish": lambda: publish(ledger),
         "hold-abandoned": lambda **kw: hold_abandoned(ledger, **kw),
         "accept": ledger.accept,
         "resolve": ledger.resolve,
@@ -325,7 +321,6 @@ def main():
         "board-status": lambda **kw: board_status(ledger, **kw),
         "lane-init": lambda **kw: lane_init(**kw),
         "board-init": lambda **kw: board_init(**kw),
-        "tick-all": lambda **kw: tick_all(ledger, **kw),
         "digest": lambda **kw: digest(ledger, **kw),
         "boards": lambda **kw: boards_command(ledger, **kw),
         "watch": lambda **kw: watch(kw),
@@ -415,12 +410,6 @@ def board_init(project_root, board_name=None, allowed_prefixes=None, tier="T0"):
     from .board.new import board_init as init
 
     return init(project_root, board_name=board_name, allowed_prefixes=allowed_prefixes, tier=tier)
-
-
-def tick_all(ledger, boards_dir, log_path=None, prepare=None, dry_run=False):
-    from .tick_all import tick_all as run_all
-
-    return run_all(ledger, boards_dir, log_path=log_path, prepare=prepare, dry_run=dry_run)
 
 
 def catalogue_record(ledger, provider, path=None, rows=None, observed_at=None):

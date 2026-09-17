@@ -54,7 +54,7 @@ Durable canonical-account cooldowns now preserve maximum deadlines and gate infe
 
 ## 0.1.0a3 progress
 
-Added a bounded scheduler/publication supervisor with atomic heartbeat, interruptible backoff and OS-service templates. Added durable single-flight collection admission that consults usage cooldowns and refuses unsafe takeover. These advance CLOUD-01/02; provider observation normalization/publication, unified installation and orphaned-claim recovery remain open. See SERVICE.md and COLLECTION.md.
+Added a bounded scheduler/publication supervisor with atomic heartbeat, interruptible backoff and OS-service templates (since replaced by the board runner's own heartbeat and dead-man loop). Added durable single-flight collection admission that consults usage cooldowns and refuses unsafe takeover. These advance CLOUD-01/02; provider observation normalization/publication, unified installation and orphaned-claim recovery remain open. See COLLECTION.md.
 
 ## 0.1.0a4 progress
 

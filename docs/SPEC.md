@@ -8,7 +8,7 @@ The project must be independent of any finance application. Project adapters pro
 
 ## Target decision
 
-Use PostgreSQL as the authoritative policy/attempt ledger, RabbitMQ as durable transport, and Celery for bounded worker execution. Build the small policy layer specific to account quotas, aliases, output validation and independent review. Do not fork an entire coding-agent platform for scheduling. Add an HTTP inference proxy such as Plano only if measured routing savings justify it; it is not the task ledger or recovery coordinator.
+Use a SQL ledger (SQLite locally; any SQLAlchemy-supported database in production) as the authoritative policy/attempt ledger, with the board runner dispatching directly to a bounded worker process — no message broker. Build the small policy layer specific to account quotas, aliases, output validation and independent review. Do not fork an entire coding-agent platform for scheduling. Add an HTTP inference proxy such as Plano only if measured routing savings justify it; it is not the task ledger or recovery coordinator.
 
 This decision follows negative-control evaluations of competing claim/dispatch behavior and ambiguous session recovery. The generic repository contains its own repeatable tests, not private pilot records or vendored upstream source.
 
@@ -45,7 +45,7 @@ The [cloud-first roadmap](ROADMAP.md) is the prioritized work sequence. Supervis
 | Stage | Deliverable | Exit evidence |
 | --- | --- | --- |
 | 0.1, implemented | Generic ledger, deterministic router, transactional outbox, bounded adapter worker, receipts, local CLI, synthetic demo | Local adverse-path tests and receipt rejection tests pass |
-| 0.2 | PostgreSQL/RabbitMQ operational qualification | Concurrent multi-process claims, broker restart, publisher crash, worker kill and database outage with no unauthorized repeat dispatch |
+| 0.2, superseded | Multi-process operational qualification (the RabbitMQ/Celery path evaluated here was later deleted in favor of the board runner dispatching directly) | Concurrent multi-process claims, worker kill and database outage with no unauthorized repeat dispatch |
 | 0.3 | Go, Cline and Command Code adapter packages | One bounded native job per provider, exact model/finish evidence, known quota provenance, explicit token cap, no paid fallback, locked-screen operation where supported |
 | 0.4 | Reconciliation and autonomous service | Native terminal resolution releases only justified reservations; retry budget is shared; auth/429 pause lane; versioned snapshots; dependency-aware tasks; durable fairness and backpressure |
 | 0.5 | Review and project integration | Independent reviewer receipt and executable checks bind exact artifact; immutable result store; project board import/export; no automatic merge/deploy without policy |
@@ -53,7 +53,7 @@ The [cloud-first roadmap](ROADMAP.md) is the prioritized work sequence. Supervis
 
 ## Required next evaluations
 
-Run real PostgreSQL and RabbitMQ rather than treating SQLite serialization as proof. Kill a worker after dispatch intent and verify external adapter call count does not increase after broker redelivery. Crash publisher after broker confirmation and before outbox commit. Retry connection refusal only with confirmed absence and budget. Test reset rollover, late quota snapshots, native completion arriving after hold, truncated output, silent model fallback, symlink traversal, same-account aliases and two projects competing fairly.
+Run against a production-shaped database rather than treating SQLite serialization as proof. Kill a worker after dispatch intent and verify external adapter call count does not increase after the runner retries admission. Retry connection refusal only with confirmed absence and budget. Test reset rollover, late quota snapshots, native completion arriving after hold, truncated output, silent model fallback, symlink traversal, same-account aliases and two projects competing fairly.
 
 Track accepted work, failure/rework rate, coordinator tokens, subscription consumption in native units, queue age, held age, review age and fallback count. Persist task-session affinity; don’t reclassify every agent turn. Start with deterministic category routing and measured provider success rates. Add learned routing only after an evaluation dataset demonstrates net improvement including cache loss and repair cost.
 

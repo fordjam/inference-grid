@@ -40,7 +40,7 @@ def digest(ledger, boards_dir, now=None):
     now = time.time() if now is None else now
     from .board.policy import owner_only_prefix
     from .cli import board_status
-    from .tick_all import ordered_configs
+    from .board_configs import ordered_configs
 
     lines = [
         "# Operator digest",

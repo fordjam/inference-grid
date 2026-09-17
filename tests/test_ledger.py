@@ -9,8 +9,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select, update
 
-from inference_grid.ledger import Ledger, Refused, accounts, digest, outbox
-from inference_grid.queue import hold_abandoned, publish
+from inference_grid.ledger import Ledger, Refused, accounts, digest, hold_abandoned
 from inference_grid.receipts import validate_receipt
 from inference_grid.worker import execute
 
@@ -120,23 +119,6 @@ def test_expired_before_start(grid):
         con.execute(update(accounts).where(accounts.c.id == grid[1]).values(expires=0))
     assert grid[0].start(aid, gen) is None
     assert next(r for r in grid[0].status() if r["id"] == aid)["state"] == "held"
-
-
-def test_outbox_survives_publish_failure_and_duplicate_delivery(grid):
-    aid, gen = claim(grid, submit(grid))
-
-    def fail(*args):
-        raise ConnectionError("broker unavailable")
-
-    with pytest.raises(ConnectionError):
-        publish(grid[0], fail)
-    with grid[0].engine.connect() as con:
-        assert con.execute(select(outbox.c.sent).where(outbox.c.attempt == aid)).scalar() is None
-    delivered = []
-    publish(grid[0], lambda a, g: delivered.append((a, g)))
-    assert (aid, gen) in delivered
-    assert execute(grid[0], aid, gen) == "completed"
-    assert execute(grid[0], aid, gen) == "duplicate_or_stale"
 
 
 def test_complete_is_not_accepted(grid):

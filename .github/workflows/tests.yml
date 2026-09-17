@@ -6,19 +6,6 @@ jobs:
   evaluate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: grid
-          POSTGRES_PASSWORD: ci-only-password
-          POSTGRES_DB: grid
-        ports: ["5432:5432"]
-        options: --health-cmd "pg_isready -U grid" --health-interval 5s --health-timeout 3s --health-retries 10
-      rabbitmq:
-        image: rabbitmq:4
-        ports: ["5672:5672"]
-        options: --health-cmd "rabbitmq-diagnostics -q ping" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,18 +31,3 @@ jobs:
       - name: Capacity deployment build
         run: docker build -t grid-capacity-test deployments/capacity
       - run: pytest -q
-      - run: pytest -q
-        env:
-          GRID_TEST_DATABASE_URL: postgresql+psycopg://grid:ci-only-password@localhost:5432/grid
-      - run: |
-          python - <<'PYCODE'
-          import psycopg
-          with psycopg.connect("postgresql://grid:ci-only-password@localhost:5432/grid", autocommit=True) as con:
-              con.execute("CREATE DATABASE grid_broker")
-          PYCODE
-      - run: pytest -q tests/test_broker.py tests/test_broker_recovery.py
-        env:
-          GRID_RUN_BROKER_TEST: '1'
-          GRID_DATABASE_URL: postgresql+psycopg://grid:ci-only-password@localhost:5432/grid_broker
-          GRID_BROKER_URL: amqp://guest:guest@localhost:5672//
-          GRID_TEST_BROKER_RESTART: '["docker", "restart", "${{ job.services.rabbitmq.id }}"]'

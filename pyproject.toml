@@ -11,7 +11,7 @@ license-files = ["LICENSE"]
 classifiers = ["Development Status :: 3 - Alpha", "Programming Language :: Python :: 3.12", "Operating System :: POSIX"]
 description = "Subscription-aware durable admission for bounded inference jobs"
 requires-python = ">=3.12"
-dependencies = ["sqlalchemy>=2.0,<2.1", "psycopg[binary]>=3.2,<4", "celery>=5.6.3,<6"]
+dependencies = ["sqlalchemy>=2.0,<2.1", "psycopg[binary]>=3.2,<4"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<9", "build>=1.2"]
@@ -19,7 +19,6 @@ test = ["pytest>=8,<9", "build>=1.2"]
 [project.scripts]
 inference-grid = "inference_grid.cli:main"
 inference-grid-lane = "inference_grid.lanes.runner:main"
-inference-grid-service = "inference_grid.service:main"
 inference-grid-capacity = "inference_grid.capacity:main"
 
 [tool.pytest.ini_options]

@@ -41,7 +41,7 @@ from .lanes.runner import load_lanes
 from .ledger import ACTIVE, Ledger
 from .ledger import tasks as tasks_table
 from .operator_queue import EXCLUDED_REASON_WORDS, OPERATOR_REASON_WORDS
-from .tick_all import ordered_configs
+from .board_configs import ordered_configs
 
 MAX_BOARDS = 20
 MAX_ROWS = 200
