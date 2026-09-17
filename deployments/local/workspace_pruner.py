@@ -51,7 +51,12 @@ def resolved_workspaces(database_url: str) -> dict[str, float]:
     "Resolved" is anything outside ledger.ACTIVE: landed, superseded (a newer
     attempt exists for the same task -- still an ended attempt in its own row),
     failed, abandoned. An attempt still queued/dispatching/held is never a
-    candidate, even if its clone looks idle.
+    candidate, even if its clone looks idle -- and neither is a path an ACTIVE
+    row currently holds, even if an older, resolved row also named it: workspace
+    paths are reused (ledger.py refuses admission with "workspace busy" for
+    exactly this reason, and board/runner.py and board/integrate.py both share
+    one ~/.grid-workspaces/inbox/<project> worktree across tasks), so a path
+    that shows up as both resolved and active right now is in use.
     """
     engine = create_engine(database_url)
     try:
@@ -61,15 +66,19 @@ def resolved_workspaces(database_url: str) -> dict[str, float]:
             ).fetchall()
     finally:
         engine.dispose()
-    out: dict[str, float] = {}
+    active: set[str] = set()
+    resolved_at: dict[str, float] = {}
     for workspace, state, updated in rows:
-        if state in ACTIVE or not workspace:
+        if not workspace:
             continue
         resolved = str(Path(workspace).resolve())
+        if state in ACTIVE:
+            active.add(resolved)
+            continue
         # Multiple attempts can share a workspace path over its lifetime (retries);
         # keep the most recent resolution time, since that's when it last ended.
-        out[resolved] = max(out.get(resolved, 0.0), updated)
-    return out
+        resolved_at[resolved] = max(resolved_at.get(resolved, 0.0), updated)
+    return {path: at for path, at in resolved_at.items() if path not in active}
 
 
 def candidates(root: Path, resolved: dict[str, float]) -> list[tuple[Path, float]]:
@@ -97,13 +106,13 @@ def candidates(root: Path, resolved: dict[str, float]) -> list[tuple[Path, float
     return found
 
 
-def write_alarm(path: Path, total_bytes: int, cap_bytes: int) -> None:
+def write_alarm(path: Path, total_bytes: int, cap_bytes: int, alarm_bytes: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps({
         "written_at": time.strftime("%FT%TZ", time.gmtime()),
         "total_bytes": total_bytes,
-        "alarm_bytes": ALARM_BYTES,
+        "alarm_bytes": alarm_bytes,
         "cap_bytes": cap_bytes,
     }))
     os.replace(tmp, path)
@@ -131,7 +140,7 @@ def prune(
     }
     if total >= alarm_bytes:
         if not dry_run:
-            write_alarm(alarm_path, total, cap_bytes)
+            write_alarm(alarm_path, total, cap_bytes, alarm_bytes)
         report["alarm_written"] = True
     if total < cap_bytes:
         return report
@@ -144,11 +153,14 @@ def prune(
         size = directory_size(entry)
         if dry_run:
             report["would_delete"].append(str(entry))
+            remaining -= size
         else:
             shutil.rmtree(entry, ignore_errors=True)
+            if entry.exists():
+                continue  # permission error or similar: nothing freed, don't claim it was
             report["deleted"].append(str(entry))
             report["freed_bytes"] += size
-        remaining -= size
+            remaining -= size
     return report
 
 

@@ -52,14 +52,19 @@ DEFAULT_HEARTBEAT = Path.home() / ".local/share/inference-grid/heartbeat/tick-bo
 HEARTBEAT_INTERVAL = 300
 
 
-def write_heartbeat(path, boards=None, now=None, last_pass_at=None):
+def write_heartbeat(path, boards=None, now=None, last_pass_at=None, started_at=None):
     """One atomic heartbeat write: tmp file, then rename. Never raises past OSError.
 
     ``written_at`` proves only that the process is alive -- a board thread wedged
     inside an hours-long tick subprocess still lets the daemon beat on schedule.
     ``last_pass_at`` (when given) is the last time a full pass actually completed,
     which a wedged pass cannot fake; a consumer watching for a silently dead loop
-    should key off ``last_pass_at``, not ``written_at``.
+    should key off ``last_pass_at``, not ``written_at``. ``started_at`` (when given)
+    is when this process's very first beat landed: a consumer sees it on every beat
+    even before the first pass completes, so it can tell "alive, first pass still in
+    flight, within TICK_TIMEOUT of starting" from "alive, first pass wedged past
+    TICK_TIMEOUT" -- last_pass_at alone can't distinguish those before any pass has
+    ever completed.
     """
     path = Path(path)
     payload = {
@@ -70,6 +75,8 @@ def write_heartbeat(path, boards=None, now=None, last_pass_at=None):
         payload["boards"] = list(boards)
     if last_pass_at is not None:
         payload["last_pass_at"] = last_pass_at
+    if started_at is not None:
+        payload["started_at"] = started_at
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
@@ -85,23 +92,30 @@ def heartbeat_path(config):
     return Path(raw).expanduser() if isinstance(raw, str) else Path(raw)
 
 
-def start_heartbeat(config, interval=HEARTBEAT_INTERVAL, clock=time.time):
+def start_heartbeat(config, interval=HEARTBEAT_INTERVAL, clock=time.time, started_at=None):
     """Beat for as long as this process lives; returns ``(stop, mark_pass)``.
 
     ``mark_pass()`` records that a pass just completed, so the beat can carry
     ``last_pass_at`` -- call it once per finished ``run()`` pass (see ``main``).
+    ``started_at`` lets the caller share the same instant with its own initial
+    synchronous write; defaults to now.
     """
     path = heartbeat_path(config)
     boards = [b["name"] if isinstance(b, dict) else b for b in config.get("boards") or []]
     stop = threading.Event()
-    state = {"last_pass_at": None}
+    state = {
+        "last_pass_at": None,
+        "started_at": started_at or time.strftime("%FT%TZ", time.gmtime(clock())),
+    }
 
     def mark_pass():
         state["last_pass_at"] = time.strftime("%FT%TZ", time.gmtime(clock()))
 
     def beat():
         while not stop.wait(interval):
-            write_heartbeat(path, boards, last_pass_at=state["last_pass_at"])
+            write_heartbeat(
+                path, boards, last_pass_at=state["last_pass_at"], started_at=state["started_at"]
+            )
 
     threading.Thread(target=beat, daemon=True, name="tick-boards-heartbeat").start()
     return stop, mark_pass
@@ -314,6 +328,9 @@ def run(
     author is idempotent per run, so a pass that finds a run in flight authors nothing.
     ``drain`` (optional) ends the loop after the board ticks in flight: the pass's remaining
     boards are skipped and no further pass or sleep is started.
+    ``on_pass`` (optional) fires once per pass where at least one board's tick() actually
+    ran -- not merely once per iteration of this loop, so a pass where every board is
+    blocked on prepare() never counts as progress.
     """
     ready = 0
     while clock() < deadline and not (drain and drain.draining):
@@ -357,7 +374,12 @@ def run(
         for thread in threads:
             thread.join()
         ready = sum(counts)
-        if on_pass:
+        if on_pass and counts:
+            # Only a pass where at least one board's tick() actually ran counts as
+            # progress: every board blocked on prepare() (stale accounts, a refused
+            # ledger) forever would otherwise keep last_pass_at fresh indefinitely
+            # while the loop does zero real work -- exactly what the dead-man exists
+            # to catch.
             on_pass()
         if drain and drain.draining:
             break
@@ -385,8 +407,12 @@ def main(argv=None):
     drain.clear()
     # One synchronous beat proves the loop started; the thread keeps it fresh through the
     # long board-tick subprocesses, so a stale file means the process itself is gone.
-    write_heartbeat(heartbeat_path(config), boards)
-    stop_heartbeat, mark_pass = start_heartbeat(config)
+    # started_at is shared with the daemon thread's beats so a dead-man consumer sees
+    # one consistent process-start instant across every beat, even before any pass
+    # has completed.
+    started_at = time.strftime("%FT%TZ", time.gmtime())
+    write_heartbeat(heartbeat_path(config), boards, started_at=started_at)
+    stop_heartbeat, mark_pass = start_heartbeat(config, started_at=started_at)
     try:
         run(
             boards,

@@ -95,6 +95,21 @@ class ResolvedWorkspacesTests(unittest.TestCase):
             resolved = pruner.resolved_workspaces(url)
             self.assertEqual(resolved[str(ws.resolve())], 99.0)
 
+    def test_a_path_currently_held_by_an_active_attempt_is_never_resolved(self):
+        """Workspace paths are reused across attempts (retries share the same clone,
+        and board/runner.py's inbox worktree is shared across tasks); a path that is
+        both an older attempt's resolved workspace AND a live attempt's current one
+        must never show up as safe to delete."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            ledger, url = make_ledger(d)
+            ws = Path(d) / "ws1"
+            seed_attempt(ledger, "a1", ws, "failed", 10.0)
+            seed_attempt(ledger, "a2", ws, "dispatching", 99.0, task="t2")
+            resolved = pruner.resolved_workspaces(url)
+            self.assertNotIn(str(ws.resolve()), resolved)
+
 
 class PruneTests(unittest.TestCase):
     def test_dry_run_is_the_default_and_never_deletes(self):
@@ -161,6 +176,22 @@ class PruneTests(unittest.TestCase):
             self.assertEqual(report["deleted"], [])
             self.assertEqual(report["would_delete"], [])
 
+    def test_a_reused_workspace_currently_held_active_is_never_deleted(self):
+        """End-to-end version of ResolvedWorkspacesTests' reuse case: the same on-disk
+        directory backs a resolved older attempt and a live newer one."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "grid-workspaces"
+            ledger, url = make_ledger(d)
+            ws = root / "attempt-reused"
+            make_dir_with_bytes(ws, 5 * pruner.GIGABYTE)
+            seed_attempt(ledger, "a1", ws, "failed", 1.0)
+            seed_attempt(ledger, "a2", ws, "dispatching", 2.0, task="t2")
+            report = pruner.prune(root=root, database_url=url, dry_run=False)
+            self.assertTrue(ws.exists(), "a live attempt is using this workspace right now")
+            self.assertEqual(report["deleted"], [])
+
     def test_unrecognized_directories_are_left_alone(self):
         """A manual checkout or packets/ dir with no attempts row is never a candidate,
         even when it dwarfs everything the ledger actually resolved."""
@@ -183,11 +214,14 @@ class PruneTests(unittest.TestCase):
             ledger, url = make_ledger(d)
             make_dir_with_bytes(root / "attempt-1", 4 * pruner.GIGABYTE)
             alarm_path = Path(d) / "alarms" / "workspace-usage.json"
+            # A non-default alarm_bytes: the watermark the file records must reflect
+            # what was actually configured here, not the module's ALARM_BYTES constant.
+            configured_alarm_bytes = 1 * pruner.GIGABYTE
             report = pruner.prune(
                 root=root,
                 database_url=url,
                 cap_bytes=100 * pruner.GIGABYTE,  # stay under cap: alarm-only path
-                alarm_bytes=3 * pruner.GIGABYTE,
+                alarm_bytes=configured_alarm_bytes,
                 alarm_path=alarm_path,
                 dry_run=False,
             )
@@ -195,6 +229,7 @@ class PruneTests(unittest.TestCase):
             self.assertTrue(alarm_path.exists())
             payload = json.loads(alarm_path.read_text())
             self.assertGreaterEqual(payload["total_bytes"], 4 * pruner.GIGABYTE)
+            self.assertEqual(payload["alarm_bytes"], configured_alarm_bytes)
 
     def test_dry_run_reports_the_alarm_but_never_writes_the_file(self):
         import tempfile

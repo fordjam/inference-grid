@@ -1,12 +1,21 @@
 """02-A6: dead-man for the tick-boards loop.
 
 Alarms by email when the loop's heartbeat (deployments/local/tick_boards.py,
-DEFAULT_HEARTBEAT) is older than a threshold -- default 30 minutes, matching
-plan 02-A6's measure ("a launchd job every 15 min alarms if the heartbeat is
-older than 30 min"). Reads last_pass_at when present (a wedged pass keeps
-written_at fresh on its own, which is exactly the gap 02-A1's review found --
-see tick_boards.py's write_heartbeat docstring); falls back to written_at
-only for a heartbeat written before that field existed.
+DEFAULT_HEARTBEAT) is stale. Reads last_pass_at when present (a wedged pass
+keeps written_at fresh on its own, which is exactly the gap 02-A1's review
+found -- see tick_boards.py's write_heartbeat docstring); before any pass has
+ever completed (e.g. right after a restart, or a first pass still legitimately
+in flight), reads started_at instead, against a much larger allowance matching
+tick_boards.TICK_TIMEOUT -- the first pass may take that long; falls back to
+written_at, at the normal threshold, only for a heartbeat written before
+either field existed.
+
+THRESHOLD_SECONDS is NOT the plan's literal "30 min": tick_boards.py's own
+IDLE_SECONDS is 1800s, and last_pass_at only lands up to HEARTBEAT_INTERVAL
+(300s) after a pass truly ends, so a perfectly healthy idle loop's observed
+last_pass_at age routinely reaches ~1800+300s -- a flat 1800s threshold
+false-alarms on a quiet night, verified in review. THRESHOLD_SECONDS is
+IDLE_SECONDS + HEARTBEAT_INTERVAL + a tick-time margin instead.
 
 Same email mechanism as vix-rs and the other household projects: plain
 smtplib over SMTP_SSL, Gmail app password read at runtime from
@@ -29,10 +38,17 @@ import time
 from email.mime.text import MIMEText
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tick_boards import IDLE_SECONDS, HEARTBEAT_INTERVAL, TICK_TIMEOUT  # noqa: E402
+
 GMAIL_USER = "james.d.fordham@gmail.com"
 APP_PASSWORD_FILE = Path(os.path.expanduser("~/.seats_gmail_app_password"))
 DEFAULT_HEARTBEAT = Path.home() / ".local/share/inference-grid/heartbeat/tick-boards.json"
-THRESHOLD_SECONDS = 30 * 60
+TICK_TIME_MARGIN_SECONDS = 300
+THRESHOLD_SECONDS = IDLE_SECONDS + HEARTBEAT_INTERVAL + TICK_TIME_MARGIN_SECONDS  # 2400s = 40min
+# The first pass after a (re)start may legitimately take up to TICK_TIMEOUT; give it
+# that plus the same beat-lag margin before treating "no pass yet" as an outage.
+FIRST_PASS_ALLOWANCE_SECONDS = TICK_TIMEOUT + HEARTBEAT_INTERVAL + TICK_TIME_MARGIN_SECONDS
 CHECK_INTERVAL_SECONDS = 15 * 60
 
 
@@ -62,8 +78,20 @@ def send_email(subject: str, body: str) -> None:
         server.sendmail(GMAIL_USER, to, msg.as_string())
 
 
-def evaluate(path, now: float, threshold_seconds: float = THRESHOLD_SECONDS) -> dict:
-    """Pure verdict on the heartbeat file: state / alert / reason. No side effects."""
+def evaluate(
+    path,
+    now: float,
+    threshold_seconds: float = THRESHOLD_SECONDS,
+    first_pass_allowance_seconds: float = FIRST_PASS_ALLOWANCE_SECONDS,
+) -> dict:
+    """Pure verdict on the heartbeat file: state / alert / reason. No side effects.
+
+    Three tiers, in order: last_pass_at (a real pass completed; normal threshold),
+    started_at (no pass has completed yet -- the process may still be inside its
+    first, legitimately long, pass; the much larger first_pass_allowance_seconds),
+    written_at (neither field exists -- an old-format heartbeat; normal threshold,
+    since there is no way to distinguish "just started" from "long since wedged").
+    """
     try:
         heartbeat = json.loads(Path(path).read_text())
     except FileNotFoundError:
@@ -78,13 +106,21 @@ def evaluate(path, now: float, threshold_seconds: float = THRESHOLD_SECONDS) -> 
             "alert": True,
             "reason": f"heartbeat unreadable ({exc!r})",
         }
-    stamp = heartbeat.get("last_pass_at") or heartbeat.get("written_at")
-    kind = "last_pass_at" if heartbeat.get("last_pass_at") else "written_at"
-    if not stamp:
+    if heartbeat.get("last_pass_at"):
+        stamp, kind, allowance = heartbeat["last_pass_at"], "last_pass_at", threshold_seconds
+    elif heartbeat.get("started_at"):
+        stamp, kind, allowance = (
+            heartbeat["started_at"],
+            "started_at (no pass has completed yet)",
+            first_pass_allowance_seconds,
+        )
+    elif heartbeat.get("written_at"):
+        stamp, kind, allowance = heartbeat["written_at"], "written_at", threshold_seconds
+    else:
         return {
             "state": "alarm",
             "alert": True,
-            "reason": "heartbeat has neither last_pass_at nor written_at",
+            "reason": "heartbeat has none of last_pass_at, started_at or written_at",
         }
     try:
         # The stamp is UTC (tick_boards.py writes it via time.gmtime()); mktime()
@@ -98,11 +134,11 @@ def evaluate(path, now: float, threshold_seconds: float = THRESHOLD_SECONDS) -> 
             "reason": f"heartbeat timestamp unparsable ({exc!r}): {stamp!r}",
         }
     age = now - at
-    if age > threshold_seconds:
+    if age > allowance:
         return {
             "state": "alarm",
             "alert": True,
-            "reason": f"{kind} is {age / 60:.0f} min old (over the {threshold_seconds / 60:.0f} min threshold)",
+            "reason": f"{kind} is {age / 60:.0f} min old (over the {allowance / 60:.0f} min allowance)",
         }
     return {
         "state": "ok",
@@ -140,7 +176,10 @@ PLIST_TEMPLATE = """\
 """
 
 
-def render_plist(python, script, heartbeat, log, threshold_minutes=30, interval=CHECK_INTERVAL_SECONDS):
+def render_plist(
+    python, script, heartbeat, log,
+    threshold_minutes=THRESHOLD_SECONDS / 60, interval=CHECK_INTERVAL_SECONDS,
+):
     """The dead-man's plist body. A StartInterval job, unlike the four KeepAlive runtimes
     in install.py: this check must run periodically even while the loop is healthy, not
     stay alive continuously."""

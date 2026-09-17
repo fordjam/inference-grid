@@ -68,12 +68,56 @@ class EvaluateTests(unittest.TestCase):
 
     def test_exactly_at_threshold_is_still_ok_one_second_over_alarms(self):
         now = 1_000_000.0
-        at_threshold = json.dumps({"last_pass_at": stamp(now - 1800)})
+        at_threshold = json.dumps({"last_pass_at": stamp(now - deadman.THRESHOLD_SECONDS)})
         with self._tmp_file(at_threshold) as path:
             self.assertEqual(deadman.evaluate(path, now=now)["state"], "ok")
-        over_threshold = json.dumps({"last_pass_at": stamp(now - 1801)})
+        over_threshold = json.dumps({"last_pass_at": stamp(now - deadman.THRESHOLD_SECONDS - 1)})
         with self._tmp_file(over_threshold) as path:
             self.assertEqual(deadman.evaluate(path, now=now)["state"], "alarm")
+
+    def test_a_healthy_idle_loop_does_not_false_alarm(self):
+        """Reproduces the review finding: tick_boards.py's own IDLE_SECONDS (1800s)
+        plus up to one HEARTBEAT_INTERVAL (300s) of beat lag before last_pass_at
+        lands means a perfectly healthy, idle loop's observed age routinely reaches
+        ~2100s. A flat 1800s threshold (the plan's literal "30 min") would false-alarm
+        on every quiet night; THRESHOLD_SECONDS must clear that with room to spare."""
+        now = 1_000_000.0
+        healthy_idle_age = deadman.IDLE_SECONDS + deadman.HEARTBEAT_INTERVAL
+        body = json.dumps({"last_pass_at": stamp(now - healthy_idle_age)})
+        with self._tmp_file(body) as path:
+            self.assertEqual(deadman.evaluate(path, now=now)["state"], "ok")
+
+    def test_started_at_covers_a_first_pass_still_legitimately_in_flight(self):
+        now = 1_000_000.0
+        body = json.dumps({
+            "written_at": stamp(now - 60),
+            "started_at": stamp(now - 3600),  # no pass has completed in an hour yet
+        })
+        with self._tmp_file(body) as path:
+            v = deadman.evaluate(path, now=now)
+            self.assertEqual(v["state"], "ok")
+            self.assertIn("started_at", v["reason"])
+
+    def test_started_at_alarms_once_the_first_pass_allowance_is_exceeded(self):
+        now = 1_000_000.0
+        body = json.dumps({
+            "written_at": stamp(now - 60),
+            "started_at": stamp(now - deadman.FIRST_PASS_ALLOWANCE_SECONDS - 1),
+        })
+        with self._tmp_file(body) as path:
+            v = deadman.evaluate(path, now=now)
+            self.assertEqual(v["state"], "alarm")
+
+    def test_last_pass_at_takes_priority_over_started_at(self):
+        now = 1_000_000.0
+        body = json.dumps({
+            "started_at": stamp(now - 999999),  # ancient: would alarm on its own
+            "last_pass_at": stamp(now - 60),     # but a pass completed just now
+        })
+        with self._tmp_file(body) as path:
+            v = deadman.evaluate(path, now=now)
+            self.assertEqual(v["state"], "ok")
+            self.assertIn("last_pass_at", v["reason"])
 
     def test_custom_threshold_is_honoured(self):
         now = 1_000_000.0

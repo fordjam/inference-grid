@@ -1424,6 +1424,24 @@ class TickTimeoutTests(unittest.TestCase):
         self.assertIn("ledger refused the refresh", out.getvalue())
         self.assertEqual(clock.now, 7200)
 
+    def test_on_pass_never_fires_while_every_board_is_permanently_blocked(self):
+        """A loop where every board's prepare() fails forever (stale accounts, a
+        refused ledger) is alive but doing zero real work -- exactly the case the
+        dead-man exists to catch. on_pass must not fire and mask it."""
+        clock = FakeClock()
+        passes = []
+
+        tick_boards.run(
+            ["a", "b"],
+            deadline=3600,
+            prepare=lambda: (_ for _ in ()).throw(RuntimeError("ledger refused")),
+            tick=lambda board: 0,
+            sleep=clock.sleep,
+            clock=clock.clock,
+            on_pass=lambda: passes.append(clock.now),
+        )
+        self.assertEqual(passes, [])
+
     def test_a_board_prepare_failure_is_per_board_and_per_pass(self):
         clock = FakeClock()
         ticked = []
