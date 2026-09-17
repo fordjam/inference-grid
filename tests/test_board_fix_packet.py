@@ -51,10 +51,13 @@ Location: `src/pkg/worker.py`.
 Acceptance tests: `tests/test_worker_retry.py`.
 
 ```json
-{"gates": [{"name": "fail", "argv": ["python", "-c", "pass"]}],
+{"gates": [{"name": "fail", "argv": ["%s", "-c", "import sys; sys.exit(3)"]}],
  "tests": ["tests/test_worker_retry.py"]}
 ```
-"""
+""" % sys.executable.replace("\\", "\\\\")
+# The drafted packet's gate must FAIL by construction: it was `python -c pass`, which
+# fails only where `python` is not on PATH (this sandbox) and passes on CI, so the
+# "gate opened and failed" assertion held here and broke there (2026-09-17).
 
 FAKE_AGENT = """
 import json, subprocess, sys

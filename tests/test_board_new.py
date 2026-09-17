@@ -1,6 +1,7 @@
 """Board task authoring helper: validated files, empty brief, schema test, no overwrites."""
 
 import json
+import sys
 
 import pytest
 
@@ -360,11 +361,31 @@ def test_retry_of_a_packet_task_renames_the_brief_in_its_spec_too(tmp_path):
     # before this, every packet retry was refused with "brief must be the task's own
     # brief file" (2026-09-16: the disk-full retries of vix-rs Q9/R1 and GM5/L3).
     from inference_grid.board.new import retry_task
-    from tests.test_packet_task import make_packet_task
 
     board = tmp_path / "grid/board"
     board.mkdir(parents=True)
-    packet = make_packet_task()
+    # A minimal packet card (the shape tests/test_packet_task.py builds), inline: CI does
+    # not put tests/ on sys.path as a package.
+    brief = "grid/briefs/packet-d1.txt"
+    packet = dict(
+        id="d1-packet",
+        category="packet",
+        brief=brief,
+        inputs=[brief],
+        tests=[],
+        artifacts=["docs/reports/d1-packet.md"],
+        lanes=["zcode"],
+        author_family=None,
+        budget={"wall_seconds": 60, "output_bytes": 10000000, "thinking_tokens": None},
+        state="ready",
+        blocked_reason=None,
+        spec={
+            "brief": brief,
+            "packet_id": "A1",
+            "base": "main",
+            "gates": [{"name": "ok", "argv": [sys.executable, "-c", "print('ok')"]}],
+        },
+    )
     # Packet tasks are authored by from-brief, not new_task's shared schema: write the card.
     (board / "d1-packet.json").write_text(json.dumps(packet, indent=1) + "\n")
     (tmp_path / "grid/briefs").mkdir()
