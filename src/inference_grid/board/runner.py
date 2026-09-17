@@ -643,8 +643,6 @@ def admit(
         + "-"
         + uuid.uuid4().hex[:6]
     )
-    if input_dir.name == "input-verify":
-        task_id += "-verify"
     ledger.submit(task_id, Path(project_root).name, spec)
     with ledger.engine.connect() as con:
         from ..ledger import accounts, aliases
@@ -701,31 +699,6 @@ def dispatch(
         return run_packet(ledger, admission)
     state = execute(ledger, admission["aid"], admission["generation"])
     return admission["aid"], state, admission["output_dir"]
-
-
-def deadline_hold(ledger, packet_dir, aid):
-    """True when a held attempt stopped at its wall deadline rather than a receipt refusal.
-
-    The worker's deadline hold records "Refused: timeout: provider acceptance may be
-    ambiguous" in the ledger; lanes that supervise a native process also report
-    supervisor reason wall_deadline in the verdict beside the attempt. Any other hold
-    (unexpected model, escaping artifact name, crashed adapter) stays held for the
-    operator even when the expected files happen to exist.
-    """
-    reason = ""
-    for row in ledger.status():
-        if row["id"] == aid:
-            reason = row.get("reason") or ""
-            break
-    if "timeout" in reason:
-        return True
-    verdict_path = Path(packet_dir) / "attempts" / aid / "verdict.json"
-    try:
-        verdict = json.loads(verdict_path.read_text())
-    except (OSError, ValueError):
-        return False
-    supervisor = verdict.get("supervisor") if isinstance(verdict, dict) else None
-    return isinstance(supervisor, dict) and supervisor.get("reason") == "wall_deadline"
 
 
 def read_verdict(packet_dir, aid):
@@ -803,39 +776,6 @@ def note_model_refusal(ledger, lanes, lane_id, packet_dir, aid):
         # A stale or invalid stored record must not turn a hold into a crash; the
         # operator resolves the hold and the next collector reading repairs the record.
         pass
-
-
-def verify_followup(task, packet_dir, held_attempt_dir):
-    """Build a verify-only packet from a held attempt whose expected files all exist.
-
-    Returns the follow-up input directory, or None when the files are incomplete. This is a
-    recorded change of brief (run the tests, fix nothing unless they fail), never a blind retry.
-    """
-    work = Path(held_attempt_dir) / "work"
-    names = task["artifacts"] if tree_task(task) else [Path(a).name for a in task["artifacts"]]
-    if not all((work / n).is_file() for n in names):
-        return None
-    source = Path(packet_dir) / "input"
-    verify = Path(packet_dir) / "input-verify"
-    if verify.exists():
-        shutil.rmtree(verify)
-    shutil.copytree(source, verify)
-    for n in names:
-        (verify / n).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(work / n, verify / n)
-    tests = [Path(t).stem for t in task["tests"] if Path(t).name.startswith("test_")]
-    if tree_task(task):
-        tests = ["discover -s " + (str(Path(task["tests"][0]).parent) or ".") + " -t ."]
-    (verify / "brief.txt").write_text(
-        "Work only inside the current directory. The files "
-        + ", ".join(names)
-        + " already exist here from a previous session; every other file is a read-only reference. "
-        + "Run exactly this once: python3 -m unittest -v "
-        + " ".join(tests)
-        + ". If it passes, do not change any file. If it fails, make the smallest fix and run the "
-        + "command once more. Then stop with a one-line summary stating pass or fail. No other commands, no network.\n"
-    )
-    return verify
 
 
 REVIEW_BUDGET = {"wall_seconds": 600, "output_bytes": 2000000, "thinking_tokens": 6000}
@@ -1753,35 +1693,11 @@ def tick(
                 accounts_by_lane[lane_id],
                 admission=admission,
             )
-            if state != "completed" and deadline_hold(ledger, packet_dir, aid):
-                followup = verify_followup(task, packet_dir, Path(packet_dir) / "attempts" / aid)
-                if followup is not None:
-                    # The one authorized recorded-change retry (BOARD.md): a deadline hold
-                    # whose expected files are all present is resolved consumed on that
-                    # evidence and followed by exactly one verify-only attempt under a new
-                    # ledger task id. Any other hold stays held for the operator.
-                    ledger.resolve(
-                        aid,
-                        "consumed",
-                        "deadline with all expected files present; verify-only follow-up dispatched",
-                        "board runner",
-                    )
-                    ledger.record_outcome(
-                        aid, task["category"], False, note="deadline; files complete"
-                    )
-                    if prepare_argv:
-                        subprocess.run(prepare_argv, capture_output=True, timeout=120)
-                    aid, state, output_dir = dispatch(
-                        ledger,
-                        lanes,
-                        lanes_path,
-                        lane_id,
-                        task,
-                        project_root,
-                        packet_dir,
-                        accounts_by_lane[lane_id],
-                        input_dir=followup,
-                    )
+            # B8: holds are resolved by a human operator only. A deadline hold used to be
+            # resolved by the runner itself (operator string "board runner") and followed
+            # by one automatic verify-only attempt when its expected files all existed;
+            # that exception is gone — every hold, deadline-shaped or not, now waits for
+            # `resolve` with a real operator's evidence, no exception.
         except Refused as exc:
             reason = "refused: " + str(exc)[:200]
             if aid is None:

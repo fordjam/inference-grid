@@ -122,6 +122,14 @@ DEFAULT_ACCOUNTS = ()
 # Per-model routing metadata a lane record may carry beyond the readiness classifier's
 # fixed key set; stripped before classification, stored with the record.
 LANE_RECORD_METADATA = ("unsupported_until",)
+# B8: names `resolve()` refuses as an `operator` attestation — every machine identity
+# code in this repository has ever resolved a hold as, plus the generic terms an
+# automated caller would reach for first. Not exhaustive by design (a determined caller
+# could always pick an unlisted string); the honest guarantee is that no *existing* code
+# path can resolve a hold under its own name, not that every possible one is blocked.
+MACHINE_OPERATORS = frozenset(
+    {"coordinator", "board runner", "board-runner", "runner", "system", "automation", "bot", "grid"}
+)
 
 
 def classifier_view(record):
@@ -594,6 +602,10 @@ class Ledger:
         provider did or may have run; the reservation is debited as a completion would be.
         Both leave the ACTIVE set, freeing the workspace and account slot. The original
         hold reason, evidence digest and operator are recorded together in one event.
+
+        B8: holds are resolved by a human operator only — `operator` is refused (case-
+        insensitively) when it names the grid itself, never a real person: no automated
+        caller may attest to a hold on its own behalf, whatever string it picks.
         """
         if outcome not in ("released", "consumed"):
             raise Refused("outcome must be released or consumed")
@@ -601,6 +613,8 @@ class Ledger:
             raise Refused("bounded resolution reason required")
         if not isinstance(operator, str) or not operator.strip() or len(operator) > 100:
             raise Refused("operator attestation required")
+        if operator.strip().lower() in MACHINE_OPERATORS:
+            raise Refused("holds are resolved by a human operator, not " + operator)
         if evidence is not None and not isinstance(evidence, dict):
             raise Refused("evidence must be an object")
         state = "abandoned" if outcome == "released" else "failed"

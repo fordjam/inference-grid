@@ -404,10 +404,13 @@ def test_tick_dispatches_tests_and_records(world):
     ]
 
 
-def test_held_attempt_with_complete_files_gets_a_verify_followup(world, monkeypatch, tmp_path):
-    # A deadline-shaped hold (lane verdict says wall_deadline) that wrote the artifact but
-    # exits without a receipt, then a second run that succeeds: the runner must resolve the
-    # first and dispatch the follow-up.
+def test_a_deadline_hold_with_complete_files_still_waits_for_the_operator(
+    world, monkeypatch, tmp_path
+):
+    # B8: a deadline-shaped hold (lane verdict says wall_deadline) that wrote the
+    # artifact but exited without a receipt used to be resolved and retried by the
+    # runner itself; it must now stay held like any other hold, however complete the
+    # files look, with no second attempt ever dispatched.
     flaky = tmp_path / "flaky_adapter.py"
     flaky.write_text(
         FAKE_ADAPTER.replace(
@@ -429,14 +432,14 @@ def test_held_attempt_with_complete_files_gets_a_verify_followup(world, monkeypa
         world["packets"],
         now=now,
     )
-    assert results[0]["result"] == "passed"
-    states = sorted(
-        (r["task"].split("-2026")[0], r["state"])
+    assert results[0]["result"] == "held"
+    states = [
+        (r["task"], r["state"])
         for r in world["ledger"].status()
         if r["account"] == world["account"]
-    )
-    assert states == [("copy-ok", "completed"), ("copy-ok", "failed")]
-    assert json.loads((world["board"] / "copy-ok.json").read_text())["state"] == "review_pending"
+    ]
+    assert states == [(states[0][0], "held")]  # exactly one attempt, never a follow-up
+    assert json.loads((world["board"] / "copy-ok.json").read_text())["state"] == "blocked"
 
 
 def test_receipt_refusal_hold_gets_no_followup(world, monkeypatch, tmp_path):

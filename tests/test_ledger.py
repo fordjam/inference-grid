@@ -572,6 +572,20 @@ def test_resolve_refuses_non_held_states(grid):
         ledger.resolve("missing", "released", "x", "operator")
 
 
+def test_resolve_refuses_a_machine_operator(grid):
+    # B8: holds are resolved by a human operator only.
+    ledger = grid[0]
+    aid, gen = claim(grid, submit(grid))
+    ledger.start(aid, gen)
+    ledger.hold(aid, "ambiguous timeout")
+    for name in ("coordinator", "board runner", "Board-Runner", "SYSTEM", "bot", "runner"):
+        with pytest.raises(Refused, match="human operator"):
+            ledger.resolve(aid, "released", "auto-resolved", name)
+    # A real name is unaffected.
+    ledger.resolve(aid, "released", "confirmed nothing ran", "james")
+    assert next(r for r in ledger.status() if r["id"] == aid)["state"] == "abandoned"
+
+
 def test_outcome_records_feed_scorecard_without_inventing_usage(grid):
     ledger, account, _ = grid
     aid, gen = claim(grid, submit(grid))
