@@ -1109,16 +1109,34 @@ class CapacityPanelTests(unittest.TestCase):
         )
         self.assertEqual(overlay.capacity_panel(db), [])
 
-    def test_outcome_recorded_usage_is_preferred_over_the_pre_run_estimate(self):
+    def test_completed_attempts_count_as_landed_and_consume_their_estimate(self):
+        """ledger.py's finish(): state="completed" debits the estimate immediately,
+        before any human review -- an attempt sitting in "completed" (not yet
+        "accepted") has already consumed real capacity and must not be invisible."""
+        tmp = self.enterContext(_TmpDir())
+        db = tmp.path / "board.sqlite"
+        make_board_db(
+            db,
+            attempt_rows=[("a1", "zai-account", "completed", {"five_hour": 4.0}, time.time())],
+        )
+        rows = {r["provider"]: r for r in overlay.capacity_panel(db)}
+        self.assertEqual(rows["zai"]["landed_count"], 1)
+        self.assertAlmostEqual(rows["zai"]["landed_consumed"], 4.0)
+
+    def test_outcome_recorded_usage_is_never_summed_into_consumed(self):
+        """usage (outcome_recorded events) is arbitrary caller-supplied units
+        (token counts, etc) that record_outcome()'s own docstring says "feeds
+        scorecard, never routing" -- nothing in ledger.py ever debits it, only
+        estimate is. Summing it in would mix incompatible units."""
         tmp = self.enterContext(_TmpDir())
         db = tmp.path / "board.sqlite"
         make_board_db(
             db,
             attempt_rows=[("a1", "zai-account", "accepted", {"five_hour": 3.0}, time.time())],
-            event_rows=[("a1", "outcome_recorded", {"usage": {"five_hour": 9.5}})],
+            event_rows=[("a1", "outcome_recorded", {"usage": {"input_tokens": 26410}})],
         )
         rows = {r["provider"]: r for r in overlay.capacity_panel(db)}
-        self.assertAlmostEqual(rows["zai"]["landed_consumed"], 9.5)
+        self.assertAlmostEqual(rows["zai"]["landed_consumed"], 3.0)
 
     def test_outside_the_window_is_excluded(self):
         tmp = self.enterContext(_TmpDir())
@@ -1132,7 +1150,11 @@ class CapacityPanelTests(unittest.TestCase):
         rows = {r["provider"]: r for r in overlay.capacity_panel(db, now=now, window_seconds=300000)}
         self.assertEqual(rows["zai"]["landed_count"], 1)
 
-    def test_unmapped_lane_becomes_unknown_provider(self):
+    def test_unmapped_lane_becomes_unknown_provider_in_the_raw_overlay(self):
+        """The raw overlay_build.capacity_panel() row exists (this is what a future
+        LANE_PROVIDER entry would need to preserve) -- but src/inference_grid/capacity.py's
+        clean_capacity_panel() drops "unknown" (it isn't in PROVIDERS), so this data
+        does not reach the dashboard; see test_capacity.py for that half."""
         tmp = self.enterContext(_TmpDir())
         db = tmp.path / "board.sqlite"
         make_board_db(

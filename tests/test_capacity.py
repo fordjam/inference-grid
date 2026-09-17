@@ -180,3 +180,12 @@ def test_capacity_panel_bad_numbers_become_zero_not_dropped():
 def test_capacity_panel_defaults_to_empty_without_an_overlay():
     assert project({"accounts": []}, [])["capacity_panel"] == []
     assert project({"accounts": []}, {"attempts": []})["scorecard"] == []
+
+
+def test_capacity_panel_unknown_provider_is_dropped_not_displayed():
+    """overlay_build.capacity_panel() emits an "unknown" row for an unmapped lane
+    (see CapacityPanelTests in tests/test_local_collectors.py) -- it must not reach
+    the dashboard just because it's the only row for that lane."""
+    rows = [{"provider": "unknown", "landed_count": 3, "landed_consumed": 5.0,
+             "failed_abandoned_count": 0, "failed_abandoned_consumed": 0.0}]
+    assert project({"accounts": []}, {"capacity_panel": rows})["capacity_panel"] == []

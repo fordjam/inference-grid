@@ -273,36 +273,34 @@ def capacity_panel(board_db, now=None, window_seconds=CAPACITY_PANEL_WINDOW_SECO
     """02-B5: per subscription, capacity consumed this window by attempts that landed
     vs failed/abandoned. Read-only: no write to board.sqlite anywhere here.
 
-    "Landed" here is attempts.state == "accepted", the ledger's own terminal success
-    state -- true board-level "landed" status lives in grid/board/*.json task files,
-    out of scope for this sqlite-only, read-only panel (rule: never touch grid/ board
-    state). "Consumed" prefers the outcome_recorded event's usage dict for that
-    attempt (the actual recorded usage) when one exists, else falls back to the
-    attempt's own pre-run estimate dict. A failed attempt's estimate was debited from
-    the account's windows (ledger.py's resolve(), outcome="consumed"); an abandoned
-    attempt's was released and never debited (outcome="released" -- state="abandoned"
-    follows only from that path), so an abandoned attempt always contributes 0.
+    "Landed" is attempts.state in ("completed", "accepted") -- a run that produced a
+    validated receipt, whether or not it has since cleared human review; true
+    board-level "landed" status lives in grid/board/*.json task files, out of scope
+    for this sqlite-only, read-only panel (rule: never touch grid/ board state).
+    "Consumed" is the attempt's own pre-run estimate dict (window name -> fraction),
+    summed -- estimate is what the ledger itself actually debits from the account's
+    windows: finish() debits it on state="completed", resolve(outcome="consumed")
+    debits it on state="failed". An abandoned attempt's estimate was released and
+    never debited (state="abandoned" follows only from resolve(outcome="released")),
+    so it always contributes 0.
+
+    The events table's outcome_recorded.usage (arbitrary caller-supplied keys like
+    input_tokens/output_tokens) is NOT used here despite being attempts+events data:
+    record_outcome()'s own docstring says it "feeds scorecard, never routing", and
+    nothing in ledger.py ever debits it -- only estimate is. Summing usage alongside
+    estimate would add two different units together (window-fraction costs and raw
+    token counts); reproduced during review: one attempt's usage swamped the total
+    by ~6 orders of magnitude versus the true window-fraction sum.
     """
     now = time.time() if now is None else now
     floor = now - window_seconds
     try:
         con = sqlite3.connect("file:" + str(board_db) + "?mode=ro", uri=True)
         attempt_rows = con.execute(
-            "select id, account, state, estimate, updated from attempts "
-            "where state in ('accepted','failed','abandoned') and updated >= ?",
+            "select account, state, estimate, updated from attempts "
+            "where state in ('completed','accepted','failed','abandoned') and updated >= ?",
             (floor,),
         ).fetchall()
-        usage_by_attempt = {}
-        for aid, detail_raw in con.execute(
-            "select attempt, detail from events where kind='outcome_recorded'"
-        ):
-            try:
-                detail = json.loads(detail_raw) if isinstance(detail_raw, str) else detail_raw
-            except (TypeError, ValueError):
-                continue
-            usage = detail.get("usage") if isinstance(detail, dict) else None
-            if isinstance(usage, dict):
-                usage_by_attempt[aid] = usage
         con.close()
     except (sqlite3.Error, ValueError):
         return []
@@ -313,24 +311,20 @@ def capacity_panel(board_db, now=None, window_seconds=CAPACITY_PANEL_WINDOW_SECO
         return sum(v for v in mapping.values() if isinstance(v, (int, float)))
 
     by_provider = {}
-    for aid, account, state, estimate_raw, _updated in attempt_rows:
+    for account, state, estimate_raw, _updated in attempt_rows:
         lane = account.replace("-account", "")
         provider = LANE_PROVIDER.get(lane, "unknown")
-        bucket = "landed" if state == "accepted" else "failed_abandoned"
+        bucket = "landed" if state in ("completed", "accepted") else "failed_abandoned"
         if state == "abandoned":
             consumed = 0.0
         else:
-            usage = usage_by_attempt.get(aid)
-            if usage:
-                consumed = numeric_sum(usage)
-            else:
-                try:
-                    estimate = (
-                        json.loads(estimate_raw) if isinstance(estimate_raw, str) else estimate_raw
-                    )
-                except (TypeError, ValueError):
-                    estimate = {}
-                consumed = numeric_sum(estimate)
+            try:
+                estimate = (
+                    json.loads(estimate_raw) if isinstance(estimate_raw, str) else estimate_raw
+                )
+            except (TypeError, ValueError):
+                estimate = {}
+            consumed = numeric_sum(estimate)
         entry = by_provider.setdefault(
             provider,
             {
