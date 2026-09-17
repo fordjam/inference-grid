@@ -188,7 +188,7 @@ def world(tmp_path, monkeypatch):
     ledger = Ledger(url)
     ledger.initialize()
     glm_account = "goat-" + uuid.uuid4().hex[:8]
-    ds_account = "cline-" + uuid.uuid4().hex[:8]
+    ds_account = "zcode-" + uuid.uuid4().hex[:8]
     ledger.configure_account(
         glm_account, 1, {"five_hour": 10, "weekly": 20}, time.time() + 600, ["glm-5.3-flash"]
     )
@@ -197,11 +197,11 @@ def world(tmp_path, monkeypatch):
         1,
         {"five_hour": 10, "weekly": 20},
         time.time() + 600,
-        ["cline-pass/deepseek-v4.1-flash"],
+        ["deepseek-v4.1-flash"],
     )
     lanes = {
         "glm-lane": lane("glm", "glm-5.3-flash", "goat_cli"),
-        "ds-lane": lane("deepseek", "cline-pass/deepseek-v4.1-flash", "cline_cli"),
+        "ds-lane": lane("deepseek", "deepseek-v4.1-flash", "zcode_cli"),
     }
     ledger.record_lane("glm-lane", ready_record(time.time(), "glm-lane"))
     ledger.record_lane("ds-lane", ready_record(time.time(), "ds-lane"))
@@ -328,7 +328,7 @@ def test_the_dry_run_reports_the_pending_failover(world):
     results = tick(world)
     assert results[0]["result"] == "held" and "failover" not in results[0]
     assert board_task(world, "j4-packet")["state"] == "blocked"
-    world["lanes"]["ds-lane"] = lane("deepseek", "cline-pass/deepseek-v4.1-flash", "cline_cli")
+    world["lanes"]["ds-lane"] = lane("deepseek", "deepseek-v4.1-flash", "zcode_cli")
     world["lanes_path"].write_text(json.dumps({"lanes": world["lanes"]}))
     plan = tick(world, dry_run=True)
     assert [r["reason"] for r in plan["plan"]] == ["failover pending: glm -> deepseek"]

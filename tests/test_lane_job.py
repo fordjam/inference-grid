@@ -55,10 +55,9 @@ def test_relative_paths_resolve_against_the_file_directory(tmp_path):
                 "packets": ["E1"],
             },
             {
-                "name": "cline-glm",
+                "name": "second-glm",
                 "clone": "~/lane-c",
-                "adapter": "cline",
-                "key_file": "keys/cline.key",
+                "key_file": "keys/second.key",
                 "packets": ["F1"],
             },
         ],
@@ -74,7 +73,7 @@ def test_relative_paths_resolve_against_the_file_directory(tmp_path):
     assert first["clone"] == str(tmp_path / "clone-a")
     assert first["adapter"] == "command_code" and first["key_file"] is None
     assert second["clone"] == str(Path.home() / "lane-c")
-    assert second["key_file"] == str(tmp_path / "keys/cline.key")
+    assert second["key_file"] == str(tmp_path / "keys/second.key")
     assert second["packets"] == ["F1"]
 
 
@@ -111,19 +110,11 @@ def test_unknown_and_missing_keys_are_refused(tmp_path):
             )
         )
 
-    with pytest.raises(job.JobError, match="must be one of command_code, cline"):
+    with pytest.raises(job.JobError, match="must be one of command_code"):
         job.load_job(
             write_job(
                 tmp_path,
                 lanes=[{"name": "x", "clone": "a", "adapter": "vim", "packets": ["E1"]}],
-            )
-        )
-
-    with pytest.raises(job.JobError, match="needs the key file"):
-        job.load_job(
-            write_job(
-                tmp_path,
-                lanes=[{"name": "x", "clone": "a", "adapter": "cline", "packets": ["E1"]}],
             )
         )
 
@@ -142,13 +133,6 @@ def test_lane_argv_carries_the_flags_the_single_lane_driver_takes(tmp_path):
             database="sqlite:///board.sqlite",
             lanes=[
                 {"name": "goat-glm", "clone": "clone-a", "packets": ["E1", "E2"]},
-                {
-                    "name": "cline-glm",
-                    "clone": "clone-c",
-                    "adapter": "cline",
-                    "key_file": "keys/cline.key",
-                    "packets": ["F1"],
-                },
             ],
         )
     )
@@ -164,7 +148,7 @@ def test_lane_argv_carries_the_flags_the_single_lane_driver_takes(tmp_path):
             i += 1
         return out
 
-    goat, cline = spec["lanes"]
+    (goat,) = spec["lanes"]
     argv = job.lane_argv(spec, goat, script)
     assert argv[0] == sys.executable and argv[1] == str(script)
     assert value(argv, "--repo") == spec["repo"]
@@ -178,11 +162,6 @@ def test_lane_argv_carries_the_flags_the_single_lane_driver_takes(tmp_path):
     assert value(argv, "--packets-root") == spec["packets_root"]
     assert value(argv, "--database") == "sqlite:///board.sqlite"
     assert packets(argv) == ["E1", "E2"]
-    assert "--cline-key-file" not in argv
-
-    cline_argv = job.lane_argv(spec, cline, script)
-    assert value(cline_argv, "--adapter") == "cline"
-    assert value(cline_argv, "--cline-key-file") == cline["key_file"]
 
 
 def test_run_job_launches_one_subprocess_per_entry_with_its_log(tmp_path):
@@ -191,9 +170,8 @@ def test_run_job_launches_one_subprocess_per_entry_with_its_log(tmp_path):
         lanes=[
             {"name": "goat-glm", "clone": "clone-a", "packets": ["E1", "E2"]},
             {
-                "name": "cline-glm",
+                "name": "second-glm",
                 "clone": "clone-c",
-                "adapter": "cline",
                 "key_file": "k",
                 "packets": ["F1"],
             },
@@ -212,11 +190,11 @@ def test_run_job_launches_one_subprocess_per_entry_with_its_log(tmp_path):
     logs = [Path(log) for _, log in calls]
     assert logs == [
         tmp_path / "packets" / "lane-goat-glm.log",
-        tmp_path / "packets" / "lane-cline-glm.log",
+        tmp_path / "packets" / "lane-second-glm.log",
     ]
     assert (tmp_path / "packets").is_dir()
     lanes = [argv[argv.index("--lane") + 1] for argv, _ in calls]
-    assert lanes == ["goat-glm", "cline-glm"]
+    assert lanes == ["goat-glm", "second-glm"]
 
 
 def test_run_job_prints_a_table_and_fails_when_a_lane_fails(tmp_path, capsys):
@@ -224,17 +202,17 @@ def test_run_job_prints_a_table_and_fails_when_a_lane_fails(tmp_path, capsys):
         tmp_path,
         lanes=[
             {"name": "goat-glm", "clone": "clone-a", "packets": ["E1"]},
-            {"name": "cline-glm", "clone": "clone-c", "packets": ["F1"]},
+            {"name": "second-glm", "clone": "clone-c", "packets": ["F1"]},
         ],
     )
-    codes = {"goat-glm": 0, "cline-glm": 3}
+    codes = {"goat-glm": 0, "second-glm": 3}
 
     def spawn(argv, log_path):
         return codes[argv[argv.index("--lane") + 1]]
 
     assert job.run_job(path, spawn=spawn) == 1
     out = capsys.readouterr().out
-    assert "lane" in out and "goat-glm" in out and "cline-glm" in out
+    assert "lane" in out and "goat-glm" in out and "second-glm" in out
     assert "passed" in out and "failed (3)" in out
 
 
@@ -243,12 +221,12 @@ def test_run_job_reports_a_lane_that_cannot_start(tmp_path, capsys):
         tmp_path,
         lanes=[
             {"name": "goat-glm", "clone": "clone-a", "packets": ["E1"]},
-            {"name": "cline-glm", "clone": "clone-c", "packets": ["F1"]},
+            {"name": "second-glm", "clone": "clone-c", "packets": ["F1"]},
         ],
     )
 
     def spawn(argv, log_path):
-        if argv[argv.index("--lane") + 1] == "cline-glm":
+        if argv[argv.index("--lane") + 1] == "second-glm":
             raise OSError("no such interpreter")
         return 0
 

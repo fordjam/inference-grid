@@ -229,61 +229,6 @@ class OpencodeAdapter(Adapter):
         return _first_match(native_jsonl, r'"sessionID"\s*:\s*"([^"]+)"')
 
 
-class ClineAdapter(Adapter):
-    """`cline --json --auto-approve true`; resumes with `--id <session>`.
-
-    Isolated local state under `data_dir` so nothing the lane does reaches the operator's
-    own Cline sessions; the provider's key is read by the CLI from its own login."""
-
-    name = "cline"
-
-    def __init__(
-        self,
-        model: str,
-        work: Path,
-        data_dir: Path,
-        binary: str = "/opt/homebrew/bin/cline",
-        provider: str = "cline",
-        thinking: str = "high",
-        retries: int = 8,
-    ):
-        self.model, self.work, self.data_dir, self.binary = model, work, data_dir, binary
-        self.provider, self.thinking, self.retries = provider, thinking, retries
-
-    def _tail(self) -> List[str]:
-        return [
-            "--provider",
-            self.provider,
-            "--model",
-            self.model,
-            "--json",
-            "--auto-approve",
-            "true",
-            "--thinking",
-            self.thinking,
-            "--retries",
-            str(self.retries),
-            "--cwd",
-            str(self.work),
-            "--data-dir",
-            str(self.data_dir),
-        ]
-
-    def first(self, prompt: str) -> List[str]:
-        return [self.binary, prompt] + self._tail()
-
-    def resume(self, session_id: str, prompt: str) -> List[str]:
-        # cline 3.0.61 refuses a prompt with --id in JSON mode ("interactive mode is
-        # unsupported"), so a later round is a fresh session on the fix prompt: the branch
-        # and the gate output carry the context; the first session id stays in the verdict.
-        return self.first(prompt)
-
-    def session_id(self, native_jsonl: Path) -> Optional[str]:
-        return _first_match(
-            native_jsonl, r'"(?:sessionId|session_id|taskId|task_id)"\s*:\s*"([^"]+)"'
-        )
-
-
 DELTA_EVENTS = ("thinking_delta", "text_delta", "content_delta")
 
 
@@ -486,9 +431,8 @@ def _wait_for_round(
 def terminal_corroboration(native: Path) -> Optional[Dict]:
     """What the CLI said about its own ending, for the record — never the decision.
 
-    Cline's JSON mode ends with a `run_result` line carrying `finishReason`; `cmd
-    --print --output-format json` ends with a `result` document carrying `subtype` and
-    `stopReason`. The last such line wins. An unknown or unreadable stream returns
+    `cmd --print --output-format json` ends with a `result` document carrying `subtype`
+    and `stopReason`. The last such line wins. An unknown or unreadable stream returns
     None, so the round still carries whatever the exit code and the worktree proved."""
     found = None
     try:
@@ -503,9 +447,7 @@ def terminal_corroboration(native: Path) -> Optional[Dict]:
                     continue
                 if not isinstance(row, dict):
                     continue
-                if row.get("type") == "run_result":
-                    found = {"kind": "cline", "finish_reason": row.get("finishReason")}
-                elif row.get("type") == "result":
+                if row.get("type") == "result":
                     found = {
                         "kind": "command_code",
                         "subtype": row.get("subtype"),

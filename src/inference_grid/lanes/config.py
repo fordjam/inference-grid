@@ -12,7 +12,7 @@ def validate_lane_config(raw):
     lanes = raw["lanes"]
     if not isinstance(lanes, dict) or not lanes:
         raise ValueError("lanes: must be a non-empty dict")
-    kinds = {"go_http", "goat_cli", "cline_cli", "claude_headless", "zcode_cli", "codex_cli"}
+    kinds = {"go_http", "goat_cli", "claude_headless", "zcode_cli", "codex_cli"}
     allowed = {"provider", "family", "model", "kind", "credential_path", "executable", "plan_units", "window", "max_concurrency", "wall_seconds", "categories"}
     out = {}
     for lid, spec in lanes.items():

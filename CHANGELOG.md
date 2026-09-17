@@ -2,6 +2,12 @@
 
 Format follows [Keep a Changelog](https://keepachangelog.com/); every line cites the commit that carries it. This project has not reached a stable release.
 
+## [Unreleased]
+
+### Removed
+
+- The retired `cline_cli` lane kind (the desktop Cline CLI wrapper) and its supporting code — `lanes/cline.py`, `cline_outcomes.py`, `collect_cline.py`, the packet-loop `ClineAdapter`, the seeded `cline` ledger account (`DEFAULT_ACCOUNTS` is now empty) and `board_prepare.py`'s `configure_cline` — leaving ClinePass over HTTP (`cline-http`, provider `clinepass`, `lanes/go.py`) untouched (`63cf152`).
+
 ## [0.1.0a5] - 2026-09-13
 
 The board era: bounded provider attempts authored, dispatched, reviewed and integrated from one board.

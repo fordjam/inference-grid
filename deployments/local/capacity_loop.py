@@ -4,7 +4,7 @@ launchd holds StartInterval spawns for a GUI-session agent while the display is 
 ("pended nondemand spawn = interval"), which is exactly when the phone dashboard is the
 only view; a process that is already running is not held. So this loop is the job:
 KeepAlive, no timers. Same scripts, same cadence: the Go and Claude collectors every
-300 s (Claude's own chain runs GOAT, Cline, Z.ai, Codex and the overlay build), the
+300 s (Claude's own chain runs GOAT, Z.ai, Codex and the overlay build), the
 upload every 60 s. Each child is bounded and one job's failure never stops the others.
 """
 

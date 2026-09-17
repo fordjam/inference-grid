@@ -1,5 +1,9 @@
 # Cline outcome normalization foundation
 
+**Retired 2026-09-16** along with the `cline_cli` lane kind (see `docs/LANES.md`, "Cline
+(retired 2026-09-16)"): `cline_outcomes.py` and `tests/test_cline_outcomes.py` are deleted.
+The rest of this document is kept as the record of the qualification work described below.
+
 Local implementation for CLOUD-04, not a new native dispatch or complete Cline integration. `classify_cline(events, supervisor, expected_model)` is pure: it returns `native_complete`, `interrupted` or `unqualified`, a fixed reason, sanitized progress counters, and a structural receipt only for qualified native completion. It never changes account capacity, retries work, or accepts artifacts.
 
 Trust boundary: supervisor metadata must come from the controller, outside model-writable files. Input must be the complete parsed JSONL event stream; reject malformed/truncated JSON before classification. The model must not be allowed to author its own supervisor receipt. Captured text is retained only in the optional successful receipt; avoid logging that receipt. Progress contains no prompt or text.

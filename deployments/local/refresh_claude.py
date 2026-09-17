@@ -186,7 +186,7 @@ def run_collectors(config, run=None):
     run = run or _run
     python = config.get("python", sys.executable)
     here = Path(__file__).resolve().parent
-    for name in ("collect_goat.py", "collect_cline.py", "collect_zai.py", "collect_codex.py"):
+    for name in ("collect_goat.py", "collect_zai.py", "collect_codex.py"):
         run([python, str(here / name)], timeout=40)
     run([python, str(here / "overlay_build.py")], timeout=20)
 

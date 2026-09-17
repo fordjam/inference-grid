@@ -47,7 +47,6 @@ from inference_grid.lanes.brief import (  # noqa: E402
 from inference_grid.lanes.gates import gates_for  # noqa: E402
 from inference_grid.lanes.job import JobError, run_job  # noqa: E402
 from inference_grid.lanes.packet import (  # noqa: E402
-    ClineAdapter,
     CommandCodeAdapter,
     build_loop,
     compact_transcripts,
@@ -214,27 +213,14 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
         deny_read_roots=sandbox.deny_read_roots(),
     )
     sandbox.probe(profile, clone)
-    if args.adapter == "cline":
-        adapter = ClineAdapter(args.model, work=clone, data_dir=attempt_dir / "cline-state")
-        # An isolated --data-dir has no login; the key reaches only this process's
-        # environment, read here by the harness from a 0600 file (as lanes/cline.py does).
-        key_file = Path(args.cline_key_file).expanduser() if args.cline_key_file else None
-        if key_file is None or not key_file.is_file():
-            raise SystemExit(
-                "--cline-key-file (mode 0600, one line: the key) is required for --adapter cline"
-            )
-        if (key_file.stat().st_mode & 0o777) != 0o600:
-            raise SystemExit(f"{key_file} must be mode 0600")
-        cline_key = key_file.read_text().strip()
-    else:
-        (attempt_dir / "grid-effort.mjs").write_text(
-            "export default function (cmd) { cmd.on('session_start', () => { cmd.setEffort('high'); }); }\n"
-        )
-        adapter = CommandCodeAdapter(
-            args.model,
-            mod_path=attempt_dir / "grid-effort.mjs",
-            session_name=f"lane-{args.lane}-14-{packet_id}-{stamp}",
-        )
+    (attempt_dir / "grid-effort.mjs").write_text(
+        "export default function (cmd) { cmd.on('session_start', () => { cmd.setEffort('high'); }); }\n"
+    )
+    adapter = CommandCodeAdapter(
+        args.model,
+        mod_path=attempt_dir / "grid-effort.mjs",
+        session_name=f"lane-{args.lane}-14-{packet_id}-{stamp}",
+    )
     # Nothing from this shell's own model configuration reaches the lane or its gates.
     inherited = {
         k: v
@@ -249,8 +235,6 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
         DO_NOT_TRACK="1",
         PYTHONPATH="src",
     )
-    if args.adapter == "cline":
-        env["CLINE_API_KEY"] = cline_key
     gates = gates_for(
         args.python,
         f"origin/{args.base}",
@@ -341,7 +325,7 @@ def run_packet(args, packet_id: str, brief: str, rules: str, stamp: str) -> dict
             task=f"lane-{args.lane}-14-{packet_id}-{stamp}",
             model=args.model,
             # The ledger's account ids, as configured by board-prepare.
-            account="cline" if args.adapter == "cline" else "goat-account",
+            account="goat-account",
             argv=adapter.first("…"),
             workspace=attempt_dir,
             verdict=verdict,
@@ -373,12 +357,9 @@ def main(argv=None):
     p.add_argument("--branch-prefix", default="glm")
     p.add_argument("--lane", default="glm")
     p.add_argument("--model", default="z-ai/glm-5.3-flash")
-    p.add_argument("--adapter", choices=("command_code", "cline"), default="command_code")
+    p.add_argument("--adapter", choices=("command_code",), default="command_code")
     p.add_argument(
         "--resume", action="store_true", help="keep an existing packet branch; gates decide"
-    )
-    p.add_argument(
-        "--cline-key-file", default=None, help="0600 file holding the Cline API key (adapter cline)"
     )
     p.add_argument("--python", default=None, help="interpreter with the package's dependencies")
     p.add_argument("--packets-root", default="~/.grid-workspaces/packets")

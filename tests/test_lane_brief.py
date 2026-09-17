@@ -138,19 +138,12 @@ def test_run_lane_script_still_exposes_the_moved_helpers():
         assert getattr(run_lane, name) is getattr(brief, name), name
 
 
-def test_cline_adapter_and_transcript_compaction(tmp_path):
-    from inference_grid.lanes.packet import ClineAdapter, compact_transcripts
+def test_transcript_compaction_drops_delta_events(tmp_path):
+    from inference_grid.lanes.packet import compact_transcripts
 
-    a = ClineAdapter(
-        "z-ai/glm-5.3-flash", work=tmp_path, data_dir=tmp_path / "st", binary="/x/cline"
-    )
-    first = a.first("do it")
-    assert first[:2] == ["/x/cline", "do it"] and "--auto-approve" in first and "--json" in first
-    assert a.resume("s1", "fix")[:2] == ["/x/cline", "fix"]  # fresh session: --id refuses a prompt
     native = tmp_path / "native-1.jsonl"
     native.write_text(
         '{"sessionId":"abc"}\n{"type":"thinking_delta","d":"x"}\n{"type":"tool_completed"}\n'
     )
-    assert a.session_id(native) == "abc"
     assert compact_transcripts(tmp_path) == {"native-1.jsonl": 1}
     assert native.read_text().count("\n") == 2 and "thinking_delta" not in native.read_text()

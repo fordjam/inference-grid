@@ -29,7 +29,7 @@ from pathlib import Path
 
 JOB_KEYS = ("repo", "brief", "base", "python", "packets_root", "database", "lanes")
 LANE_KEYS = ("name", "clone", "adapter", "model", "packets", "key_file")
-ADAPTERS = ("command_code", "cline")
+ADAPTERS = ("command_code",)
 DEFAULT_ADAPTER = "command_code"
 DEFAULT_MODEL = "z-ai/glm-5.3-flash"
 DEFAULT_BASE = "glm/work"
@@ -90,8 +90,6 @@ def _lane(entry, base: Path, names: set[str]) -> dict:
     ):
         _fail(f"lane {name} packets", "expected a non-empty list of strings")
     key_file = entry.get("key_file")
-    if adapter == "cline" and key_file is None:
-        _fail(f"lane {name} key_file", "adapter cline needs the key file")
     return {
         "name": name,
         "clone": _path(entry["clone"], f"lane {name} clone", base),
@@ -166,8 +164,6 @@ def lane_argv(job: dict, lane: dict, script=DEFAULT_SCRIPT) -> list[str]:
     ]
     if job["database"]:
         argv += ["--database", job["database"]]
-    if lane["key_file"]:
-        argv += ["--cline-key-file", lane["key_file"]]
     return argv
 
 

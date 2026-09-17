@@ -35,7 +35,6 @@ from ..lanes.brief import (
 from ..lanes.packet import (
     DEFAULT_IDLE_SECONDS,
     DEFAULT_MIN_FREE_BYTES,
-    ClineAdapter,
     CommandCodeAdapter,
     Gate,
     OpencodeAdapter,
@@ -47,11 +46,9 @@ from ..lanes.scout import orient
 from .task import validate_task
 
 # Lane kinds a packet task can run. Command Code, ZCode and OpenCode re-enter the same
-# session on a fix round (`opencode run --session <id>`); the ClinePass CLI cannot (`--id`
-# refuses a prompt in JSON mode), so its rounds are fresh sessions on the fix prompt — the
-# branch and the gate output carry the context, exactly as the operator's driver does it.
-# Kinds outside this set are refused with a reason.
-PACKET_KINDS = ("goat_cli", "zcode_cli", "cline_cli", "opencode_cli")
+# session on a fix round (`opencode run --session <id>`). Kinds outside this set are
+# refused with a reason.
+PACKET_KINDS = ("goat_cli", "zcode_cli", "opencode_cli")
 UNSUPPORTED_ADAPTERS = {}
 
 PACKET_ID = re.compile(r"[A-Z]\d{1,3}")
@@ -242,15 +239,6 @@ def packet_adapter(kind, lane, work, attempt_dir, session_name):
         )
     if kind == "zcode_cli":
         return ZcodeAdapter(work=work, wrapper=lane["executable"])
-    if kind == "cline_cli":
-        # The CLI's login lives in its data directory; the pass entitlement follows it, so
-        # the packet runs on the operator's own Cline state (readable, digested like GOAT's).
-        return ClineAdapter(
-            lane["model"],
-            work=work,
-            data_dir=Path.home() / ".cline" / "data",
-            binary=lane["executable"],
-        )
     if kind == "opencode_cli":
         # The Go plan's login is the CLI's own (`~/.local/share/opencode/auth.json`,
         # read-only under the sandbox); the session id comes from the JSON stream and a
@@ -268,7 +256,6 @@ def build_sandbox(kind, work, attempt_dir):
     # workspace's own write root — it is the one CLI kind that needs no home root.
     extra = {
         "goat_cli": home / ".commandcode",
-        "cline_cli": home / ".cline",
         "zcode_cli": home / ".zcode",
     }.get(kind)
     # The agent writes only in its clone, its CLI's own state and a scratch tmp/ under the

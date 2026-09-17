@@ -509,7 +509,9 @@ def test_the_opencode_cli_round_trip_resumes_its_session(tmp_path):
 
 def test_a_round_that_changes_nothing_is_an_early_stop(tmp_path):
     work = _git_repo(tmp_path / "work")
-    agent = QuietAgent(work, terminal={"type": "run_result", "finishReason": "completed"})
+    agent = QuietAgent(
+        work, terminal={"type": "result", "subtype": "success", "stopReason": "end_turn"}
+    )
     verdict = build_loop(
         agent,
         plain,
@@ -526,8 +528,9 @@ def test_a_round_that_changes_nothing_is_an_early_stop(tmp_path):
     assert verdict["rounds"][0]["agent_reason"] == "agent_stopped_early"
     assert verdict["rounds"][0]["agent_returncode"] == 0
     assert verdict["rounds"][0]["agent_terminal"] == {
-        "kind": "cline",
-        "finish_reason": "completed",
+        "kind": "command_code",
+        "subtype": "success",
+        "stop_reason": "end_turn",
     }
     assert verdict["gates_passed"] is False and verdict["verified_in_lane"] is False
 
@@ -580,7 +583,7 @@ def test_the_early_stop_prompt_tells_the_next_round_nothing_changed(tmp_path):
     assert (tmp_path / "attempt" / "prompt-2.txt").read_text() == second_prompt
 
 
-def test_terminal_corroboration_reads_both_clis_terminal_events(tmp_path):
+def test_terminal_corroboration_reads_the_clis_terminal_event(tmp_path):
     native = tmp_path / "native.jsonl"
     native.write_text(
         '{"type":"event","event":{"type":"model_request_end"}}\n'
@@ -590,13 +593,6 @@ def test_terminal_corroboration_reads_both_clis_terminal_events(tmp_path):
         "kind": "command_code",
         "subtype": "success",
         "stop_reason": "end_turn",
-    }
-    native.write_text(
-        '{"type":"iteration_start"}\n{"type":"run_result","finishReason":"completed"}\n'
-    )
-    assert packet.terminal_corroboration(native) == {
-        "kind": "cline",
-        "finish_reason": "completed",
     }
     native.write_text("not a json document\n")
     assert packet.terminal_corroboration(native) is None
@@ -807,7 +803,9 @@ def test_a_provider_limit_ends_the_attempt_as_a_transport_error(tmp_path):
     assert verdict["reason"].startswith("transport_error: provider limit: ClinePass limit reached")
     assert len(verdict["rounds"]) == 1 and len(agent.calls) == 1
     assert verdict["gates_passed"] is False
-    assert verdict["rounds"][0]["agent_terminal"] == {"kind": "cline", "finish_reason": "error"}
+    # terminal_corroboration no longer recognizes a run_result line (the retired
+    # cline_cli lane's own shape); provider_limit_message still reads it above.
+    assert verdict["rounds"][0]["agent_terminal"] is None
 
 
 def test_a_limit_message_never_overrides_green_gates(tmp_path):

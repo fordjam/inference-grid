@@ -104,9 +104,10 @@ def test_account_readiness_renders_one_row_per_alias(tmp_path):
     assert "| go-alias | acct2 | 0/3 | stale (" in stale
 
 
-def test_empty_ledger_renders_headers_plus_seeded_placeholders(tmp_path):
-    # A fresh ledger has no scorecard rows, but the seeded cline alias placeholder is
-    # named in the readiness view: an unconfigured account is a fact, not silence.
+def test_empty_ledger_renders_headers_with_no_rows(tmp_path):
+    # A fresh ledger has no scorecard rows and, with DEFAULT_ACCOUNTS now empty (the
+    # only packaged lane needing a pre-seeded alias, cline_cli, is retired), no seeded
+    # placeholder rows either.
     ledger = Ledger("sqlite:///" + str(tmp_path / "empty.sqlite"))
     ledger.initialize()
     document = evaluation_document(ledger)
@@ -118,7 +119,7 @@ def test_empty_ledger_renders_headers_plus_seeded_placeholders(tmp_path):
         if line.startswith("| ") and "---" not in line and not line.startswith("| family")
         and not line.startswith("| alias")
     ]
-    assert rows == ["| cline | cline | 0/1 | stale (—) | never | 0 |  |"]
+    assert rows == []
 
 
 def test_write_document_refuses_docs_and_writes_elsewhere(tmp_path):

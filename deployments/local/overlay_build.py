@@ -22,7 +22,6 @@ LANE_PROVIDER = {
     "zcode": "zai",
     "go": "opencode",
     "goat": "command-code",
-    "cline": "clinepass",
 }
 # Lane account -> (overlay provider, display source)
 ZAI_SOURCE = {"zcode": ("zai", "ZCode"), "zai": ("zai", "Claude Code headless")}
@@ -358,10 +357,7 @@ def build(config):
             accounts = replace_account(accounts, cx)
     except (OSError, ValueError):
         pass
-    for name, provider in (
-        ("goat-observation.json", "command-code"),
-        ("cline-observation.json", "clinepass"),
-    ):
+    for name, provider in (("goat-observation.json", "command-code"),):
         try:
             obs = json.loads((out_dir / name).read_text())
             accounts = replace_account(accounts, obs)

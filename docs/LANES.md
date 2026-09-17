@@ -24,8 +24,9 @@ board whose records predate the key routes as it always did — and an absent ke
 learned score: no acceptance rate, no benchmark prior, no quality-per-dollar bandit. Once
 tier, the cross-family rule (a review may not be graded by its own author) and readiness
 have narrowed the field, the lane whose account has the most remaining quota this window
-wins — the tightest of its configured windows (five_hour/weekly/monthly), the same reading
-the capacity dashboard's headline uses. Ties break on lane id. A dry run's `score` is that
+wins — the tightest of its configured windows (five_hour/weekly/monthly): the minimum
+absolute remaining units, not the capacity dashboard headline's percentage-used reading
+of the same "tightest window" idea. Ties break on lane id. A dry run's `score` is that
 winning quota number and `quota_rows` names every candidate's reading; neither `explore`
 nor `value` appears anywhere in a dry run's output.
 
@@ -132,8 +133,9 @@ zero (the 5-hour cap fell to two concurrent 50-minute runs). The lane rows are k
 ```
 
 Run only after the weekly reset (the account exhausts quickly); never give Cline size
-hints — a passing artifact was once deleted to chase a line count. The ledger seeds a
-`cline` alias placeholder on `init`; `configure_account` fills it in.
+hints — a passing artifact was once deleted to chase a line count. (While the lane was
+live, the ledger seeded a `cline` alias placeholder on `init` for `configure_account` to
+fill in; `DEFAULT_ACCOUNTS` is empty now that this was its only entry.)
 
 The subscription's models live in their own id namespace: `cline-pass/<model>`
 (`cline-pass/kimi-k3`, `cline-pass/deepseek-v4.1-flash`, `cline-pass/qwen3.8-max`, …), listed
@@ -156,13 +158,14 @@ is a named `lane_binary_unavailable` finding rather than a silent failure.
 The capacity loop's `board_prepare.py` reconfigures each account from its observation
 file before every board tick. The `goat` account is configured from
 `goat-observation.json` (written by `collect_goat.py`: the `windowLimits` five-hour and
-weekly readings plus the monthly credits read against the plan's 70-cap monthly window)
-and the `cline` account from `cline-observation.json` (written by `collect_cline.py`:
-the three usage-limit windows, `ok` only when all answered). Each observation's windows
-map to remaining units against the documented caps — remaining share of the window ×
-the window's unit cap, the same shape the zai and go accounts already use — and the
-result, with the observation timestamp, is what `configure_account` writes for the
-lane's admission decision.
+weekly readings plus the monthly credits read against the plan's 70-cap monthly window).
+Each observation's windows map to remaining units against the documented caps —
+remaining share of the window × the window's unit cap, the same shape the zai and go
+accounts already use — and the result, with the observation timestamp, is what
+`configure_account` writes for the lane's admission decision. (Until the `cline_cli`
+lane's retirement on 2026-09-16, a `cline` account was configured the same way from
+`cline-observation.json`/`collect_cline.py`; `configure_cline`, those constants and that
+collector are gone along with the lane.)
 
 Because `board_prepare` runs once per pass and a pass can last an hour, the board tick
 itself re-reads a stale lane record's observation file before refusing it: the tick config

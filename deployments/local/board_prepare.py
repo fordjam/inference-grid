@@ -1,11 +1,11 @@
 """Refresh the board ledger's accounts and lane records from live readings. No credentials.
 
-Reads the operator's Z.ai quota file, the go-live observation and the goat/cline quota
-observations, and reconfigures the zai/zcode/go/goat-account/cline accounts plus their lane
-records. The goat and cline lane ids and models come from the config (``goat_lanes`` /
-``cline_lanes``, lists of ``{lane, model}``); with either absent that account is left alone.
+Reads the operator's Z.ai quota file, the go-live observation and the goat quota
+observation, and reconfigures the zai/zcode/go/goat-account accounts plus their lane
+records. The goat lane ids and models come from the config (``goat_lanes``, a list of
+``{lane, model}``); when absent that account is left alone.
 Paths come from the config (``database_url``, ``zai_quota_path``, ``go_live_path``,
-``goat_observation_path``, ``cline_observation_path``); the inference_grid package is expected
+``goat_observation_path``); the inference_grid package is expected
 installed in the interpreter that runs this (``package_src`` may point at a checkout when it
 is not).
 """
@@ -32,12 +32,9 @@ ZAI_PLAN = {"five_hour": 2000, "weekly": 10000}
 GO_WINDOW_UNITS = {"five_hour": 12, "weekly": 30, "monthly": 60}
 GO_VALID = 900
 # The GOAT plan's caps are 14 / 35 / 70 credits (five-hour / weekly / monthly, per
-# collect_goat.py); ClinePass publishes no unit caps, so its windows read against a
-# 100-unit scale per window. Both observations keep their value for 15 minutes.
+# collect_goat.py). The observation keeps its value for 15 minutes.
 GOAT_WINDOW_UNITS = {"five_hour": 14, "weekly": 35, "monthly": 70}
-CLINE_WINDOW_UNITS = {"five_hour": 100, "weekly": 100, "monthly": 100}
 GOAT_VALID = 900
-CLINE_VALID = 900
 ADMISSION_LIMIT_PERCENT = 80
 
 
@@ -135,7 +132,6 @@ def configure(config, ledger):
     for lane, record in lanes.items():
         print(lane, ledger.record_lane(lane, record)["state"])
     configure_goat(config, ledger, now)
-    configure_cline(config, ledger, now)
     print("zcode window", flash_window(now))
 
 
@@ -243,21 +239,6 @@ def configure_goat(config, ledger, now=None):
         time.time() if now is None else now,
         # concurrent attempts the subscription tolerates; the operator sets it from experience
         capacity=int(config.get("goat_capacity", 1)),
-    )
-
-
-def configure_cline(config, ledger, now=None):
-    configure_observation(
-        config,
-        ledger,
-        "cline",
-        _read_observation(config, "cline_observation_path", DEFAULT_DIR / "cline-observation.json"),
-        CLINE_WINDOW_UNITS,
-        CLINE_VALID,
-        config.get("cline_lanes") or [],
-        time.time() if now is None else now,
-        # concurrent attempts the subscription tolerates; the operator sets it from experience
-        capacity=int(config.get("cline_capacity", 1)),
     )
 
 

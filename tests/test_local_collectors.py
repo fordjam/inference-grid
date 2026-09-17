@@ -36,7 +36,6 @@ def load(name):
 zai = load("collect_zai")
 codex = load("collect_codex")
 goat = load("collect_goat")
-cline = load("collect_cline")
 claude = load("refresh_claude")
 overlay = load("overlay_build")
 feed = load("capacity_feed")
@@ -44,7 +43,6 @@ loop = load("capacity_loop")
 tick_boards = load("tick_boards")
 upload = load("upload")
 installer = load("install")
-evals_run = load("evals_run")
 
 
 def iso_ms(ms):
@@ -134,16 +132,6 @@ GOAT_CREDITS = {
         "weekly": {"used": 30.0, "cap": 35.0, "resetAt": 1758434400000},
     },
     "credits": {"monthlyCredits": 21},
-}
-
-CLINE_BODY = {
-    "data": {
-        "limits": [
-            {"type": "five_hour", "percentUsed": 12.5, "resetsAt": "2026-09-15T07:00:00Z"},
-            {"type": "weekly", "percentUsed": 44.0, "resetsAt": "2026-09-19T00:00:00Z"},
-            {"type": "monthly", "percentUsed": 9.0, "resetsAt": None},
-        ]
-    }
 }
 
 CLAUDE_USAGE = {
@@ -406,60 +394,6 @@ class GoatCollectorTests(ObservationShapeMixin, unittest.TestCase):
         )
         self.assertEqual(obs["status"], "ok")
         self.assertEqual(seen["headers"]["Authorization"], "Bearer fake-key")
-
-
-class ClineCollectorTests(ObservationShapeMixin, unittest.TestCase):
-    def test_parse_reads_all_three_windows(self):
-        obs = cline.parse(CLINE_BODY)
-        self.assertEqual(obs["status"], "ok")
-        self.assert_observation_shape(obs, "clinepass")
-        windows = {w["id"]: w for w in obs["windows"]}
-        self.assertEqual(set(windows), {"five_hour", "weekly", "monthly"})
-        self.assertEqual(windows["five_hour"]["used_percent"], 12.5)
-        self.assertEqual(windows["five_hour"]["resets_at"], "2026-09-15T07:00:00+00:00")
-        self.assertIsNone(windows["monthly"]["resets_at"])
-
-    def test_parse_is_unknown_until_every_window_answered(self):
-        body = {"data": {"limits": [dict(CLINE_BODY["data"]["limits"][0])]}}
-        obs = cline.parse(body)
-        self.assertEqual(obs["status"], "unknown")
-        self.assertEqual([w["id"] for w in obs["windows"]], ["five_hour"])
-
-    def test_read_key_from_the_configured_env_file(self):
-        tmp = self.enterContext(_TmpDir())
-        env = tmp.path / ".env.local"
-        env.write_text('OTHER=1\nCLINE_API_KEY="fake-key"\n')
-        self.assertEqual(cline.read_key(env), "fake-key")
-        self.assertIsNone(cline.read_key(tmp.path / "missing"))
-
-    def test_observe_sends_the_bearer_key(self):
-        tmp = self.enterContext(_TmpDir())
-        env = tmp.path / ".env.local"
-        env.write_text("CLINE_API_KEY=fake-key\n")
-        seen = {}
-
-        def fetch(url, headers, timeout):
-            seen["url"], seen["headers"] = url, headers
-            return CLINE_BODY
-
-        obs = cline.observe(fetch, {"cline_credential_path": str(env)})
-        self.assertEqual(obs["status"], "ok")
-        self.assertEqual(seen["url"], cline.API_URL)
-        self.assertEqual(seen["headers"]["Authorization"], "Bearer fake-key")
-
-    def test_observe_unhandled_exception_logs_a_traceback_and_is_not_unknown(self):
-        tmp = self.enterContext(_TmpDir())
-        env = tmp.path / ".env.local"
-        env.write_text("CLINE_API_KEY=fake-key\n")
-
-        def fetch(url, headers, timeout):
-            raise RuntimeError("timed out")
-
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            obs = cline.observe(fetch, {"cline_credential_path": str(env)})
-        self.assertEqual((obs["status"], obs["error"]), ("error", "RuntimeError"))
-        self.assertIn("Traceback (most recent call last)", err.getvalue())
 
 
 class RefreshClaudeTests(unittest.TestCase):
@@ -987,7 +921,6 @@ class OverlayBuildTests(unittest.TestCase):
             json.dumps({"provider": "codex", "status": "ok", "observed_at": "t", "windows": []})
         )
         (tmp.path / "goat-observation.json").write_text(json.dumps(goat.parse(GOAT_CREDITS)))
-        (tmp.path / "cline-observation.json").write_text(json.dumps(cline.parse(CLINE_BODY)))
         config = {
             "output_dir": str(tmp.path),
             "claude_overlay_path": str(tmp.path / "no-prior-overlay.json"),
@@ -998,7 +931,7 @@ class OverlayBuildTests(unittest.TestCase):
         result = overlay.build(config)
         self.assertEqual(
             [a["provider"] for a in result["accounts"]],
-            ["zai", "codex", "command-code", "clinepass"],
+            ["zai", "codex", "command-code"],
         )
         self.assertEqual(result["attempts"], [])
 
@@ -1090,11 +1023,11 @@ class CapacityPanelTests(unittest.TestCase):
         db = tmp.path / "board.sqlite"
         make_board_db(
             db,
-            attempt_rows=[("a1", "cline-account", "abandoned", {"weekly": 40.0}, time.time())],
+            attempt_rows=[("a1", "zai-account", "abandoned", {"weekly": 40.0}, time.time())],
         )
         rows = {r["provider"]: r for r in overlay.capacity_panel(db)}
-        self.assertEqual(rows["clinepass"]["failed_abandoned_count"], 1)
-        self.assertEqual(rows["clinepass"]["failed_abandoned_consumed"], 0.0)
+        self.assertEqual(rows["zai"]["failed_abandoned_count"], 1)
+        self.assertEqual(rows["zai"]["failed_abandoned_consumed"], 0.0)
 
     def test_active_attempts_are_excluded_entirely(self):
         tmp = self.enterContext(_TmpDir())
@@ -1383,117 +1316,10 @@ class InstallTests(unittest.TestCase):
     def test_no_rendered_plist_carries_a_start_interval(self):
         tmp = self.enterContext(_TmpDir())
         installer.main(["--out-dir", str(tmp.path), "--python", "/usr/bin/python3"])
-        for name in [name for name, _s, _l in installer.RUNTIMES] + [installer.EVALS_RUNTIME[0]]:
+        for name, _s, _l in installer.RUNTIMES:
             plist = tmp.path / f"com.inference-grid.{name}.plist"
             self.assertNotIn("StartInterval", plistlib.loads(plist.read_bytes()))
             self.assertNotIn("StartInterval", plist.read_text())
-
-    def test_install_renders_the_evals_agent_with_the_config_path(self):
-        # Brief 20, M5: the eval agent is a KeepAlive plist whose program is the hourly
-        # loop, pointed at the operator's config — the file whose `evals_corpus` names the
-        # corpus the runs are authored from.
-        tmp = self.enterContext(_TmpDir())
-        config = tmp.path / "config.json"
-        config.write_text(json.dumps({"evals_corpus": "/operator/eval-corpus"}))
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            installer.main(
-                [
-                    "--out-dir",
-                    str(tmp.path / "out"),
-                    "--python",
-                    "/usr/bin/python3",
-                    "--config",
-                    str(config),
-                ]
-            )
-        plist = tmp.path / "out" / "com.inference-grid.evals.plist"
-        data = plistlib.loads(plist.read_bytes())
-        self.assertEqual(data["Label"], "com.inference-grid.evals")
-        self.assertIs(data["KeepAlive"], True)
-        self.assertIs(data["RunAtLoad"], True)
-        self.assertEqual(data["ProcessType"], "Interactive")
-        # The loop is the program; the config and the corpus it names are its arguments.
-        self.assertEqual(data["ProgramArguments"][0], "/usr/bin/python3")
-        self.assertEqual(data["ProgramArguments"][1], str(installer.DEFAULT_DIR / "evals_run.py"))
-        self.assertIn(str(config), data["ProgramArguments"])
-        self.assertIn("/operator/eval-corpus", data["ProgramArguments"])
-        self.assertIn(str(installer.DEFAULT_DIR / "evals.log"), data["StandardOutPath"])
-        self.assertIn(
-            f"launchctl bootstrap gui/{os.getuid()} {plist}",
-            out.getvalue(),
-        )
-
-    def test_evals_corpus_flag_overrides_the_config(self):
-        tmp = self.enterContext(_TmpDir())
-        installer.main(
-            [
-                "--out-dir",
-                str(tmp.path),
-                "--python",
-                "/usr/bin/python3",
-                "--config",
-                str(tmp.path / "absent.json"),
-                "--evals-corpus",
-                "/operator/other-corpus",
-            ]
-        )
-        data = plistlib.loads((tmp.path / "com.inference-grid.evals.plist").read_bytes())
-        self.assertIn("/operator/other-corpus", data["ProgramArguments"])
-
-
-class EvalsRunTests(unittest.TestCase):
-    def config(self, tmp):
-        return {
-            "evals_corpus": str(tmp.path / "corpus"),
-            "lanes_path": str(tmp.path / "lanes.json"),
-            "board_dir": str(tmp.path / "board"),
-            "evals_project_root": str(tmp.path / "project"),
-            "evals_dir": str(tmp.path),
-            "log_path": str(tmp.path / "evals.log"),
-        }
-
-    def test_the_payload_names_every_path_from_the_config(self):
-        tmp = self.enterContext(_TmpDir())
-        payload = evals_run.eval_payload(self.config(tmp))
-        self.assertEqual(payload["corpus_dir"], str(tmp.path / "corpus"))
-        self.assertEqual(payload["lanes"], str(tmp.path / "lanes.json"))
-        self.assertEqual(payload["board_dir"], str(tmp.path / "board"))
-        self.assertEqual(payload["project_root"], str(tmp.path / "project"))
-        # An incomplete config asks for nothing rather than guessing.
-        self.assertIsNone(evals_run.eval_payload({"evals_corpus": "/x"}))
-
-    def test_the_loop_calls_once_per_interval_and_stops_on_its_deadline(self):
-        tmp = self.enterContext(_TmpDir())
-        calls = []
-
-        def spawn(config):
-            calls.append(config)
-
-        sleeps = []
-        clock = FakeClock()
-        evals_run.run(
-            self.config(tmp),
-            spawn,
-            lambda seconds: (sleeps.append(seconds), clock.sleep(seconds))[1],
-            clock=clock.clock,
-            deadline=3 * evals_run.EVAL_SECONDS,
-        )
-        # Immediately at 0, then at 3600 and 7200; the sleep after the third reaches the
-        # deadline, so the loop ends without a fourth call.
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(sleeps, [evals_run.EVAL_SECONDS] * 3)
-
-    def test_a_default_reports_an_incomplete_config_without_spawning(self):
-        tmp = self.enterContext(_TmpDir())
-        config = {"log_path": str(tmp.path / "evals.log")}
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertIsNone(evals_run.default_evals(config))
-        self.assertIn("config incomplete", (tmp.path / "evals.log").read_text())
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TickTimeoutTests(unittest.TestCase):

@@ -160,17 +160,6 @@ def test_validation_rejects_bad_packet_specs():
             packet_task.validate_board_task(task)
 
 
-def test_cline_cli_runs_packets_as_fresh_sessions(tmp_path):
-    from inference_grid.lanes.packet import ClineAdapter
-
-    assert "cline_cli" in packet_task.PACKET_KINDS and not packet_task.UNSUPPORTED_ADAPTERS
-    lane = {"model": "cline-pass/deepseek-v4.1-flash", "executable": "/x/cline"}
-    adapter = packet_task.packet_adapter("cline_cli", lane, tmp_path, tmp_path, "s")
-    assert isinstance(adapter, ClineAdapter)
-    # no --id: a later round is a fresh session on the fix prompt
-    assert adapter.resume("s1", "fix")[:2] == ["/x/cline", "fix"]
-
-
 def test_opencode_cli_runs_packets_as_resumed_sessions(tmp_path):
     from inference_grid.lanes.packet import OpencodeAdapter
 
@@ -336,7 +325,7 @@ def tick(world, **kwargs):
         world["ledger"],
         world["lanes"],
         world["lanes_path"],
-        {"packet-cli": world["account"], "cline-lane": world["account"]},
+        {"packet-cli": world["account"], "http-lane": world["account"]},
         world["packets"],
         **kwargs,
     )
@@ -486,11 +475,11 @@ def test_an_unresolvable_base_refuses_before_any_attempt(world):
 
 def test_an_unsupported_lane_kind_refuses_and_touches_nothing(world):
     # go_http is a one-request kind with no agent to re-enter; it never runs packets.
-    world["lanes"]["cline-lane"] = dict(world["lanes"]["packet-cli"], kind="go_http")
-    world["ledger"].record_lane("cline-lane", ready_record(time.time(), provider="cline-lane"))
+    world["lanes"]["http-lane"] = dict(world["lanes"]["packet-cli"], kind="go_http")
+    world["ledger"].record_lane("http-lane", ready_record(time.time(), provider="http-lane"))
     task_path = world["board"] / "d1-packet.json"
     raw = json.loads(task_path.read_text())
-    raw["lanes"] = ["cline-lane"]
+    raw["lanes"] = ["http-lane"]
     task_path.write_text(json.dumps(raw, indent=1) + "\n")
     results = tick(world)
     assert "go_http" in results[0]["result"] and "does not run packet" in results[0]["result"]
@@ -522,14 +511,14 @@ def test_the_commit_gate_and_the_prompt_carry_the_lanes_own_trailer(world):
     """A DeepSeek lane's packet is attributed to DeepSeek — the gate demanded the GLM
     trailer for every lane, so DeepSeek's landed work was signed GLM."""
     lane = world["lanes"]["packet-cli"]
-    lane.update(family="deepseek", model="cline-pass/deepseek-v4.1-flash", kind="cline_cli")
+    lane.update(family="deepseek", model="deepseek-v4.1-flash", kind="zcode_cli")
     world["lanes_path"].write_text(json.dumps({"lanes": world["lanes"]}))
     world["ledger"].configure_account(
         world["account"],
         1,
         {"five_hour": 10, "weekly": 20},
         time.time() + 600,
-        ["cline-pass/deepseek-v4.1-flash"],
+        ["deepseek-v4.1-flash"],
     )
     results = tick(world)
     assert [r["result"] for r in results] == ["passed"]

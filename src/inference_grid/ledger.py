@@ -116,9 +116,9 @@ locks = Table("locks", metadata, Column("id", String, primary_key=True))
 ACTIVE = ("queued", "dispatching", "held")
 # Alias placeholders seeded by initialize() for packaged lanes the operator has not
 # configured yet: no quota, no models - nothing can claim against them until
-# configure_account fills them in. cline ships here because its lane module is packaged
-# and its absence used to surface only as a refused collect.
-DEFAULT_ACCOUNTS = ("cline",)
+# configure_account fills them in. Empty now that the last packaged lane needing a
+# pre-seeded alias (the retired cline_cli lane) is gone.
+DEFAULT_ACCOUNTS = ()
 # Per-model routing metadata a lane record may carry beyond the readiness classifier's
 # fixed key set; stripped before classification, stored with the record.
 LANE_RECORD_METADATA = ("unsupported_until",)
