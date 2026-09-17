@@ -591,7 +591,6 @@ def admit(
     project_root,
     packet_dir,
     account_alias,
-    input_dir=None,
 ):
     """Submit and claim one attempt for the task without running it (J6).
 
@@ -608,15 +607,7 @@ def admit(
             "packet": True,
             **admit_packet(ledger, lanes, lane_id, task, project_root, packet_dir, account_alias),
         }
-    if input_dir is None:
-        input_dir, manifest = stage_packet(project_root, task, packet_dir)
-    else:
-        input_dir = Path(input_dir)
-        manifest = {
-            p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in sorted(input_dir.iterdir())
-            if p.is_file()
-        }
+    input_dir, manifest = stage_packet(project_root, task, packet_dir)
     workspace = Path(packet_dir) / "attempts"
     workspace.mkdir(exist_ok=True)
     spec = {
@@ -672,7 +663,6 @@ def dispatch(
     project_root,
     packet_dir,
     account_alias,
-    input_dir=None,
     admission=None,
 ):
     """Execute one attempt for the task on the lane; returns (aid, state, output_dir).
@@ -692,7 +682,6 @@ def dispatch(
             project_root,
             packet_dir,
             account_alias,
-            input_dir=input_dir,
         )
     if admission["packet"]:
         # The build→gate→re-enter loop: admission happened above, the loop runs here.
