@@ -10,6 +10,11 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 PROVIDERS = {"codex", "claude", "clinepass", "command-code", "opencode", "zai"}
+# Every real ISO8601 instant in this codebase starts "19" or "20"; this sentinel sorts
+# lexicographically after all of them, so `clean_operator`/`clean_failures`'s
+# newest-first pre-truncation sort ranks a row with no `since` as the *most* recent --
+# a missing timestamp must read as "keep this", never as an excuse to drop it first.
+SINCE_MISSING_SORTS_NEWEST = "9"
 MAX_BOARD_ROWS = 200
 BOARD_LISTS = ("planned", "active", "blocked", "landed_today")
 BOARD_ROW_STRINGS = (
@@ -79,12 +84,19 @@ def clean_operator(rows):
     """Sanitize operator rows to their kind, id, reason and since.
 
     Unknown keys are stripped; rows without kind and id are dropped. This is routing
-    attention for the dashboard, never task names, prompts or credentials.
+    attention for the dashboard, never task names, prompts or credentials. Kept most
+    recent `since` first *before* the 50-row cap -- an alphabetically-early kind (e.g.
+    "land_request" sorting after "held_attempt") must never push a newer, more urgent
+    row out of the bound just because the source list was built kind-then-id. A row
+    with no `since` at all (a currently-raised watch alarm, an operator's own recorded
+    decision -- both real, live attention items that just carry no timestamp) sorts as
+    *newest*, never oldest: it must not be the first thing evicted past the cap only
+    because it lacks a field other kinds happen to have.
     """
     if not isinstance(rows, list):
         return []
     clean = []
-    for row in rows[:50]:
+    for row in rows:
         if not isinstance(row, dict):
             continue
         entry = {}
@@ -94,7 +106,8 @@ def clean_operator(rows):
                 entry[key] = value[:200]
         if "kind" in entry and "id" in entry:
             clean.append(entry)
-    return clean
+    clean.sort(key=lambda e: e.get("since") or SINCE_MISSING_SORTS_NEWEST, reverse=True)
+    return clean[:50]
 
 
 def clean_accepted_work(rows):
@@ -195,6 +208,90 @@ def clean_capacity_panel(rows):
     return clean
 
 
+def clean_heartbeats(rows):
+    """Sanitize 02-A1 heartbeat rows: a name, an age in seconds, and the instant.
+
+    Unknown keys are stripped; rows without a name are dropped. `age_seconds` stays
+    null rather than becoming 0 when the source file was missing or unreadable — a
+    missing heartbeat must never render as a fresh one.
+    """
+    if not isinstance(rows, list):
+        return []
+    clean = []
+    for row in rows[:50]:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("name"), str)
+            or not row["name"].strip()
+        ):
+            continue
+        entry = {"name": row["name"][:200]}
+        age = row.get("age_seconds")
+        entry["age_seconds"] = (
+            float(age)
+            if type(age) in (int, float) and not isinstance(age, bool) and age >= 0
+            else None
+        )
+        since = row.get("since")
+        entry["since"] = since[:200] if isinstance(since, str) else ""
+        clean.append(entry)
+    return clean
+
+
+def clean_disk_usage(usage):
+    """Sanitize 02-A1's `~/.grid-workspaces` reading: two byte counts, never the path.
+
+    The path is local filesystem detail with no value on a dashboard; only the counts
+    (and whether the root exists) are kept.
+    """
+    if not isinstance(usage, dict):
+        return None
+    total = usage.get("total_bytes")
+    cap = usage.get("cap_bytes")
+    if type(total) not in (int, float) or isinstance(total, bool) or total < 0:
+        return None
+    if type(cap) not in (int, float) or isinstance(cap, bool) or cap <= 0:
+        return None
+    return {
+        "exists": bool(usage.get("exists")),
+        "total_bytes": float(total),
+        "cap_bytes": float(cap),
+        "over_cap": bool(usage.get("over_cap")),
+    }
+
+
+FAILURE_KINDS = {"failed_attempt", "held_attempt"}
+
+
+def clean_failures(rows):
+    """Sanitize 02-C3 rows: kind/id/task/reason/since plus a bounded log tail and
+    suggestion. Never a lane's prompt or credentials — the log tail is a build
+    transcript, bounded the same as everywhere else this repo shows one. Kept most
+    recent `since` first before the 50-row cap, same reasoning as `clean_operator`:
+    "failed_attempt" sorts before "held_attempt", so a naive `rows[:50]` on a kind-
+    sorted list could silently drop every held row once failures alone pass 50.
+    """
+    if not isinstance(rows, list):
+        return []
+    clean = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("kind") not in FAILURE_KINDS:
+            continue
+        if not isinstance(row.get("id"), str) or not row["id"].strip():
+            continue
+        entry = {"kind": row["kind"], "id": row["id"][:200]}
+        for key in ("task", "reason", "since"):
+            value = row.get(key)
+            entry[key] = value[:200] if isinstance(value, str) else ""
+        log_tail = row.get("log_tail")
+        entry["log_tail"] = log_tail[-4096:] if isinstance(log_tail, str) else ""
+        suggestion = row.get("suggestion")
+        entry["suggestion"] = suggestion[:400] if isinstance(suggestion, str) else ""
+        clean.append(entry)
+    clean.sort(key=lambda e: e.get("since") or SINCE_MISSING_SORTS_NEWEST, reverse=True)
+    return clean[:50]
+
+
 def _clean_board_row(row):
     entry = {}
     for key in BOARD_ROW_STRINGS:
@@ -263,12 +360,14 @@ def timestamp(value):
 
 def project(raw, overlays=()):
     # An overlay is a list of account observations or {"accounts": [...], "attempts": [...],
-    # "scorecard": [...], "operator": [...], "accepted_work": [...], "boards": [...]};
+    # "scorecard": [...], "operator": [...], "accepted_work": [...], "boards": [...],
+    # "heartbeats": [...], "disk_usage": {...}, "failures": [...]};
     # the boards list is local-only (task ids are project names) and carried for the local
     # page; overlay attempts replace
     # the upstream activity list when present, the scorecard (per model routing evidence) and
-    # the operator/accepted-work lists (needs-you rows and the goal's weekly metric) are
-    # accepted from the overlay only.
+    # the operator/accepted-work lists (needs-you rows and the goal's weekly metric), the
+    # heartbeats/disk_usage/failures rows (02-A1's open half, 02-C3) are accepted from the
+    # overlay only.
     overlay_accounts = overlays.get("accounts", []) if isinstance(overlays, dict) else overlays
     overlay_attempts = overlays.get("attempts") if isinstance(overlays, dict) else None
     overlay_scorecard = overlays.get("scorecard") if isinstance(overlays, dict) else None
@@ -277,6 +376,9 @@ def project(raw, overlays=()):
     overlay_recall = overlays.get("reviewer_recall") if isinstance(overlays, dict) else None
     overlay_boards = overlays.get("boards") if isinstance(overlays, dict) else None
     overlay_capacity_panel = overlays.get("capacity_panel") if isinstance(overlays, dict) else None
+    overlay_heartbeats = overlays.get("heartbeats") if isinstance(overlays, dict) else None
+    overlay_disk_usage = overlays.get("disk_usage") if isinstance(overlays, dict) else None
+    overlay_failures = overlays.get("failures") if isinstance(overlays, dict) else None
     accounts = {}
     for a in [*raw.get("accounts", []), *overlay_accounts]:
         if not isinstance(a, dict) or a.get("provider") not in PROVIDERS:
@@ -328,6 +430,9 @@ def project(raw, overlays=()):
         reviewer_recall=clean_reviewer_recall(overlay_recall),
         boards=clean_boards(overlay_boards),
         capacity_panel=clean_capacity_panel(overlay_capacity_panel),
+        heartbeats=clean_heartbeats(overlay_heartbeats),
+        disk_usage=clean_disk_usage(overlay_disk_usage),
+        failures=clean_failures(overlay_failures),
         served_at=datetime.now(timezone.utc).isoformat(),
     )
 

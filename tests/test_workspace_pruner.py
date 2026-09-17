@@ -2,6 +2,7 @@
 
 Never points at the real ~/.grid-workspaces or the real board database.
 """
+
 import json
 import time
 import unittest
@@ -121,7 +122,9 @@ class PruneTests(unittest.TestCase):
             ws = root / "attempt-1"
             make_dir_with_bytes(ws, 5 * pruner.GIGABYTE)
             seed_attempt(ledger, "a1", ws, "landed", 1.0)
-            report = pruner.prune(root=root, database_url=url)
+            report = pruner.prune(
+                root=root, database_url=url, reading_path=Path(d) / "reading.json"
+            )
             self.assertTrue(report["dry_run"])
             self.assertTrue(ws.exists(), "dry-run must never delete")
             self.assertEqual(report["deleted"], [])
@@ -136,7 +139,9 @@ class PruneTests(unittest.TestCase):
             ws = root / "attempt-1"
             make_dir_with_bytes(ws, 1024)
             seed_attempt(ledger, "a1", ws, "landed", 1.0)
-            report = pruner.prune(root=root, database_url=url, dry_run=False)
+            report = pruner.prune(
+                root=root, database_url=url, dry_run=False, reading_path=Path(d) / "reading.json"
+            )
             self.assertTrue(ws.exists())
             self.assertEqual(report["deleted"], [])
 
@@ -154,7 +159,11 @@ class PruneTests(unittest.TestCase):
             seed_attempt(ledger, "a1", old, "landed", 1.0)
             seed_attempt(ledger, "a2", newer, "landed", 2.0)
             report = pruner.prune(
-                root=root, database_url=url, cap_bytes=3 * pruner.GIGABYTE, dry_run=False
+                root=root,
+                database_url=url,
+                cap_bytes=3 * pruner.GIGABYTE,
+                dry_run=False,
+                reading_path=Path(d) / "reading.json",
             )
             self.assertFalse(old.exists(), "the older resolved attempt is freed first")
             self.assertTrue(newer.exists(), "freeing one is enough to drop under cap")
@@ -171,7 +180,9 @@ class PruneTests(unittest.TestCase):
             active = root / "attempt-active"
             make_dir_with_bytes(active, unit)
             seed_attempt(ledger, "a1", active, "dispatching", 1.0)
-            report = pruner.prune(root=root, database_url=url, dry_run=False)
+            report = pruner.prune(
+                root=root, database_url=url, dry_run=False, reading_path=Path(d) / "reading.json"
+            )
             self.assertTrue(active.exists())
             self.assertEqual(report["deleted"], [])
             self.assertEqual(report["would_delete"], [])
@@ -188,7 +199,9 @@ class PruneTests(unittest.TestCase):
             make_dir_with_bytes(ws, 5 * pruner.GIGABYTE)
             seed_attempt(ledger, "a1", ws, "failed", 1.0)
             seed_attempt(ledger, "a2", ws, "dispatching", 2.0, task="t2")
-            report = pruner.prune(root=root, database_url=url, dry_run=False)
+            report = pruner.prune(
+                root=root, database_url=url, dry_run=False, reading_path=Path(d) / "reading.json"
+            )
             self.assertTrue(ws.exists(), "a live attempt is using this workspace right now")
             self.assertEqual(report["deleted"], [])
 
@@ -202,7 +215,9 @@ class PruneTests(unittest.TestCase):
             ledger, url = make_ledger(d)
             orphan = root / "packets"
             make_dir_with_bytes(orphan, 6 * pruner.GIGABYTE)
-            report = pruner.prune(root=root, database_url=url, dry_run=False)
+            report = pruner.prune(
+                root=root, database_url=url, dry_run=False, reading_path=Path(d) / "reading.json"
+            )
             self.assertTrue(orphan.exists())
             self.assertEqual(report["deleted"], [])
 
@@ -223,6 +238,7 @@ class PruneTests(unittest.TestCase):
                 cap_bytes=100 * pruner.GIGABYTE,  # stay under cap: alarm-only path
                 alarm_bytes=configured_alarm_bytes,
                 alarm_path=alarm_path,
+                reading_path=Path(d) / "reading.json",
                 dry_run=False,
             )
             self.assertTrue(report["alarm_written"])
@@ -240,11 +256,34 @@ class PruneTests(unittest.TestCase):
             make_dir_with_bytes(root / "attempt-1", 4 * pruner.GIGABYTE)
             alarm_path = Path(d) / "alarms" / "workspace-usage.json"
             report = pruner.prune(
-                root=root, database_url=url, cap_bytes=100 * pruner.GIGABYTE,
-                alarm_path=alarm_path, dry_run=True,
+                root=root,
+                database_url=url,
+                cap_bytes=100 * pruner.GIGABYTE,
+                alarm_path=alarm_path,
+                reading_path=Path(d) / "reading.json",
+                dry_run=True,
             )
             self.assertTrue(report["alarm_written"])
             self.assertFalse(alarm_path.exists())
+
+    def test_reading_is_always_written_dry_run_and_below_every_threshold(self):
+        """02-A1: the needs-you page reads this file instead of re-walking the tree
+        itself on every overlay build -- it must exist even when nothing is alarmed
+        and even on a dry run, since a dry run is prune()'s own default."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "grid-workspaces"
+            ledger, url = make_ledger(d)
+            make_dir_with_bytes(root / "attempt-1", 1024)
+            reading_path = Path(d) / "reading.json"
+            report = pruner.prune(root=root, database_url=url, reading_path=reading_path)
+            self.assertFalse(report["alarm_written"])
+            self.assertTrue(reading_path.exists())
+            payload = json.loads(reading_path.read_text())
+            self.assertEqual(payload["total_bytes"], report["total_bytes"])
+            self.assertEqual(payload["cap_bytes"], report["cap_bytes"])
+            self.assertIn("written_at", payload)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,10 @@
-from inference_grid.capacity import project
+from inference_grid.capacity import (
+    clean_disk_usage,
+    clean_failures,
+    clean_heartbeats,
+    clean_operator,
+    project,
+)
 
 
 def test_projection_strips_credentials_and_marks_bad_numbers_unknown():
@@ -186,6 +192,114 @@ def test_capacity_panel_unknown_provider_is_dropped_not_displayed():
     """overlay_build.capacity_panel() emits an "unknown" row for an unmapped lane
     (see CapacityPanelTests in tests/test_local_collectors.py) -- it must not reach
     the dashboard just because it's the only row for that lane."""
-    rows = [{"provider": "unknown", "landed_count": 3, "landed_consumed": 5.0,
-             "failed_abandoned_count": 0, "failed_abandoned_consumed": 0.0}]
+    rows = [
+        {
+            "provider": "unknown",
+            "landed_count": 3,
+            "landed_consumed": 5.0,
+            "failed_abandoned_count": 0,
+            "failed_abandoned_consumed": 0.0,
+        }
+    ]
     assert project({"accounts": []}, {"capacity_panel": rows})["capacity_panel"] == []
+
+
+# --- 02-A1 open half: heartbeats, disk usage, failures ---
+
+
+def test_clean_heartbeats_keeps_named_rows_with_unknown_age_as_none():
+    rows = [
+        {
+            "name": "tick-boards",
+            "age_seconds": 42.5,
+            "since": "2026-09-17T00:00:00+00:00",
+            "junk": 1,
+        },
+        {"name": "zai", "age_seconds": None, "since": ""},
+        {"name": "", "age_seconds": 10, "since": ""},  # dropped: no name
+        "not a dict",
+    ]
+    result = clean_heartbeats(rows)
+    assert result == [
+        {"name": "tick-boards", "age_seconds": 42.5, "since": "2026-09-17T00:00:00+00:00"},
+        {"name": "zai", "age_seconds": None, "since": ""},
+    ]
+
+
+def test_clean_heartbeats_defaults_to_empty_without_an_overlay():
+    assert project({"accounts": []}, [])["heartbeats"] == []
+
+
+def test_clean_disk_usage_keeps_the_two_counts_never_the_path():
+    usage = {
+        "root": "/Users/james/.grid-workspaces",
+        "exists": True,
+        "total_bytes": 100,
+        "cap_bytes": 4000000000,
+        "over_cap": False,
+    }
+    result = clean_disk_usage(usage)
+    assert result == {
+        "exists": True,
+        "total_bytes": 100.0,
+        "cap_bytes": 4000000000.0,
+        "over_cap": False,
+    }
+    assert "root" not in result
+
+
+def test_clean_disk_usage_rejects_bad_shapes():
+    assert clean_disk_usage(None) is None
+    assert clean_disk_usage({"total_bytes": "nope", "cap_bytes": 10}) is None
+    assert clean_disk_usage({"total_bytes": 10, "cap_bytes": 0}) is None
+
+
+def test_clean_disk_usage_defaults_to_none_without_an_overlay():
+    assert project({"accounts": []}, [])["disk_usage"] is None
+
+
+def test_clean_failures_bounds_the_log_tail_and_drops_unknown_kinds():
+    rows = [
+        {
+            "kind": "held_attempt",
+            "id": "a1",
+            "task": "t1",
+            "reason": "rounds_exhausted",
+            "since": "2026-09-17T00:00:00+00:00",
+            "log_tail": "x" * 5000,
+            "suggestion": "raise max_rounds",
+            "credential": "secret",
+        },
+        {"kind": "queued", "id": "a2"},  # dropped: not a failure kind
+        {"kind": "failed_attempt", "id": ""},  # dropped: no id
+    ]
+    result = clean_failures(rows)
+    assert len(result) == 1
+    assert result[0]["kind"] == "held_attempt"
+    assert result[0]["id"] == "a1"
+    assert len(result[0]["log_tail"]) == 4096
+    assert "credential" not in result[0]
+    assert "secret" not in str(result)
+
+
+def test_clean_failures_defaults_to_empty_without_an_overlay():
+    assert project({"accounts": []}, [])["failures"] == []
+
+
+def test_clean_operator_keeps_the_newest_50_rather_than_truncating_by_source_order():
+    # 60 dated held_attempt rows, oldest-declared first, plus one undated alarm.
+    # Sorting purely by (kind, id) before truncating -- the bug found in review --
+    # would keep the 50 alphabetically-first rows (and always keep "alarm", since it
+    # sorts before "held_attempt"); the fix must instead keep the 50 *newest by since*,
+    # with the undated alarm surviving too since a missing since must read as "keep".
+    dated = [
+        {"kind": "held_attempt", "id": f"a{i:02d}", "since": f"2026-09-17T00:{i:02d}:00+00:00"}
+        for i in range(60)
+    ]
+    undated_alarm = {"kind": "alarm", "id": "zzz-no-since"}
+    result = clean_operator(dated + [undated_alarm])
+    assert len(result) == 50
+    kept_ids = {r["id"] for r in result}
+    assert "a59" in kept_ids  # the latest-timestamped row
+    assert "a00" not in kept_ids  # the earliest-timestamped row is evicted
+    assert "zzz-no-since" in kept_ids  # undated is never the first thing dropped

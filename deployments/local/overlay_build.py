@@ -403,28 +403,46 @@ def boards_section(config):
 
 
 def operator_lists(config):
-    """The needs-you rows and the weekly accepted-work metric (brief 14 C2), from the ledger,
-    the boards' blocked tasks, watch's state file and an optional owner-decisions file.
-    Empty lists when the package or the ledger is unavailable: the dashboard renders without."""
+    """The needs-you rows, the weekly accepted-work metric (brief 14 C2) and 02-A1's open
+    half (land requests, heartbeat ages, other projects' data-status alarms, disk use)
+    plus 02-C3's failed/held rows, from the ledger, the boards' blocked tasks, watch's
+    state file and an optional owner-decisions file.
+    Empty lists when the package or the ledger is unavailable: the dashboard renders without.
+    `heartbeat_paths` and `data_status_paths` ({name: path}) and `workspace_status_path` /
+    `workspace_cap_bytes` are operator-supplied config, read-only, never invented here.
+
+    Disk use always reads `workspace_status_path` (02-A5's pruner's own cached reading)
+    here, never `workspace_root` -- this function runs inside a subprocess on a short
+    timeout (`refresh_go.py`/`refresh_claude.py`, 20 s), and walking a real multi-GB
+    `~/.grid-workspaces` live measured 30+ seconds in review. A live walk is only safe
+    from the `inference-grid needs-you` command, run on demand."""
     try:
         if config.get("package_src"):
             sys.path.insert(0, str(config["package_src"]))
         from inference_grid.ledger import Ledger
-        from inference_grid.operator_queue import build_overlay
+        from inference_grid.needs_you import needs_you
 
         ledger = Ledger(config.get("database_url", "sqlite:///" + str(BOARD_DB)))
         board_dirs = [b["board_dir"] for b in config.get("boards", []) if isinstance(b, dict)]
-        return build_overlay(
+        return needs_you(
             ledger,
             board_dirs=board_dirs,
             watch_state=config.get("watch_state"),
             owner_decisions=config.get("owner_decisions"),
+            heartbeat_paths=config.get("heartbeat_paths"),
+            data_status_paths=config.get("data_status_paths"),
+            workspace_status_path=config.get("workspace_status_path"),
+            workspace_cap_bytes=config.get("workspace_cap_bytes"),
+            packets_root=config.get("packets_root"),
         )
     except Exception as exc:  # noqa: BLE001 — the overlay must still be written
         return {
             "operator": [],
             "accepted_work": [],
             "reviewer_recall": [],
+            "heartbeats": [],
+            "disk_usage": None,
+            "failures": [],
             "operator_error": type(exc).__name__,
         }
 

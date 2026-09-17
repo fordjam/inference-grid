@@ -10,6 +10,7 @@ crosses a hard cap, and writes an alarm file once it crosses a lower watermark f
 explicitly. Reads the ledger's attempts table (workspace, state, updated) --
 never writes to it; this script only removes directories on disk.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,6 +27,15 @@ from inference_grid.ledger import ACTIVE, attempts
 DEFAULT_ROOT = Path.home() / ".grid-workspaces"
 DEFAULT_DATABASE_URL = "sqlite:///" + str(Path.home() / ".local/share/inference-grid/board.sqlite")
 DEFAULT_ALARM_PATH = Path.home() / ".local/share/inference-grid/alarms/workspace-usage.json"
+# 02-A1: the needs-you page reads this reading every build, never re-walking the tree
+# itself (that walk took 30+ seconds against the real ~/.grid-workspaces in review,
+# well past overlay_build.py's 20 s subprocess timeout). Written every run regardless
+# of dry_run or the alarm threshold -- unlike DEFAULT_ALARM_PATH, which is a distinct
+# file with its own, narrower contract ("was over the alarm threshold") this never
+# touches.
+DEFAULT_READING_PATH = (
+    Path.home() / ".local/share/inference-grid/alarms/workspace-usage-reading.json"
+)
 GIGABYTE = 1024**3
 HARD_CAP_BYTES = 4 * GIGABYTE
 ALARM_BYTES = 3 * GIGABYTE
@@ -109,12 +119,34 @@ def candidates(root: Path, resolved: dict[str, float]) -> list[tuple[Path, float
 def write_alarm(path: Path, total_bytes: int, cap_bytes: int, alarm_bytes: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps({
-        "written_at": time.strftime("%FT%TZ", time.gmtime()),
-        "total_bytes": total_bytes,
-        "alarm_bytes": alarm_bytes,
-        "cap_bytes": cap_bytes,
-    }))
+    tmp.write_text(
+        json.dumps(
+            {
+                "written_at": time.strftime("%FT%TZ", time.gmtime()),
+                "total_bytes": total_bytes,
+                "alarm_bytes": alarm_bytes,
+                "cap_bytes": cap_bytes,
+            }
+        )
+    )
+    os.replace(tmp, path)
+
+
+def write_reading(path: Path, root: Path, total_bytes: int, cap_bytes: int) -> None:
+    """The plain reading, every run -- `total_bytes` is already paid for by `prune()`'s
+    own `directory_size(root)` call, so this costs nothing extra."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(
+            {
+                "written_at": time.strftime("%FT%TZ", time.gmtime()),
+                "root": str(root),
+                "total_bytes": total_bytes,
+                "cap_bytes": cap_bytes,
+            }
+        )
+    )
     os.replace(tmp, path)
 
 
@@ -124,9 +156,11 @@ def prune(
     cap_bytes: int = HARD_CAP_BYTES,
     alarm_bytes: int = ALARM_BYTES,
     alarm_path: Path = DEFAULT_ALARM_PATH,
+    reading_path: Path = DEFAULT_READING_PATH,
     dry_run: bool = True,
 ) -> dict:
     total = directory_size(root)
+    write_reading(reading_path, root, total, cap_bytes)
     report = {
         "root": str(root),
         "total_bytes": total,
@@ -169,10 +203,14 @@ def main(argv=None) -> int:
     parser.add_argument("--root", default=str(DEFAULT_ROOT))
     parser.add_argument("--database-url", default=DEFAULT_DATABASE_URL)
     parser.add_argument("--alarm-path", default=str(DEFAULT_ALARM_PATH))
+    parser.add_argument("--reading-path", default=str(DEFAULT_READING_PATH))
     parser.add_argument("--cap-gb", type=float, default=HARD_CAP_BYTES / GIGABYTE)
     parser.add_argument("--alarm-gb", type=float, default=ALARM_BYTES / GIGABYTE)
-    parser.add_argument("--execute", action="store_true",
-                         help="actually delete and write the alarm file; default is dry-run")
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="actually delete and write the alarm file; default is dry-run",
+    )
     args = parser.parse_args(argv)
     report = prune(
         root=Path(args.root).expanduser(),
@@ -180,6 +218,7 @@ def main(argv=None) -> int:
         cap_bytes=int(args.cap_gb * GIGABYTE),
         alarm_bytes=int(args.alarm_gb * GIGABYTE),
         alarm_path=Path(args.alarm_path).expanduser(),
+        reading_path=Path(args.reading_path).expanduser(),
         dry_run=not args.execute,
     )
     print(json.dumps(report, indent=2))

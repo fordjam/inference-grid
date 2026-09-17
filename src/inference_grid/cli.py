@@ -208,6 +208,7 @@ def main():
             "watch",
             "verify-merge",
             "land",
+            "needs-you",
         ],
     )
     parser.add_argument("--json", help="JSON argument file; never store credentials here")
@@ -337,6 +338,7 @@ def main():
         "boards": lambda **kw: boards_command(ledger, **kw),
         "report": lambda **kw: report_command(ledger, week=args.week, **kw),
         "watch": lambda **kw: watch(kw),
+        "needs-you": lambda **kw: needs_you_command(ledger, **kw),
         "inbox-integrate": lambda **kw: inbox_integrate(
             kw["project_root"], kw["task_id"], dry_run=kw.get("dry_run", True)
         ),
@@ -398,9 +400,7 @@ def digest(ledger, boards_dir, since=None):
 def report_command(ledger, week=None, lanes=None, accounts_by_lane=None, prices=None):
     from .report import report as render
 
-    return render(
-        ledger, week=week, lanes=lanes, accounts_by_lane=accounts_by_lane, prices=prices
-    )
+    return render(ledger, week=week, lanes=lanes, accounts_by_lane=accounts_by_lane, prices=prices)
 
 
 def boards_command(
@@ -422,6 +422,40 @@ def watch(spec):
     from .watch import watch as run_watch
 
     return run_watch(spec)
+
+
+def needs_you_command(
+    ledger,
+    board_dirs=(),
+    watch_state=None,
+    owner_decisions=None,
+    heartbeat_paths=None,
+    data_status_paths=None,
+    workspace_root=None,
+    workspace_status_path=None,
+    workspace_cap_bytes=None,
+    packets_root=None,
+):
+    from .needs_you import DEFAULT_WORKSPACE_ROOT, needs_you as render
+
+    # This command is run on demand, never on a scheduled subprocess timeout, so a
+    # live walk of ~/.grid-workspaces (needs_you.disk_usage_row) is the right default
+    # here even though it costs real time -- unlike the capacity dashboard's overlay
+    # build, which must only ever read a cached reading (see overlay_build.py).
+    if workspace_root is None and workspace_status_path is None:
+        workspace_root = str(DEFAULT_WORKSPACE_ROOT)
+    return render(
+        ledger,
+        board_dirs=board_dirs,
+        watch_state=watch_state,
+        owner_decisions=owner_decisions,
+        heartbeat_paths=heartbeat_paths,
+        data_status_paths=data_status_paths,
+        workspace_root=workspace_root,
+        workspace_status_path=workspace_status_path,
+        workspace_cap_bytes=workspace_cap_bytes,
+        packets_root=packets_root,
+    )
 
 
 if __name__ == "__main__":
