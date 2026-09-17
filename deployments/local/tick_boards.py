@@ -1,13 +1,12 @@
 """The board tick loop, rewritten in Python from tick-boards.sh.
 
-Ticks each board named in the config's ``boards`` list, every pass, until the config's
-``deadline`` (epoch seconds). Each board's tick runs in its own thread and the pass joins
-them before it sleeps, so a long packet on one board never delays the reviews on another;
-the ready count is summed after the joins. The ledger is refreshed (board-prepare) before
-every board: a board with several serial reviews outlasts the 15-minute validity of the Go
-reading, and stale accounts refuse the rest of the pass. After each pass the loop logs the
-ready count across boards and sleeps the idle interval when nothing is ready, the busy one
-otherwise. Same ledger as the monarch loop; Kimi is serialised by it.
+Ticks each board named in the config's ``boards`` list until the config's ``deadline``
+(epoch seconds). Each board loops on its own thread — prepare, tick, sleep — so a long
+packet on one board never delays the reviews on another. The ledger is refreshed
+(board-prepare) before every tick: a board with several serial reviews outlasts the
+15-minute validity of the Go reading, and stale accounts refuse the rest of the tick. After
+each tick a board logs its ready count and sleeps the idle interval when nothing is ready,
+the busy one otherwise. Same ledger as the monarch loop; Kimi is serialised by it.
 
 A ``calibration`` block in the config (``corpus_dir``, ``lanes``, ``every_days``) makes the
 loop author a calibration run once the newest scored run is older than ``every_days``: the
@@ -15,7 +14,7 @@ ledger's own calibration outcomes are the clock, so a run in flight does not sto
 run is a board task the board-tick steps through; no lane runs the calibration itself.
 
 A SIGTERM or SIGINT starts a drain: the board ticks in flight (the packet loop's rounds
-included) finish, the remaining boards of the pass are not started and the loop exits; a
+included) finish, no board starts another tick and the loop exits; a
 second signal within 30 s exits at once. While draining the loop writes ``draining`` to a
 state file beside the log, so the operator can see why the restart is slow.
 """
@@ -226,50 +225,66 @@ def run(
     calibrate=None,
     drain=None,
 ):
-    """Prepare before every board; the ready count decides the sleep. Returns the last count.
+    """Each board loops on its own: prepare, tick, sleep, until the deadline. Returns the
+    sum of the boards' last ready counts.
 
-    Each board's tick runs in its own thread and the pass joins them at its end (brief J6),
-    so a board whose packet runs for an hour no longer delays the reviews on the next one:
-    the loop moves on as soon as a board's tick has been started, not when it has settled.
-    The ready count is summed after the joins, and the pass never starts a board once a
-    drain is running — the ticks already in flight still finish.
+    Brief J6 put each board's tick on its own thread but joined the pass before sleeping,
+    so a pass lasted as long as its longest board: on 2026-09-16 a vix-rs packet held every
+    other board's reviews for hours. Now a board's thread runs its own loop — its ready
+    count decides its own sleep — and the boards never wait on one another. `prepare` is
+    serialised (one ledger refresh at a time) and still runs before every tick.
 
-    ``calibrate`` (optional) runs once per pass before the boards: the weekly calibration
-    author is idempotent per run, so a pass that finds a run in flight authors nothing.
-    ``drain`` (optional) ends the loop after the board ticks in flight: the pass's remaining
-    boards are skipped and no further pass or sleep is started.
+    ``calibrate`` (optional) runs on the loop's own thread before the boards start and again
+    every idle interval while they run: the weekly calibration author is idempotent per run.
+    ``drain`` (optional) ends the loop after the ticks in flight: no board starts another
+    tick or sleeps once a drain is running. A board whose tick raises stops the others the
+    same way, and the error is re-raised here once every tick in flight has finished.
     """
-    ready = 0
-    while clock() < deadline and not (drain and drain.draining):
-        if calibrate:
-            calibrate()
-        counts = []
-        failures = []
+    stop = threading.Event()
+    prepare_lock = threading.Lock()
+    counts = {}
+    failures = []
 
-        def one(board):
-            try:
-                counts.append(tick(board))
-            except BaseException as exc:  # noqa: BLE001 - re-raised on the loop's own thread
-                failures.append(exc)
+    def draining():
+        return stop.is_set() or bool(drain and drain.draining)
 
-        threads = []
-        for board in boards:
-            if drain and drain.draining:
-                break
-            prepare()
-            thread = threading.Thread(target=one, args=(board,), daemon=True)
-            threads.append(thread)
-            thread.start()
-        for thread in threads:
-            thread.join()
-        if failures:
-            raise failures[0]
-        ready = sum(counts)
-        if drain and drain.draining:
+    def loop(board):
+        try:
+            while clock() < deadline and not draining():
+                with prepare_lock:
+                    prepare()
+                counts[board] = tick(board)
+                print(
+                    time.strftime("%FT%TZ", time.gmtime()),
+                    f"ready tasks left on {board}:",
+                    counts[board],
+                )
+                if draining():
+                    break
+                sleep(idle if counts[board] == 0 else busy)
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the loop's own thread
+            failures.append(exc)
+            stop.set()
+
+    if calibrate:
+        calibrate()
+    next_calibrate = clock() + idle
+    threads = []
+    for board in boards:
+        if draining():
             break
-        print(time.strftime("%FT%TZ", time.gmtime()), "ready tasks left across boards:", ready)
-        sleep(idle if ready == 0 else busy)
-    return ready
+        thread = threading.Thread(target=loop, args=(board,), daemon=True, name=board)
+        threads.append(thread)
+        thread.start()
+    while any(t.is_alive() for t in threads):
+        for thread in threads:
+            thread.join(1.0)
+        if calibrate and not draining() and clock() >= next_calibrate:
+            calibrate()
+            next_calibrate = clock() + idle
+    if failures:
+        raise failures[0]
+    return sum(counts.values())
 
 
 def main(argv=None):
