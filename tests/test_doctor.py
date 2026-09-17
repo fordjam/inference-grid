@@ -281,12 +281,12 @@ def test_lane_binaries_probe_cli_kinds_and_skip_http(tmp_path):
     lanes = {
         "go": {"kind": "go_http", "executable": None},
         "goat-glm": {"kind": "goat_cli", "executable": ok},
-        "cline": {"kind": "cline_cli", "executable": str(tmp_path / "gone")},
+        "zcode-glm": {"kind": "zcode_cli", "executable": str(tmp_path / "gone")},
     }
     assert lane_binaries(lanes) == [
-        {"lane": "cline", "kind": "cline_cli", "status": "unavailable", "reason": "missing"},
         {"lane": "go", "kind": "go_http", "status": "n/a"},
         {"lane": "goat-glm", "kind": "goat_cli", "status": "available", "version": "fake 9.0"},
+        {"lane": "zcode-glm", "kind": "zcode_cli", "status": "unavailable", "reason": "missing"},
     ]
 
 

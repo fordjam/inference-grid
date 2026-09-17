@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 JOB_KEYS = ("repo", "brief", "base", "python", "packets_root", "database", "lanes")
-LANE_KEYS = ("name", "clone", "adapter", "model", "packets", "key_file")
+LANE_KEYS = ("name", "clone", "adapter", "model", "packets")
 ADAPTERS = ("command_code",)
 DEFAULT_ADAPTER = "command_code"
 DEFAULT_MODEL = "z-ai/glm-5.3-flash"
@@ -89,14 +89,12 @@ def _lane(entry, base: Path, names: set[str]) -> dict:
         or not all(isinstance(p, str) and p for p in packets)
     ):
         _fail(f"lane {name} packets", "expected a non-empty list of strings")
-    key_file = entry.get("key_file")
     return {
         "name": name,
         "clone": _path(entry["clone"], f"lane {name} clone", base),
         "adapter": adapter,
         "model": model,
         "packets": list(packets),
-        "key_file": _path(key_file, f"lane {name} key_file", base) if key_file else None,
     }
 
 

@@ -57,7 +57,6 @@ def test_relative_paths_resolve_against_the_file_directory(tmp_path):
             {
                 "name": "second-glm",
                 "clone": "~/lane-c",
-                "key_file": "keys/second.key",
                 "packets": ["F1"],
             },
         ],
@@ -71,9 +70,8 @@ def test_relative_paths_resolve_against_the_file_directory(tmp_path):
     assert spec["database"] is None
     first, second = spec["lanes"]
     assert first["clone"] == str(tmp_path / "clone-a")
-    assert first["adapter"] == "command_code" and first["key_file"] is None
+    assert first["adapter"] == "command_code"
     assert second["clone"] == str(Path.home() / "lane-c")
-    assert second["key_file"] == str(tmp_path / "keys/second.key")
     assert second["packets"] == ["F1"]
 
 
@@ -172,7 +170,6 @@ def test_run_job_launches_one_subprocess_per_entry_with_its_log(tmp_path):
             {
                 "name": "second-glm",
                 "clone": "clone-c",
-                "key_file": "k",
                 "packets": ["F1"],
             },
         ],
