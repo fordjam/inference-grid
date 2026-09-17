@@ -1074,6 +1074,11 @@ class InstallTests(unittest.TestCase):
         self.assertIn("<integer>3660</integer>", text)
         self.assertEqual(text.count("<string>/x/loop.log</string>"), 2)
 
+    def test_render_turns_off_output_buffering(self):
+        text = installer.render("com.inference-grid.tick-boards", "/usr/bin/python3", "/x/t.py", "/x/l.log", 3660)
+        self.assertIn("<key>PYTHONUNBUFFERED</key>", text)
+        self.assertIn("<string>1</string>", text)
+
     def test_exit_timeout_is_the_longest_wall_clock_plus_a_minute(self):
         lanes = {"lanes": {"a": {"wall_seconds": 600}, "b": {"wall_seconds": 3600}}}
         self.assertEqual(installer.exit_timeout(lanes), 3660)
@@ -1289,3 +1294,52 @@ class TickTimeoutTests(unittest.TestCase):
 
     def test_the_default_timeout_outlasts_the_longest_admissible_packet(self):
         self.assertGreaterEqual(tick_boards.TICK_TIMEOUT, 8 * 3600)
+
+
+class HeartbeatTests(unittest.TestCase):
+    def test_write_heartbeat_is_atomic_and_names_the_process_and_boards(self):
+        tmp = self.enterContext(_TmpDir())
+        path = tmp.path / "nested/heartbeat/tick-boards.json"
+        tick_boards.write_heartbeat(path, ["alpha", "beta"], now=1789000000)
+        payload = json.loads(path.read_text())
+        self.assertEqual(payload["pid"], os.getpid())
+        self.assertEqual(payload["boards"], ["alpha", "beta"])
+        self.assertTrue(payload["written_at"].endswith("Z"))
+        self.assertEqual(list(tmp.path.glob("**/*.tmp")), [])  # no half-written leftovers
+        tick_boards.write_heartbeat(path, ["alpha"], now=1789000060)
+        self.assertEqual(json.loads(path.read_text())["boards"], ["alpha"])
+
+    def test_write_heartbeat_never_raises_on_an_unwritable_path(self):
+        self.assertIsNone(tick_boards.write_heartbeat("/proc/no/such/path.json", []))
+
+    def test_heartbeat_path_reads_the_config_and_expands_the_operator_home(self):
+        self.assertEqual(tick_boards.heartbeat_path({}), tick_boards.DEFAULT_HEARTBEAT)
+        self.assertEqual(
+            tick_boards.heartbeat_path({"heartbeat_path": "~/somewhere/hb.json"}),
+            Path.home() / "somewhere/hb.json",
+        )
+
+    def test_start_heartbeat_keeps_the_file_fresh_until_stopped(self):
+        tmp = self.enterContext(_TmpDir())
+        path = tmp.path / "hb.json"
+        stop = tick_boards.start_heartbeat({"heartbeat_path": str(path)}, interval=0.05)
+        self.assertTrue(_await(lambda: path.exists()), "first beat within a second")
+        first = path.read_text()
+        self.assertTrue(_await(lambda: path.read_text() != first), "a later beat lands")
+        stop.set()
+
+    def test_the_default_heartbeat_lives_beside_the_state_not_the_log(self):
+        self.assertEqual(
+            tick_boards.DEFAULT_HEARTBEAT,
+            Path.home() / ".local/share/inference-grid/heartbeat/tick-boards.json",
+        )
+
+
+def _await(predicate, timeout=5.0):
+    """True once predicate holds within the timeout; the heartbeat thread is asynchronous."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False

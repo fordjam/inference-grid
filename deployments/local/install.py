@@ -8,7 +8,9 @@ loading the agents is an operator step.
 
 Every plist is the same shape — ``KeepAlive`` and ``RunAtLoad`` true, ``ProcessType:
 Interactive``, a PATH that includes ``/opt/homebrew/bin`` (the CLIs the lanes spawn are
-``#!/usr/bin/env node`` scripts, and launchd's default PATH cannot find node), and an
+``#!/usr/bin/env node`` scripts, and launchd's default PATH cannot find node),
+``PYTHONUNBUFFERED=1`` (a piped stdout is otherwise block-buffered, and the tick loop's
+per-pass prints must reach the launchd log the moment they happen), and an
 ``ExitTimeOut`` of the longest packet wall clock plus a minute, so launchd does not
 ``SIGKILL`` the tick loop while it drains a signal — and never ``StartInterval``. launchd
 parks interval spawns for a GUI-session
@@ -62,6 +64,8 @@ PLIST_TEMPLATE = """\
 \t<dict>
 \t\t<key>PATH</key>
 \t\t<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+\t\t<key>PYTHONUNBUFFERED</key>
+\t\t<string>1</string>
 \t</dict>
 \t<key>ExitTimeOut</key>
 \t<integer>{exit_timeout}</integer>

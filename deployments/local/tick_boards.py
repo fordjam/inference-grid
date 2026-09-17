@@ -18,6 +18,12 @@ A SIGTERM or SIGINT starts a drain: the board ticks in flight (the packet loop's
 included) finish, the remaining boards of the pass are not started and the loop exits; a
 second signal within 30 s exits at once. While draining the loop writes ``draining`` to a
 state file beside the log, so the operator can see why the restart is slow.
+
+The loop also writes a heartbeat file (``heartbeat_path`` in the config, default
+``~/.local/share/inference-grid/heartbeat/tick-boards.json``) from a daemon thread every
+``HEARTBEAT_INTERVAL`` seconds for as long as the process lives — fresh through multi-hour
+board ticks, stale only when the loop is gone — and the per-pass ready count is printed
+unbuffered so the launchd log shows it the moment it happens.
 """
 
 import json
@@ -35,6 +41,50 @@ IDLE_SECONDS = 1800
 BUSY_SECONDS = 300
 CALIBRATION_EVERY_DAYS = 7
 DRAIN_GRACE_SECONDS = 30
+
+# The loop's heartbeat: written by a daemon thread for as long as the process lives, so
+# the file stays fresh even while the main thread sits inside a multi-hour board-tick
+# subprocess. A dead-man watch on this file detects a silently dead loop, not a busy one.
+DEFAULT_HEARTBEAT = Path.home() / ".local/share/inference-grid/heartbeat/tick-boards.json"
+HEARTBEAT_INTERVAL = 300
+
+
+def write_heartbeat(path, boards=None, now=None):
+    """One atomic heartbeat write: tmp file, then rename. Never raises past OSError."""
+    path = Path(path)
+    payload = {
+        "written_at": time.strftime("%FT%TZ", time.gmtime(now if now is not None else time.time())),
+        "pid": os.getpid(),
+    }
+    if boards is not None:
+        payload["boards"] = list(boards)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(tmp, path)
+    except OSError:
+        pass  # observability must never kill the loop
+
+
+def heartbeat_path(config):
+    """The heartbeat file: the config's ``heartbeat_path`` or the default beside the state."""
+    raw = config.get("heartbeat_path", DEFAULT_HEARTBEAT)
+    return Path(raw).expanduser() if isinstance(raw, str) else Path(raw)
+
+
+def start_heartbeat(config, interval=HEARTBEAT_INTERVAL):
+    """Beat for as long as this process lives; returns the stop event for a clean exit."""
+    path = heartbeat_path(config)
+    boards = [b["name"] if isinstance(b, dict) else b for b in config.get("boards") or []]
+    stop = threading.Event()
+
+    def beat():
+        while not stop.wait(interval):
+            write_heartbeat(path, boards)
+
+    threading.Thread(target=beat, daemon=True, name="tick-boards-heartbeat").start()
+    return stop
 
 
 def default_prepare(config):
@@ -99,7 +149,7 @@ def default_tick(board, config):
                     why += "]"
                 line = f"  {r['task']} {r['lane']} {str(r.get('result', ''))[:80]}{why}\n"
                 log.write(line)
-                print(line, end="")
+                print(line, end="", flush=True)
     try:
         board_dir = json.loads(out.read_text()).get("board_dir")
     except (OSError, ValueError):
@@ -267,7 +317,12 @@ def run(
         ready = sum(counts)
         if drain and drain.draining:
             break
-        print(time.strftime("%FT%TZ", time.gmtime()), "ready tasks left across boards:", ready)
+        print(
+            time.strftime("%FT%TZ", time.gmtime()),
+            "ready tasks left across boards:",
+            ready,
+            flush=True,
+        )
         sleep(idle if ready == 0 else busy)
     return ready
 
@@ -284,6 +339,10 @@ def main(argv=None):
     log_path = Path(config.get("log_path", DEFAULT_DIR / "tick-boards.log"))
     drain = install_drain(Drain(log_path.with_suffix(".draining")))
     drain.clear()
+    # One synchronous beat proves the loop started; the thread keeps it fresh through the
+    # long board-tick subprocesses, so a stale file means the process itself is gone.
+    write_heartbeat(heartbeat_path(config), boards)
+    stop_heartbeat = start_heartbeat(config)
     try:
         run(
             boards,
@@ -295,6 +354,7 @@ def main(argv=None):
             drain=drain,
         )
     finally:
+        stop_heartbeat.set()
         drain.clear()
 
 
