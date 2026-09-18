@@ -121,8 +121,29 @@ def _pgrep_count(run, pattern):
 _HEADLESS_RUN_PATTERNS = ("claude -p", "codex exec")
 
 
+# A pgrep substring match is necessary but not sufficient: any shell whose command
+# text merely contains the words (a monitor loop running `pgrep -f "claude -p"`, a
+# `bash -c` wrapper, an editor) also matches. Confirmed live on 2026-09-18: with no
+# headless run anywhere the count was 1, the match being the operator's own shell.
+# So every matched pid is cross-checked against its real command line, and only a
+# process whose executable is claude/codex (optionally wrapped by caffeinate) counts.
+_HEADLESS_EXEC_RE = re.compile(
+    r"^(?:\S*/)?(?:caffeinate(?:\s+-\S+)*\s+)?(?:\S*/)?(?:claude\s+-p|codex\s+exec)\b"
+)
+
+
+def _is_headless_run_process(command):
+    return bool(_HEADLESS_EXEC_RE.match(command.strip()))
+
+
 def _headless_run_count(run):
-    return sum(_pgrep_count(run, pattern) for pattern in _HEADLESS_RUN_PATTERNS)
+    count = 0
+    for pattern in _HEADLESS_RUN_PATTERNS:
+        for pid in _pgrep_pids(run, pattern):
+            rc, command = run(["ps", "-o", "command=", "-p", pid])
+            if rc == 0 and _is_headless_run_process(command):
+                count += 1
+    return count
 
 
 def _is_headless_run_command(command):

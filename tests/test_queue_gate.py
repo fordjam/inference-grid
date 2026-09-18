@@ -70,7 +70,8 @@ def test_read_state_parses_swap_disk_pytest_and_runs():
             "pgrep -f pytest": (1, ""),
             "claude -p": (0, "111\n"),
             "codex exec": (1, ""),
-        }
+        },
+        ps_commands={"111": "caffeinate -i claude -p row text --model sonnet"},
     )
     state = gate.read_state(run)
     assert state["swap_gb"] == pytest.approx(0.59, abs=0.01)
@@ -100,7 +101,12 @@ def test_read_state_counts_multiple_matching_runs():
             "df -g": (0, DF_HEALTHY),
             "claude -p": (0, "111\n222\n"),
             "codex exec": (0, "333\n"),
-        }
+        },
+        ps_commands={
+            "111": "claude -p do the thing --model sonnet",
+            "222": "/opt/homebrew/bin/claude -p another --output-format text",
+            "333": "codex exec --model gpt-5.6-luna some task",
+        },
     )
     assert gate.read_state(run)["running_runs"] == 3
 
@@ -108,15 +114,46 @@ def test_read_state_counts_multiple_matching_runs():
 def test_read_state_counts_a_caffeinate_wrapped_claude_launch():
     """queue_run.sh's real launch shape is `caffeinate -i claude -p ...`, never a bare
     `claude -p` -- an anchored `^claude -p` pgrep pattern would never match it
-    (confirmed live in review); the unanchored substring match must still count it."""
+    (confirmed live in review); the substring match plus the per-pid executable
+    cross-check must still count it."""
     run = fake_run(
         {
             "vm.swapusage": (0, SWAP_LOW),
             "df -g": (0, DF_HEALTHY),
             "claude -p": (0, "111\n"),  # pgrep -f matches the full command line
-        }
+        },
+        ps_commands={"111": "caffeinate -i claude -p run the row --model sonnet"},
     )
     assert gate.read_state(run)["running_runs"] == 1
+
+
+def test_read_state_ignores_a_shell_whose_text_merely_mentions_claude_p():
+    """Confirmed live 2026-09-18: with no headless run anywhere the count read 1 --
+    the match was a zsh wrapper whose command text contained `pgrep -fl "claude -p"`.
+    A monitor loop with that text would block the gate forever. Only a process whose
+    executable is claude/codex (optionally under caffeinate) may count."""
+    run = fake_run(
+        {
+            "vm.swapusage": (0, SWAP_LOW),
+            "df -g": (0, DF_HEALTHY),
+            "claude -p": (0, "555\n666\n"),
+            "codex exec": (0, "777\n"),
+        },
+        ps_commands={
+            "555": '/bin/zsh -c source snapshot.sh && pgrep -fl "claude -p" | cut -c1-140',
+            "666": "bash -c cd /Users/x; while true; do a=$(pgrep -f \"^claude -p\" | wc -l); sleep 60; done",
+            "777": "vim plans/DISPATCH.md codex exec notes",
+        },
+    )
+    assert gate.read_state(run)["running_runs"] == 0
+
+
+def test_is_headless_run_process_shapes():
+    assert gate._is_headless_run_process("caffeinate -i claude -p hello")
+    assert gate._is_headless_run_process("/usr/bin/caffeinate -i -s /opt/homebrew/bin/claude -p x")
+    assert gate._is_headless_run_process("codex exec --model gpt-5.6-luna x")
+    assert not gate._is_headless_run_process("claude --output-format stream-json")
+    assert not gate._is_headless_run_process("bash -c caffeinate -i claude -p x")
 
 
 # --- _pytest_running: cross-checked against a headless run's own inline prompt text ---
@@ -253,7 +290,10 @@ def test_main_exits_one_and_names_every_condition_when_blocked(tmp_path, capsys)
             "pgrep -f pytest": (0, "222\n"),
             "claude -p": (0, "111\n"),
         },
-        ps_commands={"222": "/path/.venv/bin/python -m pytest -q -x"},
+        ps_commands={
+            "222": "/path/.venv/bin/python -m pytest -q -x",
+            "111": "caffeinate -i claude -p row text --model sonnet",
+        },
     )
     code = gate.main(["--config", str(tmp_path / "absent.json")], run=run)
     out = capsys.readouterr().out
