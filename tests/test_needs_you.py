@@ -19,6 +19,7 @@ from inference_grid.needs_you import (
     land_request_rows,
     memory_row,
     needs_you,
+    this_week_row,
 )
 
 
@@ -560,3 +561,63 @@ def test_memory_row_missing_gate_config_falls_back_to_default(tmp_path):
         gate_config_path=tmp_path / "absent.json",
     )
     assert row["state"] == "ok"  # 1 GB < the built-in 4 GB default
+
+
+# --- 02-C2/C4/C5: this_week_row ---
+
+
+def test_this_week_row_reports_the_same_numbers_as_the_weekly_report(tmp_path):
+    ledger = make_ledger(tmp_path, account="acct")
+    ledger.submit("t1", "p", make_spec())
+    aid, gen = ledger.claim("t1", "acct", {"five_hour": 0.01, "weekly": 0.01})
+    ledger.start(aid, gen)
+    ledger.finish(aid, gen, receipt())
+    ledger.accept(aid, digest(receipt()), "operator-attested-independent", "approved")
+
+    row = this_week_row(
+        ledger,
+        subscriptions={"Z.ai": {"account": "acct", "weekly_cost_usd": 3.23}},
+        quota_use={"Z.ai": {"used_percent": 92, "window": "weekly"}},
+    )
+    assert row["packets_landed"] == 1
+    assert row["unattended_land_rate"] == 1.0
+    assert row["unattended_land_count"] == 1
+    assert row["failure_rate"]["baseline_2026_09_17"] == 0.176
+    assert row["subscription_costs"] == [
+        {
+            "subscription": "Z.ai",
+            "weekly_cost_usd": 3.23,
+            "landed_packets": 1,
+            "cost_per_landed_packet_usd": 3.23,
+        }
+    ]
+    assert row["quota_use"][0]["used_percent"] == 92
+
+
+def test_this_week_row_degrades_gracefully_with_no_activity(tmp_path):
+    ledger = make_ledger(tmp_path)
+    row = this_week_row(ledger)
+    assert row["packets_landed"] == 0
+    assert row["unattended_land_rate"] is None
+    assert row["unattended_land_count"] is None
+    assert row["failure_rate"] == {
+        "failed_or_abandoned": 0,
+        "attempts": 0,
+        "rate": None,
+        "baseline_2026_09_17": 0.176,
+    }
+    assert row["quota_use"] == []
+    assert row["subscription_costs"] == []
+
+
+def test_needs_you_includes_this_week(tmp_path):
+    ledger = make_ledger(tmp_path)
+    out = needs_you(
+        ledger,
+        collector_paths={},
+        disk_df_run=lambda path: 999 * 1024**3,
+        memory_swap_run=NO_SWAP,
+        memory_ps_run=NO_PS,
+        memory_amber_gb=4.0,
+    )
+    assert out["this_week"]["packets_landed"] == 0

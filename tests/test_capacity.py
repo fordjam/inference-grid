@@ -6,6 +6,7 @@ from inference_grid.capacity import (
     clean_heartbeats,
     clean_memory,
     clean_operator,
+    clean_this_week,
     project,
 )
 
@@ -392,6 +393,102 @@ def test_clean_memory_bounds_top_processes_to_three_and_drops_unnamed():
 
 def test_clean_memory_defaults_to_none_without_an_overlay():
     assert project({"accounts": []}, [])["memory"] is None
+
+
+def test_clean_this_week_keeps_every_number_and_strips_unknown_keys():
+    row = {
+        "unattended_land_rate": 0.5,
+        "unattended_land_count": 1,
+        "packets_landed": 2,
+        "failure_rate": {
+            "failed_or_abandoned": 2,
+            "attempts": 3,
+            "rate": 2 / 3,
+            "baseline_2026_09_17": 0.176,
+            "junk": "dropped",
+        },
+        "quota_use": [
+            {
+                "subscription": "Z.ai",
+                "used_percent": 100,
+                "numerator": 10000,
+                "denominator": 10000,
+                "window": "weekly",
+                "observed_at": "2026-09-18T14:35:10Z",
+                "credential": "secret",
+            }
+        ],
+        "subscription_costs": [
+            {
+                "subscription": "Z.ai",
+                "weekly_cost_usd": 3.23,
+                "landed_packets": 2,
+                "cost_per_landed_packet_usd": 1.615,
+            }
+        ],
+        "junk": "dropped",
+    }
+    result = clean_this_week(row)
+    assert result == {
+        "unattended_land_rate": 0.5,
+        "unattended_land_count": 1,
+        "packets_landed": 2,
+        "failure_rate": {
+            "failed_or_abandoned": 2,
+            "attempts": 3,
+            "rate": 2 / 3,
+            "baseline_2026_09_17": 0.176,
+        },
+        "quota_use": [
+            {
+                "subscription": "Z.ai",
+                "used_percent": 100,
+                "numerator": 10000,
+                "denominator": 10000,
+                "window": "weekly",
+                "observed_at": "2026-09-18T14:35:10Z",
+            }
+        ],
+        "subscription_costs": [
+            {
+                "subscription": "Z.ai",
+                "weekly_cost_usd": 3.23,
+                "landed_packets": 2,
+                "cost_per_landed_packet_usd": 1.615,
+            }
+        ],
+    }
+    assert "credential" not in str(result)
+
+
+def test_clean_this_week_degrades_missing_numbers_to_none_never_a_guess():
+    result = clean_this_week(
+        {
+            "unattended_land_rate": None,
+            "unattended_land_count": None,
+            "packets_landed": 0,
+            "failure_rate": {"failed_or_abandoned": 0, "attempts": 0, "rate": None},
+            "quota_use": [],
+            "subscription_costs": [],
+        }
+    )
+    assert result["unattended_land_rate"] is None
+    assert result["unattended_land_count"] is None
+    assert result["failure_rate"]["rate"] is None
+    assert result["failure_rate"]["baseline_2026_09_17"] is None
+
+
+def test_clean_this_week_rejects_a_non_dict_and_drops_unnamed_list_entries():
+    assert clean_this_week(None) is None
+    assert clean_this_week("not a dict") is None
+    result = clean_this_week(
+        {"quota_use": [{"used_percent": 50}, "not a dict"], "subscription_costs": []}
+    )
+    assert result["quota_use"] == []
+
+
+def test_clean_this_week_defaults_to_none_without_an_overlay():
+    assert project({"accounts": []}, [])["this_week"] is None
 
 
 def test_clean_operator_keeps_the_newest_50_rather_than_truncating_by_source_order():

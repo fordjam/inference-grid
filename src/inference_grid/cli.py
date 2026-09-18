@@ -319,6 +319,8 @@ def main():
             lanes=data.get("lanes"),
             accounts_by_lane=data.get("accounts_by_lane"),
             prices=data.get("prices"),
+            subscriptions=data.get("subscriptions"),
+            quota_use=data.get("quota_use"),
             out=data.get("out"),
         )
         print(document, end="")
@@ -411,6 +413,44 @@ def digest(ledger, boards_dir, since=None):
 
 DEFAULT_REPORT_LOG_DIR = Path.home() / "Library/Logs/inference-grid"
 DEFAULT_PRICES_PATH = Path.home() / ".config/inference-grid/prices.json"
+DEFAULT_SUBSCRIPTIONS_PATH = Path.home() / ".config/inference-grid/subscriptions.json"
+DEFAULT_CAPACITY_OBSERVATIONS_DIR = Path.home() / ".local/share/inference-grid-capacity"
+WEEKS_PER_MONTH = 52 / 12
+
+# 02-C5: the $34/month grid budget (Z.ai + Go + GOAT, 02-inference-grid.md's own
+# Intent line) plus Codex (net $0 after the Amex credit — 02-inference-grid.md A10).
+# "Max" is the operator's own Claude plan; its price is deliberately absent here, same
+# "no price on file" convention as `_load_prices` -- an operator who wants it counted
+# adds it to `~/.config/inference-grid/subscriptions.json`, never a guess baked in here.
+# `account` is the ledger's own account id/alias (see aliases table), or a list of them
+# when one subscription funds more than one account -- the Z.ai plan pays for both the
+# `zai` and `zcode` lanes (deployments/local/board_prepare.py's own comment: "the Z.ai
+# plan serves both the zai headless lane and the zcode lane"; both are real, separate
+# ledger accounts -- `zai-account` and `zcode-account` -- not aliases of each other, per
+# the ledger's own `aliases` table). Max has no ledger account at all: the operator's
+# Claude Max login is `claude_headless`/provider `claude` (docs/LANES.md's "First-party
+# Claude" section), explicit-only for reviews, and never appears in the `accounts`
+# table -- `account: None` here, never a guess at which lane stands in for it. Codex
+# likewise has none -- it isn't dispatched through this board, so its landed-packet
+# count is always 0.
+DEFAULT_SUBSCRIPTIONS_MONTHLY = {
+    "Max": {"account": None, "monthly_cost_usd": None},
+    "Z.ai": {"account": ["zai", "zcode"], "monthly_cost_usd": 14.0},
+    "Go": {"account": "go", "monthly_cost_usd": 10.0},
+    "GOAT": {"account": "goat-account", "monthly_cost_usd": 10.0},
+    "Codex": {"account": None, "monthly_cost_usd": 0.0},
+}
+
+# 02-C5: the observation file each collector already writes under
+# DEFAULT_CAPACITY_OBSERVATIONS_DIR (deployments/local/collect_*.py) -- no path invented
+# beyond what those scripts use themselves. "Max" has no provider-reported quota API, so
+# it carries no entry and `_load_quota_use` never reports on it.
+QUOTA_OBSERVATION_FILES = {
+    "Z.ai": "zai-observation.json",
+    "Go": "go-live-observation.json",
+    "GOAT": "goat-observation.json",
+    "Codex": "codex-observation.json",
+}
 
 
 def _load_prices(explicit):
@@ -427,6 +467,90 @@ def _load_prices(explicit):
     except (OSError, ValueError):
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def _load_subscriptions(explicit):
+    """`report()`'s `subscriptions` argument (already weekly-costed) from the `--json`
+    arg file when given -- taken verbatim, since an explicit value is already in
+    `report()`'s own shape. Absent that, the operator's own
+    `~/.config/inference-grid/subscriptions.json` if present (shape:
+    `{"<name>": {"account": <id-or-alias-or-None-or-list-of-those>, "monthly_cost_usd":
+    <number-or-None>}}` -- a list when one subscription funds more than one ledger
+    account), else `DEFAULT_SUBSCRIPTIONS_MONTHLY` -- unlike `_load_prices`, C5 names a small fixed
+    table of known subscriptions (02-inference-grid.md's own $34/month + Codex), so a
+    missing file falls back to that table rather than to nothing. Either way, the
+    monthly price on file is converted to a weekly one here -- `report()` only divides,
+    it never converts units."""
+    if explicit is not None:
+        return explicit
+    try:
+        loaded = json.load(open(DEFAULT_SUBSCRIPTIONS_PATH))
+    except (OSError, ValueError):
+        loaded = None
+    monthly = loaded if isinstance(loaded, dict) else DEFAULT_SUBSCRIPTIONS_MONTHLY
+    subscriptions = {}
+    for name, spec in monthly.items():
+        if not isinstance(spec, dict):
+            continue
+        cost = spec.get("monthly_cost_usd")
+        weekly = (
+            cost / WEEKS_PER_MONTH
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool)
+            else None
+        )
+        subscriptions[name] = {"account": spec.get("account"), "weekly_cost_usd": weekly}
+    return subscriptions
+
+
+def _load_quota_use(explicit, capacity_dir=None):
+    """`report()`'s `quota_use` argument from the `--json` arg file when given; otherwise
+    read straight from the collectors' own observation files under
+    `DEFAULT_CAPACITY_OBSERVATIONS_DIR` (or `capacity_dir`, test-only). Only the
+    "weekly" window is used -- C5 asks for this week's consumption, not the five-hour or
+    monthly one. Z.ai's window carries raw units (`plan_units`/`remaining_units`); the
+    others report only a provider-computed percentage, so `numerator`/`denominator` stay
+    `None` for them rather than a guessed unit count. A missing, unreadable or
+    unrecognizable file contributes no entry for that subscription, never a fabricated
+    reading."""
+    if explicit is not None:
+        return explicit
+    directory = Path(capacity_dir) if capacity_dir else DEFAULT_CAPACITY_OBSERVATIONS_DIR
+    result = {}
+    for name, filename in QUOTA_OBSERVATION_FILES.items():
+        try:
+            data = json.load(open(directory / filename))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        windows = data.get("windows")
+        if not isinstance(windows, list):
+            continue
+        weekly = next(
+            (w for w in windows if isinstance(w, dict) and w.get("id") == "weekly"), None
+        )
+        if weekly is None:
+            continue
+        used_percent = weekly.get("used_percent")
+        if type(used_percent) not in (int, float) or isinstance(used_percent, bool):
+            continue
+        numerator = denominator = None
+        plan_units, remaining_units = weekly.get("plan_units"), weekly.get("remaining_units")
+        if (
+            type(plan_units) in (int, float)
+            and not isinstance(plan_units, bool)
+            and type(remaining_units) in (int, float)
+            and not isinstance(remaining_units, bool)
+        ):
+            numerator, denominator = plan_units - remaining_units, plan_units
+        result[name] = {
+            "used_percent": used_percent,
+            "numerator": numerator,
+            "denominator": denominator,
+            "window": "weekly",
+            "observed_at": data.get("observed_at"),
+        }
+    return result
 
 
 def _report_week_label(rep):
@@ -447,7 +571,16 @@ def _report_week_label(rep):
     return f"{year}-W{week:02d}"
 
 
-def report_command(ledger, week=None, lanes=None, accounts_by_lane=None, prices=None, out=None):
+def report_command(
+    ledger,
+    week=None,
+    lanes=None,
+    accounts_by_lane=None,
+    prices=None,
+    subscriptions=None,
+    quota_use=None,
+    out=None,
+):
     """Render the weekly markdown report and write it to the log path; returns
     `(document, path)` so the CLI can print the same text it just wrote."""
     from .report import render_markdown
@@ -459,6 +592,8 @@ def report_command(ledger, week=None, lanes=None, accounts_by_lane=None, prices=
         lanes=lanes,
         accounts_by_lane=accounts_by_lane,
         prices=_load_prices(prices),
+        subscriptions=_load_subscriptions(subscriptions),
+        quota_use=_load_quota_use(quota_use),
     )
     document = render_markdown(rep)
     if out:
@@ -513,6 +648,8 @@ def needs_you_command(
     disk_red_bytes=None,
     memory_gate_config_path=None,
     memory_amber_gb=None,
+    this_week_subscriptions=None,
+    this_week_quota_use=None,
 ):
     from .needs_you import DEFAULT_WORKSPACE_ROOT, needs_you as render
 
@@ -539,6 +676,8 @@ def needs_you_command(
         disk_red_bytes=disk_red_bytes,
         memory_gate_config_path=memory_gate_config_path,
         memory_amber_gb=memory_amber_gb,
+        this_week_subscriptions=_load_subscriptions(this_week_subscriptions),
+        this_week_quota_use=_load_quota_use(this_week_quota_use),
     )
 
 

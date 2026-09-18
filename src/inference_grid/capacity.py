@@ -342,6 +342,78 @@ def clean_memory(row):
     return entry
 
 
+THIS_WEEK_MAX_SUBSCRIPTIONS = 10
+
+
+def _clean_fraction(value):
+    """A 0..1 fraction, or None -- never a fabricated number for a missing reading."""
+    if type(value) not in (int, float) or isinstance(value, bool) or not 0 <= value <= 1:
+        return None
+    return float(value)
+
+
+def _clean_count(value):
+    if type(value) not in (int, float) or isinstance(value, bool) or value < 0:
+        return None
+    return int(value)
+
+
+def _clean_number(value):
+    if type(value) not in (int, float) or isinstance(value, bool):
+        return None
+    return float(value)
+
+
+def clean_this_week(row):
+    """Sanitize the 02-C2/C4/C5 weekly row: unattended-land rate, failure rate against
+    the 2026-09-17 baseline, quota use and subscription cost per landed packet -- the
+    same numbers `inference-grid report --week` prints, compacted for the dashboard's
+    own "This week" section. Every number degrades to None on a bad or missing reading
+    rather than a fabricated one; unknown keys and unrecognized list entries are dropped.
+    """
+    if not isinstance(row, dict):
+        return None
+    failure = row.get("failure_rate") if isinstance(row.get("failure_rate"), dict) else {}
+    entry = {
+        "unattended_land_rate": _clean_fraction(row.get("unattended_land_rate")),
+        "unattended_land_count": _clean_count(row.get("unattended_land_count")),
+        "packets_landed": _clean_count(row.get("packets_landed")) or 0,
+        "failure_rate": {
+            "failed_or_abandoned": _clean_count(failure.get("failed_or_abandoned")) or 0,
+            "attempts": _clean_count(failure.get("attempts")) or 0,
+            "rate": _clean_fraction(failure.get("rate")),
+            "baseline_2026_09_17": _clean_fraction(failure.get("baseline_2026_09_17")),
+        },
+        "quota_use": [],
+        "subscription_costs": [],
+    }
+    for q in (row.get("quota_use") or [])[:THIS_WEEK_MAX_SUBSCRIPTIONS]:
+        if not isinstance(q, dict) or not isinstance(q.get("subscription"), str):
+            continue
+        entry["quota_use"].append(
+            {
+                "subscription": q["subscription"][:40],
+                "used_percent": _clean_number(q.get("used_percent")),
+                "numerator": _clean_number(q.get("numerator")),
+                "denominator": _clean_number(q.get("denominator")),
+                "window": q.get("window") if isinstance(q.get("window"), str) else None,
+                "observed_at": q.get("observed_at") if isinstance(q.get("observed_at"), str) else None,
+            }
+        )
+    for c in (row.get("subscription_costs") or [])[:THIS_WEEK_MAX_SUBSCRIPTIONS]:
+        if not isinstance(c, dict) or not isinstance(c.get("subscription"), str):
+            continue
+        entry["subscription_costs"].append(
+            {
+                "subscription": c["subscription"][:40],
+                "weekly_cost_usd": _clean_number(c.get("weekly_cost_usd")),
+                "landed_packets": _clean_count(c.get("landed_packets")) or 0,
+                "cost_per_landed_packet_usd": _clean_number(c.get("cost_per_landed_packet_usd")),
+            }
+        )
+    return entry
+
+
 def clean_disk_usage(usage):
     """Sanitize 02-A1's `~/.grid-workspaces` reading: two byte counts, never the path.
 
@@ -467,7 +539,8 @@ def project(raw, overlays=()):
     # "scorecard": [...], "operator": [...], "accepted_work": [...], "boards": [...],
     # "heartbeats": [...], "disk_usage": {...}, "failures": [...], "collector_ages": [...],
     # "disk_free": {...}};
-    # "heartbeats": [...], "disk_usage": {...}, "failures": [...], "memory": {...}};
+    # "heartbeats": [...], "disk_usage": {...}, "failures": [...], "memory": {...},
+    # "this_week": {...}};
     # the boards list is local-only (task ids are project names) and carried for the local
     # page; overlay attempts replace
     # the upstream activity list when present, the scorecard (per model routing evidence) and
@@ -488,6 +561,7 @@ def project(raw, overlays=()):
     overlay_collector_ages = overlays.get("collector_ages") if isinstance(overlays, dict) else None
     overlay_disk_free = overlays.get("disk_free") if isinstance(overlays, dict) else None
     overlay_memory = overlays.get("memory") if isinstance(overlays, dict) else None
+    overlay_this_week = overlays.get("this_week") if isinstance(overlays, dict) else None
     accounts = {}
     for a in [*raw.get("accounts", []), *overlay_accounts]:
         if not isinstance(a, dict) or a.get("provider") not in PROVIDERS:
@@ -545,6 +619,7 @@ def project(raw, overlays=()):
         collector_ages=clean_collector_ages(overlay_collector_ages),
         disk_free=clean_disk_free(overlay_disk_free),
         memory=clean_memory(overlay_memory),
+        this_week=clean_this_week(overlay_this_week),
         served_at=datetime.now(timezone.utc).isoformat(),
     )
 
