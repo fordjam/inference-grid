@@ -17,6 +17,11 @@ adds the rest of 02-A1's open half, all of it read-only:
   authored board task, unlike brief 20 M1's `board/fix_packet.py` (a narrower, automatic
   mechanism that drafts a `plan` task, but only for a bounded set of reasons on blocked
   *packet* tasks; this covers every failed or held ledger attempt).
+- `disk_free_row` -- 02-A1/C3 (the disk filled twice, 2026-09-16/17): free space on the
+  Data volume via `df -k`, alarmed under 20 GB and red under 10 GB. A failed `df` call
+  alarms rather than vanishing.
+- `collector_age_rows` -- 02-A1/C3: `heartbeat_rows`'s own reading for the four named
+  collector-observation files, plus an explicit alarm past 30 minutes.
 
 `needs_you()` combines all of the above with `operator_queue.build_overlay` into one
 dict for both the `inference-grid needs-you` command and the capacity dashboard.
@@ -24,6 +29,7 @@ dict for both the `inference-grid needs-you` command and the capacity dashboard.
 
 import json
 import os
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +46,15 @@ GIGABYTE = 1024**3
 DEFAULT_WORKSPACE_ROOT = Path.home() / ".grid-workspaces"
 DEFAULT_WORKSPACE_CAP_BYTES = 4 * GIGABYTE
 DEFAULT_LOG_BYTES = 4096
+
+# 02-A1/C3 follow-through (disk filled twice, 2026-09-16/17): free space on the Data
+# volume, and the age of every scheduled collector's latest observation file.
+DEFAULT_DISK_VOLUME = "/System/Volumes/Data"
+DISK_FREE_ALARM_BYTES = 20 * GIGABYTE
+DISK_FREE_RED_BYTES = 10 * GIGABYTE
+DEFAULT_CAPACITY_DIR = Path.home() / ".local/share/inference-grid-capacity"
+DEFAULT_ZAI_QUOTA_PATH = Path.home() / ".config/inference-grid/zai-quota.json"
+COLLECTOR_ALARM_SECONDS = 30 * 60
 
 # 02-A1: a packet reaches passed/accepted only after review (B7 removed every waiver
 # path); a canary is the one exception -- lane evidence, not deliverable work, it never
@@ -138,6 +153,80 @@ def heartbeat_rows(heartbeat_paths, now=None):
             }
         )
     return sorted(rows, key=lambda r: r["name"])
+
+
+def _run_df(path):
+    """Free bytes on ``path``'s volume, from `df -k path`'s last line, 4th field
+    (Avail, in 1024-byte blocks). Raises on a non-zero exit, a timeout, or output that
+    doesn't have that field -- the caller must treat any of those as an alarm, never a
+    silently dropped row (the exact gap a prior review of this row found).
+    """
+    result = subprocess.run(
+        ["df", "-k", str(path)], capture_output=True, text=True, timeout=10, check=True
+    )
+    fields = result.stdout.strip().splitlines()[-1].split()
+    return int(fields[3]) * 1024
+
+
+def disk_free_row(path=None, alarm_bytes=None, red_bytes=None, run=None):
+    """Free space on the Data volume (default `/System/Volumes/Data`) via `df -k`:
+    `{path, free_bytes, state, reason}`, state one of "ok" / "alarm" (under 20 GB) /
+    "red" (under 10 GB).
+
+    `run` is operator-injectable (tests stub it instead of shelling out to `df`). A
+    failed or unparsable `df` call reports state "alarm" with the failure as its
+    reason -- disk exhaustion is exactly the failure this row exists to catch, so a
+    broken check must alarm, not read as "ok" or vanish from the page.
+    """
+    path = path or DEFAULT_DISK_VOLUME
+    alarm_bytes = DISK_FREE_ALARM_BYTES if alarm_bytes is None else alarm_bytes
+    red_bytes = DISK_FREE_RED_BYTES if red_bytes is None else red_bytes
+    run = run or _run_df
+    try:
+        free_bytes = run(path)
+    except Exception as exc:  # noqa: BLE001 -- any df failure must alarm, not vanish
+        return {"path": str(path), "free_bytes": None, "state": "alarm", "reason": f"df failed: {exc}"}
+    if type(free_bytes) not in (int, float) or isinstance(free_bytes, bool) or free_bytes < 0:
+        return {
+            "path": str(path),
+            "free_bytes": None,
+            "state": "alarm",
+            "reason": f"df returned an unusable reading: {free_bytes!r}",
+        }
+    state = "red" if free_bytes < red_bytes else "alarm" if free_bytes < alarm_bytes else "ok"
+    return {"path": str(path), "free_bytes": free_bytes, "state": state, "reason": ""}
+
+
+def default_collector_paths(output_dir=None, zai_quota_path=None):
+    """The four collector observation files this repo already writes by default --
+    `collect_goat.py`, `collect_codex.py` and `overlay_build.py`'s own `go_live_path`
+    default share one `output_dir` (default `~/.local/share/inference-grid-capacity`);
+    `collect_zai.py`'s quota file has its own separate default. No path is invented
+    beyond what those modules already use themselves.
+    """
+    out_dir = Path(output_dir) if output_dir else DEFAULT_CAPACITY_DIR
+    return {
+        "go-live": str(out_dir / "go-live-observation.json"),
+        "goat": str(out_dir / "goat-observation.json"),
+        "codex": str(out_dir / "codex-observation.json"),
+        "zai-quota": str(Path(zai_quota_path) if zai_quota_path else DEFAULT_ZAI_QUOTA_PATH),
+    }
+
+
+def collector_age_rows(paths, now=None, alarm_seconds=COLLECTOR_ALARM_SECONDS):
+    """`heartbeat_rows`'s own reading for the named collector-observation files, plus
+    an explicit `alarm` flag past `alarm_seconds` (30 min, 02-A1/C3) -- unlike
+    `heartbeat_rows`, whose age is display-only, these rows must carry their own
+    verdict so the 30-minute threshold is decided once, here, rather than left to be
+    reimplemented (or forgotten) by every renderer that shows them. A missing or
+    unreadable file (`age_seconds` is None) alarms too.
+    """
+    rows = []
+    for row in heartbeat_rows(paths, now=now):
+        row = dict(row)
+        row["alarm"] = row["age_seconds"] is None or row["age_seconds"] > alarm_seconds
+        rows.append(row)
+    return rows
 
 
 def _status_alarm(data):
@@ -350,6 +439,11 @@ def needs_you(
     workspace_status_path=None,
     workspace_cap_bytes=None,
     packets_root=None,
+    collector_paths=None,
+    disk_path=None,
+    disk_alarm_bytes=None,
+    disk_red_bytes=None,
+    disk_df_run=None,
     now=None,
 ):
     """Everything the operator needs to see, read-only.
@@ -367,6 +461,11 @@ def needs_you(
     review), so it is only for an on-demand caller (the CLI) that can afford to wait,
     never a build on a subprocess timeout. Neither given reports no reading, never a
     guessed one.
+
+    `collector_paths` ({name: path}) defaults to `default_collector_paths()` -- the
+    four files 02-A1/C3 names -- rather than reporting nothing, since those are this
+    repo's own known collector-output defaults, not invented. `disk_path` defaults to
+    the Data volume; `disk_df_run` is operator-injectable (tests stub `df`).
     """
     overlay = build_overlay(
         ledger,
@@ -398,4 +497,10 @@ def needs_you(
             "cap_bytes": cap_bytes,
         }
     overlay["failures"] = failure_rows(ledger, packets_root=packets_root)
+    overlay["collector_ages"] = collector_age_rows(
+        collector_paths if collector_paths is not None else default_collector_paths(), now=now
+    )
+    overlay["disk_free"] = disk_free_row(
+        disk_path, alarm_bytes=disk_alarm_bytes, red_bytes=disk_red_bytes, run=disk_df_run
+    )
     return overlay

@@ -1,7 +1,10 @@
 """02-A6: dead-man for the tick-boards loop.
 
 Alarms by email when the loop's heartbeat (deployments/local/tick_boards.py,
-DEFAULT_HEARTBEAT) is stale. Reads last_pass_at when present (a wedged pass
+DEFAULT_HEARTBEAT) is stale, or (02-A1/C3) when the Data volume is low on free
+space -- the same disk condition inference-grid needs-you alarms on, since the
+disk filling twice (2026-09-16/17) took the loop down along with everything
+else. Reads last_pass_at when present (a wedged pass
 keeps written_at fresh on its own, which is exactly the gap 02-A1's review
 found -- see tick_boards.py's write_heartbeat docstring); before any pass has
 ever completed (e.g. right after a restart, or a first pass still legitimately
@@ -33,6 +36,7 @@ import calendar
 import json
 import os
 import smtplib
+import subprocess
 import sys
 import time
 from email.mime.text import MIMEText
@@ -50,6 +54,15 @@ THRESHOLD_SECONDS = IDLE_SECONDS + HEARTBEAT_INTERVAL + TICK_TIME_MARGIN_SECONDS
 # that plus the same beat-lag margin before treating "no pass yet" as an outage.
 FIRST_PASS_ALLOWANCE_SECONDS = TICK_TIMEOUT + HEARTBEAT_INTERVAL + TICK_TIME_MARGIN_SECONDS
 CHECK_INTERVAL_SECONDS = 15 * 60
+
+# 02-A1/C3: the same disk condition inference-grid needs-you alarms on (the disk filled
+# twice, 2026-09-16/17). Read here with a bare `df -k` -- this script runs under launchd
+# from a bare interpreter with no guarantee the `inference_grid` package is importable,
+# so it must never import from the package (a prior review of this row found exactly
+# that mistake); it only ever imports its sibling tick_boards.py and the stdlib.
+GIGABYTE = 1024**3
+DISK_PATH = "/System/Volumes/Data"
+DISK_ALARM_BYTES = 20 * GIGABYTE
 
 
 def recipients() -> list[str]:
@@ -147,6 +160,47 @@ def evaluate(
     }
 
 
+def _disk_free_bytes(path: str) -> int:
+    """Free bytes on ``path``'s volume, from `df -k path`'s last line, 4th field
+    (Avail, in 1024-byte blocks). Raises on a non-zero exit, a timeout, or output that
+    doesn't have that field -- the caller must alarm on that, never treat it as "ok".
+    """
+    result = subprocess.run(
+        ["df", "-k", path], capture_output=True, text=True, timeout=10, check=True
+    )
+    fields = result.stdout.strip().splitlines()[-1].split()
+    return int(fields[3]) * 1024
+
+
+def evaluate_disk(
+    path: str = DISK_PATH,
+    alarm_bytes: float = DISK_ALARM_BYTES,
+    free_bytes_fn=_disk_free_bytes,
+) -> dict:
+    """Pure verdict on free space on ``path``'s volume. No side effects.
+
+    A failed or unparsable `df` call alarms -- it must never read as "ok" just because
+    the check itself broke; the disk filling twice (2026-09-16/17) is exactly the
+    failure this exists to catch, so silence here would defeat the point.
+    """
+    try:
+        free_bytes = free_bytes_fn(path)
+    except Exception as exc:  # noqa: BLE001 -- any df failure must alarm, not pass
+        return {
+            "state": "alarm",
+            "alert": True,
+            "reason": f"df on {path} failed ({exc!r}); treating as low disk",
+        }
+    if free_bytes < alarm_bytes:
+        return {
+            "state": "alarm",
+            "alert": True,
+            "reason": f"{path} has {free_bytes / GIGABYTE:.1f} GB free "
+            f"(under the {alarm_bytes / GIGABYTE:.0f} GB allowance)",
+        }
+    return {"state": "ok", "alert": False, "reason": f"{path} has {free_bytes / GIGABYTE:.1f} GB free"}
+
+
 PLIST_TEMPLATE = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -218,6 +272,7 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--log", default=str(Path.home() / "Library/Logs/inference-grid/tick-boards-deadman.log"),
     )
+    parser.add_argument("--disk-path", default=DISK_PATH, help="volume to check free space on")
     args = parser.parse_args(argv)
 
     if args.render_plist:
@@ -239,6 +294,16 @@ def main(argv=None) -> int:
             "inference-grid tick-boards NO HEARTBEAT",
             f"The tick-boards loop's heartbeat is stale.\n\nReason: {verdict['reason']}\n\n"
             "Check `launchctl list | grep inference-grid` and the tick-boards log.",
+        )
+
+    disk_verdict = evaluate_disk(args.disk_path)
+    print(f"{time.strftime('%FT%TZ', time.gmtime(now))} {disk_verdict['state']}: {disk_verdict['reason']}")
+    if disk_verdict["alert"]:
+        send_email(
+            "inference-grid DISK LOW",
+            f"The disk condition inference-grid needs-you also alarms on is low.\n\n"
+            f"Reason: {disk_verdict['reason']}\n\n"
+            "Free space on this Mac's Data volume, or prune ~/.grid-workspaces.",
         )
     return 0
 

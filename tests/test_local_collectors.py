@@ -1220,6 +1220,84 @@ def make_board_db(path, attempt_rows=(), event_rows=()):
     con.close()
 
 
+class OperatorListsCollectorAgesTests(unittest.TestCase):
+    """02-A1/C3: operator_lists() wires the disk-free and collector-age rows through
+    from config, defaulting collector paths to the same output_dir/zai_quota_path
+    the collectors themselves already use."""
+
+    def _initialized_url(self, tmp):
+        from inference_grid.ledger import Ledger
+
+        url = "sqlite:///" + str(tmp.path / "l.sqlite")
+        Ledger(url).initialize()
+        return url
+
+    def test_defaults_collector_paths_from_output_dir_and_zai_quota_path(self):
+        tmp = self.enterContext(_TmpDir())
+        (tmp.path / "goat-observation.json").write_text(json.dumps({"observed_at": time.time()}))
+        config = {
+            "database_url": self._initialized_url(tmp),
+            "output_dir": str(tmp.path),
+            "zai_quota_path": str(tmp.path / "zai-quota.json"),
+            "go_live_path": str(tmp.path / "no-go-live.json"),
+            # Stubbed: no test may shell out to the real `df` (the row's own brief).
+            "disk_df_run": lambda path: 999 * 1024**3,
+        }
+        result = overlay.operator_lists(config)
+        self.assertEqual(
+            {r["name"] for r in result["collector_ages"]}, {"go-live", "goat", "codex", "zai-quota"}
+        )
+        self.assertEqual(result["disk_free"]["state"], "ok")
+
+    def test_an_explicit_collector_paths_config_overrides_the_default(self):
+        tmp = self.enterContext(_TmpDir())
+        only = tmp.path / "only-observation.json"
+        only.write_text(json.dumps({"observed_at": time.time()}))
+        config = {
+            "database_url": self._initialized_url(tmp),
+            "collector_paths": {"only": str(only)},
+            "disk_df_run": lambda path: 999 * 1024**3,
+        }
+        result = overlay.operator_lists(config)
+        self.assertEqual({r["name"] for r in result["collector_ages"]}, {"only"})
+
+    def test_an_empty_collector_paths_config_disables_the_rows_rather_than_defaulting(self):
+        """The review finding this row must not repeat: `collector_paths: {}` must mean
+        "no collectors", the same as `needs_you()` itself treats it -- not silently fall
+        back to the real ~/.local/share defaults just because `{}` is falsy."""
+        tmp = self.enterContext(_TmpDir())
+        config = {
+            "database_url": self._initialized_url(tmp),
+            "collector_paths": {},
+            "disk_df_run": lambda path: 999 * 1024**3,
+        }
+        result = overlay.operator_lists(config)
+        self.assertEqual(result["collector_ages"], [])
+
+    def test_disk_path_config_is_honoured(self):
+        tmp = self.enterContext(_TmpDir())
+
+        def boom(path):
+            self.assertEqual(path, "/no/such/volume")
+            raise OSError("df: no such volume")
+
+        config = {
+            "database_url": self._initialized_url(tmp),
+            "disk_path": "/no/such/volume",
+            "collector_paths": {},
+            "disk_df_run": boom,
+        }
+        result = overlay.operator_lists(config)
+        # A failed df alarms rather than vanishing (same review finding as
+        # inference_grid.needs_you.disk_free_row's own tests).
+        self.assertEqual(result["disk_free"]["state"], "alarm")
+
+    def test_an_unavailable_ledger_still_reports_the_two_new_rows_as_empty(self):
+        result = overlay.operator_lists({"database_url": "sqlite:////no/such/dir/db.sqlite"})
+        self.assertEqual(result["collector_ages"], [])
+        self.assertIsNone(result["disk_free"])
+
+
 class CapacityPanelTests(unittest.TestCase):
     """02-B5: per subscription, capacity consumed this window by attempts that
     landed vs failed/abandoned, from board.sqlite attempts+events, read-only."""
