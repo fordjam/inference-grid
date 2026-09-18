@@ -411,6 +411,10 @@ def operator_lists(config):
     `heartbeat_paths` and `data_status_paths` ({name: path}) and `workspace_status_path` /
     `workspace_cap_bytes` are operator-supplied config, read-only, never invented here.
 
+    Memory (02-A8): `memory_gate_config_path`/`memory_amber_gb` default to reading
+    02-A9's own concurrency-gate config for the `gate_swap_gb` threshold; `sysctl`/`ps`
+    cost milliseconds, safe on this subprocess's short timeout.
+
     Disk use always reads `workspace_status_path` (02-A5's pruner's own cached reading)
     here, never `workspace_root` -- this function runs inside a subprocess on a short
     timeout (`refresh_go.py`/`refresh_claude.py`, 20 s), and walking a real multi-GB
@@ -434,6 +438,12 @@ def operator_lists(config):
             workspace_status_path=config.get("workspace_status_path"),
             workspace_cap_bytes=config.get("workspace_cap_bytes"),
             packets_root=config.get("packets_root"),
+            memory_gate_config_path=config.get("memory_gate_config_path"),
+            memory_amber_gb=config.get("memory_amber_gb"),
+            # Test-only seams: config is a plain Python dict here, never the JSON file on
+            # disk, so a test can inject stubbed sysctl/ps runners without shelling out.
+            memory_swap_run=config.get("memory_swap_run"),
+            memory_ps_run=config.get("memory_ps_run"),
         )
     except Exception as exc:  # noqa: BLE001 — the overlay must still be written
         return {
@@ -443,6 +453,7 @@ def operator_lists(config):
             "heartbeats": [],
             "disk_usage": None,
             "failures": [],
+            "memory": None,
             "operator_error": type(exc).__name__,
         }
 

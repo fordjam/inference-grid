@@ -2,6 +2,7 @@ from inference_grid.capacity import (
     clean_disk_usage,
     clean_failures,
     clean_heartbeats,
+    clean_memory,
     clean_operator,
     project,
 )
@@ -284,6 +285,64 @@ def test_clean_failures_bounds_the_log_tail_and_drops_unknown_kinds():
 
 def test_clean_failures_defaults_to_empty_without_an_overlay():
     assert project({"accounts": []}, [])["failures"] == []
+
+
+# --- 02-A8: memory row ---
+
+
+def test_clean_memory_keeps_state_swap_and_top_processes():
+    row = {
+        "state": "red",
+        "swap_gb": 9.0,
+        "reason": "top process: Messages (6.0 GB)",
+        "top_processes": [
+            {"pid": 100, "comm": "Messages", "rss_gb": 6.0, "credential": "secret"},
+            {"pid": 200, "comm": "python3", "rss_gb": 2.0},
+        ],
+        "junk": "dropped",
+    }
+    result = clean_memory(row)
+    assert result == {
+        "state": "red",
+        "swap_gb": 9.0,
+        "reason": "top process: Messages (6.0 GB)",
+        "top_processes": [
+            {"comm": "Messages", "rss_gb": 6.0},
+            {"comm": "python3", "rss_gb": 2.0},
+        ],
+    }
+    assert "credential" not in str(result)
+
+
+def test_clean_memory_rejects_unrecognized_state():
+    assert clean_memory({"state": "critical", "swap_gb": 1.0}) is None
+    assert clean_memory(None) is None
+    assert clean_memory("not a dict") is None
+
+
+def test_clean_memory_swap_gb_stays_none_on_a_bad_number():
+    result = clean_memory({"state": "amber", "swap_gb": "nope", "top_processes": []})
+    assert result["swap_gb"] is None
+
+
+def test_clean_memory_bounds_top_processes_to_three_and_drops_unnamed():
+    row = {
+        "state": "ok",
+        "swap_gb": 1.0,
+        "top_processes": [
+            {"comm": "a", "rss_gb": 1.0},
+            {"comm": "b", "rss_gb": 2.0},
+            {"comm": "c", "rss_gb": 3.0},
+            {"comm": "d", "rss_gb": 4.0},
+            {"comm": "", "rss_gb": 5.0},
+        ],
+    }
+    result = clean_memory(row)
+    assert [p["comm"] for p in result["top_processes"]] == ["a", "b", "c"]
+
+
+def test_clean_memory_defaults_to_none_without_an_overlay():
+    assert project({"accounts": []}, [])["memory"] is None
 
 
 def test_clean_operator_keeps_the_newest_50_rather_than_truncating_by_source_order():

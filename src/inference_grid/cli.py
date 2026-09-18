@@ -507,6 +507,8 @@ def needs_you_command(
     workspace_status_path=None,
     workspace_cap_bytes=None,
     packets_root=None,
+    memory_gate_config_path=None,
+    memory_amber_gb=None,
 ):
     from .needs_you import DEFAULT_WORKSPACE_ROOT, needs_you as render
 
@@ -527,6 +529,8 @@ def needs_you_command(
         workspace_status_path=workspace_status_path,
         workspace_cap_bytes=workspace_cap_bytes,
         packets_root=packets_root,
+        memory_gate_config_path=memory_gate_config_path,
+        memory_amber_gb=memory_amber_gb,
     )
 
 

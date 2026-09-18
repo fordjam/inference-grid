@@ -1192,6 +1192,33 @@ class OverlayBuildTests(unittest.TestCase):
         accounts = overlay.prior_accounts(tmp.path / "prior.json")
         self.assertEqual([a["provider"] for a in accounts], ["claude"])
 
+    def test_operator_lists_wires_the_memory_row_through_injected_runners(self):
+        """02-A8: the dashboard's scheduled overlay build must read swap/RSS through
+        the same config-injected seam as every other operator_lists() reading -- a
+        real `sysctl`/`ps` call here would be the exact gap 02-A9's own gate exists to
+        catch, on a subprocess this repo's own review already timed at a 20s budget."""
+        from inference_grid.ledger import Ledger
+
+        tmp = self.enterContext(_TmpDir())
+        db_url = "sqlite:///" + str(tmp.path / "board.sqlite")
+        Ledger(db_url).initialize()
+        config = {
+            "database_url": db_url,
+            "memory_swap_run": lambda: (
+                "vm.swapusage: total = 16384.00M  used = 9216.00M  free = 100.00M  (encrypted)"
+            ),
+            "memory_ps_run": lambda: "  PID   RSS COMM\n  100 6000000 Messages\n",
+            "memory_amber_gb": 4.0,
+        }
+        result = overlay.operator_lists(config)
+        self.assertEqual(result["memory"]["state"], "red")
+        self.assertAlmostEqual(result["memory"]["swap_gb"], 9.0)
+        self.assertEqual(result["memory"]["top_processes"][0]["comm"], "Messages")
+
+    def test_operator_lists_memory_defaults_to_none_when_the_package_is_unavailable(self):
+        result = overlay.operator_lists({"database_url": "not-a-real-scheme://nope"})
+        self.assertIsNone(result["memory"])
+
 
 def make_board_db(path, attempt_rows=(), event_rows=()):
     """A throwaway board.sqlite with just the two tables capacity_panel reads.
