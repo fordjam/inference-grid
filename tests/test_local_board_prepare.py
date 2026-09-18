@@ -270,9 +270,160 @@ class ObservationRecordTests(unittest.TestCase):
         self.assertEqual(used, {})
         self.assertIsNone(observed)
 
+    def test_an_over_quota_window_is_clamped_and_the_raw_value_kept(self):
+        over = dict(
+            GOAT_OBSERVATION,
+            windows=[
+                {"id": "five_hour", "used_percent": 25.0, "resets_at": None},
+                {"id": "weekly", "used_percent": 104.0, "resets_at": None},
+                {"id": "monthly", "used_percent": 50.0, "resets_at": None},
+            ],
+        )
+        record, observed, used = prepare.observation_record({}, over, None, 900)
+        self.assertEqual(used, {"five_hour": 25.0, "weekly": 100.0, "monthly": 50.0})
+        self.assertEqual(record["used_percent_max"], 100.0)
+        self.assertEqual(record["raw_used_percent_max"], 104.0)
+
+    def test_a_negative_window_is_clamped_and_the_raw_value_kept(self):
+        negative = dict(
+            GOAT_OBSERVATION,
+            windows=[
+                {"id": "five_hour", "used_percent": -3.5, "resets_at": None},
+                {"id": "weekly", "used_percent": 40.0, "resets_at": None},
+                {"id": "monthly", "used_percent": 50.0, "resets_at": None},
+            ],
+        )
+        record, observed, used = prepare.observation_record({}, negative, None, 900)
+        self.assertEqual(used, {"five_hour": 0.0, "weekly": 40.0, "monthly": 50.0})
+        self.assertEqual(record["raw_used_percent_max"], -3.5)
+
+    def test_a_reading_inside_range_carries_no_raw_field(self):
+        record, observed, used = prepare.observation_record({}, GOAT_OBSERVATION, None, 900)
+        self.assertNotIn("raw_used_percent_max", record)
+
+
+class ClampPercentTests(unittest.TestCase):
+    def test_in_range_is_unchanged_and_carries_no_raw_value(self):
+        self.assertEqual(prepare.clamp_percent(42.5), (42.5, None))
+        self.assertEqual(prepare.clamp_percent(0), (0.0, None))
+        self.assertEqual(prepare.clamp_percent(100), (100.0, None))
+
+    def test_over_100_clamps_to_100_and_keeps_the_raw_value(self):
+        self.assertEqual(prepare.clamp_percent(104.0), (100.0, 104.0))
+
+    def test_negative_clamps_to_0_and_keeps_the_raw_value(self):
+        self.assertEqual(prepare.clamp_percent(-5.0), (0.0, -5.0))
+
+
+class RecordLaneSafeTests(unittest.TestCase):
+    """board_prepare must not exit non-zero for a single lane's bad reading: a Refused
+    from record_lane is printed and skipped, never raised."""
+
+    class RefusingLedger:
+        def __init__(self, refuse):
+            self.refuse = refuse
+            self.recorded = {}
+
+        def record_lane(self, provider, record):
+            if provider in self.refuse:
+                from inference_grid.ledger import Refused
+
+                raise Refused("invalid lane record: bad keys")
+            self.recorded[provider] = record
+            return {"provider": provider, "state": "ready"}
+
+    def test_a_refused_lane_is_skipped_and_other_lanes_still_land(self):
+        ledger = self.RefusingLedger(refuse={"goat-mini"})
+        good = prepare.record_lane_safe(ledger, "goat", {"provider": "goat"})
+        bad = prepare.record_lane_safe(ledger, "goat-mini", {"provider": "goat-mini"})
+        self.assertEqual(good, "ready")
+        self.assertIsNone(bad)
+        self.assertEqual(set(ledger.recorded), {"goat"})
+
+
+class GoatObservationOverQuotaTests(unittest.TestCase):
+    """The reproduction: a real weekly reading over 100% (see docstring for
+    lane_readiness's strict [0, 100] schema) must configure a valid, depleted lane and
+    exit clean, not raise Refused out of configure_observation."""
+
+    def test_over_quota_and_exhausted_lanes_are_recorded_depleted_and_exit_clean(self):
+        over_quota = dict(
+            GOAT_OBSERVATION,
+            windows=[
+                {"id": "five_hour", "used_percent": 0.0, "resets_at": None},
+                {"id": "weekly", "used_percent": 100.31153017, "resets_at": None},
+                {"id": "monthly", "used_percent": 80.35, "resets_at": None},
+            ],
+        )
+        ledger = FakeLedger()
+        prepare.configure_observation(
+            {},
+            ledger,
+            "goat-account",
+            over_quota,
+            prepare.GOAT_WINDOW_UNITS,
+            prepare.GOAT_VALID,
+            GOAT_LANES,
+            NOW,
+        )
+        # The account's remaining units never go negative even though the raw reading
+        # implies a negative remaining for the weekly window.
+        self.assertEqual(len(ledger.configured), 1)
+        for remaining in ledger.configured[0]["windows"].values():
+            self.assertGreaterEqual(remaining, 0)
+        self.assertEqual(ledger.configured[0]["windows"]["weekly"], 0.0)
+        self.assertEqual(set(ledger.lanes), {"goat", "goat-mini"})
+        for lane in ("goat", "goat-mini"):
+            record = ledger.lanes[lane]
+            self.assertEqual(record["used_percent_max"], 100.0)
+            self.assertEqual(record["raw_used_percent_max"], 100.31153017)
+            classified = ledger.record_lane(lane, record)
+            self.assertEqual(classified["state"], "exhausted")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfigureGoEmptyWindowsTests(unittest.TestCase):
+    """configure()'s Go block used to crash on an empty windows list (max() of an empty
+    sequence); the fix must not trade that crash for a falsely-ready lane."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+    def write(self, name, obj):
+        path = self.tmp / name
+        path.write_text(json.dumps(obj))
+        return path
+
+    def test_an_empty_go_windows_list_records_the_go_lane_stale_not_ready(self):
+        zai_quota = self.write(
+            "zai-quota.json",
+            {
+                "observed_at": iso(NOW),
+                "five_hour_used_percent": 0,
+                "weekly_used_percent": 0,
+                "source": "attested",
+            },
+        )
+        go_live = self.write(
+            "go-live.json", {"observed_at": iso(NOW), "owner_verified": True, "windows": []}
+        )
+        config = {
+            "zai_quota_path": str(zai_quota),
+            "go_live_path": str(go_live),
+        }
+        ledger = FakeLedger(now=NOW)
+        prepare.configure(config, ledger)
+        self.assertIn("go", ledger.lanes)
+        self.assertIsNone(ledger.lanes["go"]["quota_observed_at"])
+        self.assertIsNone(ledger.lanes["go"]["used_percent_max"])
+        classified = ledger.record_lane("go", ledger.lanes["go"])
+        self.assertEqual(classified["state"], "stale")
+        self.assertEqual(classified["reason"], "quota_unobserved")
 
 
 class AdmissionLimitTests(unittest.TestCase):
