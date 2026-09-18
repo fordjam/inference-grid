@@ -415,15 +415,28 @@ def operator_lists(config):
     here, never `workspace_root` -- this function runs inside a subprocess on a short
     timeout (`refresh_go.py`/`refresh_claude.py`, 20 s), and walking a real multi-GB
     `~/.grid-workspaces` live measured 30+ seconds in review. A live walk is only safe
-    from the `inference-grid needs-you` command, run on demand."""
+    from the `inference-grid needs-you` command, run on demand.
+
+    Collector ages (02-A1/C3): default to this same `output_dir`/`zai_quota_path`
+    config, so the four rows work out of the box without a separate config key -- an
+    explicit `collector_paths` config entry still overrides. `disk_path` defaults to
+    the Data volume; `df` itself costs milliseconds, safe on this subprocess's timeout.
+    """
     try:
         if config.get("package_src"):
             sys.path.insert(0, str(config["package_src"]))
         from inference_grid.ledger import Ledger
-        from inference_grid.needs_you import needs_you
+        from inference_grid.needs_you import default_collector_paths, needs_you
 
         ledger = Ledger(config.get("database_url", "sqlite:///" + str(BOARD_DB)))
         board_dirs = [b["board_dir"] for b in config.get("boards", []) if isinstance(b, dict)]
+        collector_paths = (
+            config["collector_paths"]
+            if "collector_paths" in config
+            else default_collector_paths(
+                output_dir=config.get("output_dir"), zai_quota_path=config.get("zai_quota_path")
+            )
+        )
         return needs_you(
             ledger,
             board_dirs=board_dirs,
@@ -434,6 +447,13 @@ def operator_lists(config):
             workspace_status_path=config.get("workspace_status_path"),
             workspace_cap_bytes=config.get("workspace_cap_bytes"),
             packets_root=config.get("packets_root"),
+            collector_paths=collector_paths,
+            disk_path=config.get("disk_path"),
+            disk_alarm_bytes=config.get("disk_alarm_bytes"),
+            disk_red_bytes=config.get("disk_red_bytes"),
+            # Test-only seam: config is a plain Python dict here, never the JSON file
+            # on disk, so a test can inject a stubbed `df` without shelling out.
+            disk_df_run=config.get("disk_df_run"),
         )
     except Exception as exc:  # noqa: BLE001 — the overlay must still be written
         return {
@@ -443,6 +463,8 @@ def operator_lists(config):
             "heartbeats": [],
             "disk_usage": None,
             "failures": [],
+            "collector_ages": [],
+            "disk_free": None,
             "operator_error": type(exc).__name__,
         }
 

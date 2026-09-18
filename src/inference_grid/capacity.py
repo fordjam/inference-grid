@@ -238,6 +238,69 @@ def clean_heartbeats(rows):
     return clean
 
 
+COLLECTOR_ALARM_SECONDS = 30 * 60
+
+
+def clean_collector_ages(rows):
+    """Sanitize 02-A1/C3 collector-age rows: a name, an age in seconds, the instant,
+    and whether it is alarmed (past 30 min, or no reading at all).
+
+    Unknown keys are stripped; rows without a name are dropped. `age_seconds` stays
+    null rather than becoming 0 when the source file was missing or unreadable, same
+    reasoning as `clean_heartbeats` -- a missing collector reading must never render as
+    a fresh one. `alarm` is recomputed here from `age_seconds` rather than trusted
+    as-is from the source row, for consistency with that recomputed `age_seconds` --
+    but both are still only as fresh as the last overlay-build pass: this dict is a
+    cache read, not a live clock. The dashboard itself must never trust either field
+    for display or styling -- `app.js` recomputes both, live, from the row's absolute
+    `since` instant on every redraw, which is what actually keeps a collector row from
+    freezing "not alarmed" forever if the overlay stops being rebuilt.
+    """
+    if not isinstance(rows, list):
+        return []
+    clean = []
+    for row in rows[:50]:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("name"), str)
+            or not row["name"].strip()
+        ):
+            continue
+        entry = {"name": row["name"][:200]}
+        age = row.get("age_seconds")
+        entry["age_seconds"] = (
+            float(age)
+            if type(age) in (int, float) and not isinstance(age, bool) and age >= 0
+            else None
+        )
+        since = row.get("since")
+        entry["since"] = since[:200] if isinstance(since, str) else ""
+        entry["alarm"] = entry["age_seconds"] is None or entry["age_seconds"] > COLLECTOR_ALARM_SECONDS
+        clean.append(entry)
+    return clean
+
+
+DISK_FREE_STATES = {"ok", "alarm", "red"}
+
+
+def clean_disk_free(row):
+    """Sanitize the 02-A1/C3 Data-volume free-space row: bytes free and a state, never
+    the local filesystem path. An unrecognized state (or a missing byte count on a
+    non-"ok" reading, e.g. a failed `df`) still passes through as its own state with no
+    byte count, rather than being dropped -- a broken disk check must stay visible.
+    """
+    if not isinstance(row, dict) or row.get("state") not in DISK_FREE_STATES:
+        return None
+    free = row.get("free_bytes")
+    entry = {
+        "state": row["state"],
+        "free_bytes": float(free) if type(free) in (int, float) and not isinstance(free, bool) and free >= 0 else None,
+    }
+    reason = row.get("reason")
+    entry["reason"] = reason[:400] if isinstance(reason, str) else ""
+    return entry
+
+
 def clean_disk_usage(usage):
     """Sanitize 02-A1's `~/.grid-workspaces` reading: two byte counts, never the path.
 
@@ -361,7 +424,8 @@ def timestamp(value):
 def project(raw, overlays=()):
     # An overlay is a list of account observations or {"accounts": [...], "attempts": [...],
     # "scorecard": [...], "operator": [...], "accepted_work": [...], "boards": [...],
-    # "heartbeats": [...], "disk_usage": {...}, "failures": [...]};
+    # "heartbeats": [...], "disk_usage": {...}, "failures": [...], "collector_ages": [...],
+    # "disk_free": {...}};
     # the boards list is local-only (task ids are project names) and carried for the local
     # page; overlay attempts replace
     # the upstream activity list when present, the scorecard (per model routing evidence) and
@@ -379,6 +443,8 @@ def project(raw, overlays=()):
     overlay_heartbeats = overlays.get("heartbeats") if isinstance(overlays, dict) else None
     overlay_disk_usage = overlays.get("disk_usage") if isinstance(overlays, dict) else None
     overlay_failures = overlays.get("failures") if isinstance(overlays, dict) else None
+    overlay_collector_ages = overlays.get("collector_ages") if isinstance(overlays, dict) else None
+    overlay_disk_free = overlays.get("disk_free") if isinstance(overlays, dict) else None
     accounts = {}
     for a in [*raw.get("accounts", []), *overlay_accounts]:
         if not isinstance(a, dict) or a.get("provider") not in PROVIDERS:
@@ -433,6 +499,8 @@ def project(raw, overlays=()):
         heartbeats=clean_heartbeats(overlay_heartbeats),
         disk_usage=clean_disk_usage(overlay_disk_usage),
         failures=clean_failures(overlay_failures),
+        collector_ages=clean_collector_ages(overlay_collector_ages),
+        disk_free=clean_disk_free(overlay_disk_free),
         served_at=datetime.now(timezone.utc).isoformat(),
     )
 

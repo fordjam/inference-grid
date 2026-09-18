@@ -7,7 +7,10 @@ import time
 from inference_grid.ledger import Ledger, digest
 from inference_grid.needs_you import (
     cached_disk_usage_row,
+    collector_age_rows,
     data_status_rows,
+    default_collector_paths,
+    disk_free_row,
     disk_usage_row,
     failure_rows,
     heartbeat_rows,
@@ -114,6 +117,96 @@ def test_heartbeat_rows_falls_back_to_mtime_without_known_fields(tmp_path):
     now = time.time() + 30
     rows = heartbeat_rows({"obs": path}, now=now)
     assert 25 <= rows[0]["age_seconds"] <= 35
+
+
+# --- collector_age_rows / default_collector_paths ---
+
+
+def test_collector_age_rows_alarms_past_thirty_minutes(tmp_path):
+    now = time.time()
+    fresh = tmp_path / "goat-observation.json"
+    fresh.write_text(json.dumps({"observed_at": now - 60}))
+    stale = tmp_path / "codex-observation.json"
+    stale.write_text(json.dumps({"observed_at": now - 1900}))
+    rows = collector_age_rows({"goat": fresh, "codex": stale}, now=now)
+    by_name = {r["name"]: r for r in rows}
+    assert by_name["goat"]["alarm"] is False
+    assert by_name["codex"]["alarm"] is True
+
+
+def test_collector_age_rows_missing_file_alarms(tmp_path):
+    rows = collector_age_rows({"goat": tmp_path / "absent.json"})
+    assert rows == [{"name": "goat", "age_seconds": None, "since": "", "alarm": True}]
+
+
+def test_collector_age_rows_exactly_at_the_boundary_is_still_ok(tmp_path):
+    now = time.time()
+    path = tmp_path / "goat-observation.json"
+    path.write_text(json.dumps({"observed_at": now - 1800}))
+    rows = collector_age_rows({"goat": path}, now=now)
+    assert rows[0]["alarm"] is False
+    path.write_text(json.dumps({"observed_at": now - 1801}))
+    rows = collector_age_rows({"goat": path}, now=now)
+    assert rows[0]["alarm"] is True
+
+
+def test_default_collector_paths_names_the_four_required_files():
+    paths = default_collector_paths(output_dir="/out", zai_quota_path="/z/zai-quota.json")
+    assert paths == {
+        "go-live": "/out/go-live-observation.json",
+        "goat": "/out/goat-observation.json",
+        "codex": "/out/codex-observation.json",
+        "zai-quota": "/z/zai-quota.json",
+    }
+
+
+def test_default_collector_paths_has_sensible_defaults_with_no_config():
+    paths = default_collector_paths()
+    assert paths["go-live"].endswith("/.local/share/inference-grid-capacity/go-live-observation.json")
+    assert paths["zai-quota"].endswith("/.config/inference-grid/zai-quota.json")
+
+
+# --- disk_free_row ---
+
+
+def test_disk_free_row_ok_above_the_alarm_threshold():
+    row = disk_free_row(run=lambda path: 100 * 1024**3)
+    assert row == {"path": "/System/Volumes/Data", "free_bytes": 100 * 1024**3, "state": "ok", "reason": ""}
+
+
+def test_disk_free_row_alarms_under_twenty_gb():
+    row = disk_free_row(run=lambda path: 15 * 1024**3)
+    assert row["state"] == "alarm"
+
+
+def test_disk_free_row_reds_under_ten_gb():
+    row = disk_free_row(run=lambda path: 5 * 1024**3)
+    assert row["state"] == "red"
+
+
+def test_disk_free_row_boundaries_are_exclusive_on_the_low_side():
+    assert disk_free_row(run=lambda path: 20 * 1024**3)["state"] == "ok"
+    assert disk_free_row(run=lambda path: 20 * 1024**3 - 1)["state"] == "alarm"
+    assert disk_free_row(run=lambda path: 10 * 1024**3)["state"] == "alarm"
+    assert disk_free_row(run=lambda path: 10 * 1024**3 - 1)["state"] == "red"
+
+
+def test_disk_free_row_a_failed_df_alarms_rather_than_vanishing():
+    """The review finding this row must not repeat: a failed df call must raise an
+    alarm, not be silently dropped or read as a healthy reading."""
+
+    def boom(path):
+        raise OSError("df: command not found")
+
+    row = disk_free_row(run=boom)
+    assert row["state"] == "alarm"
+    assert row["free_bytes"] is None
+    assert "df failed" in row["reason"]
+
+
+def test_disk_free_row_honours_custom_thresholds_and_path():
+    row = disk_free_row(path="/other", alarm_bytes=5, red_bytes=1, run=lambda path: 3)
+    assert row == {"path": "/other", "free_bytes": 3, "state": "alarm", "reason": ""}
 
 
 # --- data_status_rows ---
@@ -241,12 +334,16 @@ def test_needs_you_folds_land_requests_and_data_status_into_operator(tmp_path):
         board_dirs=[board],
         data_status_paths={"forward": status},
         workspace_root=tmp_path / "workspaces",
+        collector_paths={},
+        disk_df_run=lambda path: 999 * 1024**3,
     )
     assert any(r["kind"] == "land_request" and r["id"] == "p1" for r in out["operator"])
     assert any(r["kind"] == "data_status" and r["id"] == "forward" for r in out["operator"])
     assert out["heartbeats"] == []
     assert out["disk_usage"]["exists"] is False  # nothing was ever created at this root
     assert out["failures"] == []
+    assert out["collector_ages"] == []
+    assert out["disk_free"]["state"] == "ok"
 
 
 def test_needs_you_reports_no_disk_reading_without_root_or_status_path(tmp_path):
@@ -254,12 +351,32 @@ def test_needs_you_reports_no_disk_reading_without_root_or_status_path(tmp_path)
     # workspace_root nor workspace_status_path given means "no reading", not a walk of
     # the real default ~/.grid-workspaces.
     ledger = make_ledger(tmp_path)
-    out = needs_you(ledger)
+    out = needs_you(ledger, collector_paths={}, disk_df_run=lambda path: 999 * 1024**3)
     assert out["disk_usage"] == {
         "root": None,
         "exists": False,
         "total_bytes": 0,
         "cap_bytes": 4 * 1024**3,
+    }
+
+
+def test_needs_you_uses_default_collector_paths_and_disk_check_when_not_given(tmp_path, monkeypatch):
+    """Neither given must still produce the two 02-A1/C3 rows -- from this repo's own
+    known collector-output defaults and the Data volume -- never nothing. The defaults
+    are redirected into tmp_path first: a test must never read the operator's real
+    ~/.local/share or ~/.config, even read-only (the row's own fixture-only brief)."""
+    import inference_grid.needs_you as needs_you_module
+
+    monkeypatch.setattr(needs_you_module, "DEFAULT_CAPACITY_DIR", tmp_path)
+    monkeypatch.setattr(needs_you_module, "DEFAULT_ZAI_QUOTA_PATH", tmp_path / "zai-quota.json")
+    ledger = make_ledger(tmp_path)
+    out = needs_you(ledger, disk_df_run=lambda path: 42 * 1024**3)
+    assert {r["name"] for r in out["collector_ages"]} == {"go-live", "goat", "codex", "zai-quota"}
+    assert out["disk_free"] == {
+        "path": "/System/Volumes/Data",
+        "free_bytes": 42 * 1024**3,
+        "state": "ok",
+        "reason": "",
     }
 
 

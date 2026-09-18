@@ -223,8 +223,13 @@ def tempfile_dir():
 
 
 class MainAlertTests(unittest.TestCase):
+    def _ok_disk(self):
+        return mock.patch.object(
+            deadman, "evaluate_disk", return_value={"state": "ok", "alert": False, "reason": "plenty"}
+        )
+
     def test_main_sends_email_only_on_alert(self):
-        with mock.patch.object(deadman, "send_email") as send:
+        with mock.patch.object(deadman, "send_email") as send, self._ok_disk():
             with mock.patch.object(deadman, "evaluate",
                                     return_value={"state": "ok", "alert": False, "reason": "fresh"}):
                 deadman.main(["--now", "1000000"])
@@ -234,6 +239,81 @@ class MainAlertTests(unittest.TestCase):
                 deadman.main(["--now", "1000000"])
             send.assert_called_once()
             self.assertIn("NO HEARTBEAT", send.call_args[0][0])
+
+    def test_main_also_alerts_on_a_disk_alarm(self):
+        """02-A1/C3: the dead-man alarms on the disk condition too, independently of
+        the heartbeat -- a fresh heartbeat must not mask a low-disk email."""
+        with mock.patch.object(deadman, "send_email") as send:
+            with mock.patch.object(deadman, "evaluate",
+                                    return_value={"state": "ok", "alert": False, "reason": "fresh"}):
+                with mock.patch.object(
+                    deadman, "evaluate_disk",
+                    return_value={"state": "alarm", "alert": True, "reason": "low disk"},
+                ):
+                    deadman.main(["--now", "1000000"])
+            send.assert_called_once()
+            self.assertIn("DISK LOW", send.call_args[0][0])
+
+    def test_render_plist_never_evaluates_disk_either(self):
+        with mock.patch.object(deadman, "evaluate_disk") as disk_eval:
+            with tempfile_dir() as out_dir:
+                deadman.main(["--render-plist", str(out_dir)])
+            disk_eval.assert_not_called()
+
+
+class EvaluateDiskTests(unittest.TestCase):
+    def test_plenty_of_space_is_ok(self):
+        v = deadman.evaluate_disk(
+            "/System/Volumes/Data", free_bytes_fn=lambda path: 100 * deadman.GIGABYTE
+        )
+        self.assertEqual(v["state"], "ok")
+        self.assertFalse(v["alert"])
+
+    def test_low_space_alarms(self):
+        v = deadman.evaluate_disk(
+            "/System/Volumes/Data", free_bytes_fn=lambda path: 5 * deadman.GIGABYTE
+        )
+        self.assertEqual(v["state"], "alarm")
+        self.assertTrue(v["alert"])
+        self.assertIn("5.0 GB free", v["reason"])
+
+    def test_exactly_at_the_boundary_is_still_ok_one_byte_under_alarms(self):
+        v = deadman.evaluate_disk(
+            "/x", alarm_bytes=deadman.GIGABYTE, free_bytes_fn=lambda path: deadman.GIGABYTE
+        )
+        self.assertEqual(v["state"], "ok")
+        v = deadman.evaluate_disk(
+            "/x", alarm_bytes=deadman.GIGABYTE, free_bytes_fn=lambda path: deadman.GIGABYTE - 1
+        )
+        self.assertEqual(v["state"], "alarm")
+
+    def test_a_failed_df_alarms_rather_than_dropping_the_check(self):
+        """The review finding this row must not repeat: a failed df call must raise
+        an alarm, not be silently swallowed into a healthy/absent reading."""
+
+        def boom(path):
+            raise RuntimeError("df: no such volume")
+
+        v = deadman.evaluate_disk("/x", free_bytes_fn=boom)
+        self.assertEqual(v["state"], "alarm")
+        self.assertTrue(v["alert"])
+        self.assertIn("df", v["reason"])
+        self.assertIn("no such volume", v["reason"])
+
+    def test_disk_free_bytes_parses_a_real_df_shaped_output(self):
+        with mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(
+                stdout=(
+                    "Filesystem   1024-blocks     Used Available Capacity Mounted on\n"
+                    "/dev/disk3s5   239092736 175482880  25165824      88%   /System/Volumes/Data\n"
+                ),
+                returncode=0,
+            )
+            free_bytes = deadman._disk_free_bytes("/System/Volumes/Data")
+        self.assertEqual(free_bytes, 25165824 * 1024)
+        run.assert_called_once_with(
+            ["df", "-k", "/System/Volumes/Data"], capture_output=True, text=True, timeout=10, check=True
+        )
 
 
 if __name__ == "__main__":

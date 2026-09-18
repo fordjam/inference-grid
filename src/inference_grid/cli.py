@@ -507,6 +507,10 @@ def needs_you_command(
     workspace_status_path=None,
     workspace_cap_bytes=None,
     packets_root=None,
+    collector_paths=None,
+    disk_path=None,
+    disk_alarm_bytes=None,
+    disk_red_bytes=None,
 ):
     from .needs_you import DEFAULT_WORKSPACE_ROOT, needs_you as render
 
@@ -527,6 +531,10 @@ def needs_you_command(
         workspace_status_path=workspace_status_path,
         workspace_cap_bytes=workspace_cap_bytes,
         packets_root=packets_root,
+        collector_paths=collector_paths,
+        disk_path=disk_path,
+        disk_alarm_bytes=disk_alarm_bytes,
+        disk_red_bytes=disk_red_bytes,
     )
 
 

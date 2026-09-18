@@ -1,4 +1,6 @@
 from inference_grid.capacity import (
+    clean_collector_ages,
+    clean_disk_free,
     clean_disk_usage,
     clean_failures,
     clean_heartbeats,
@@ -256,6 +258,53 @@ def test_clean_disk_usage_rejects_bad_shapes():
 
 def test_clean_disk_usage_defaults_to_none_without_an_overlay():
     assert project({"accounts": []}, [])["disk_usage"] is None
+
+
+def test_clean_collector_ages_marks_alarm_past_thirty_minutes():
+    rows = [
+        {"name": "goat", "age_seconds": 60, "since": "2026-09-17T00:00:00+00:00", "junk": 1},
+        {"name": "codex", "age_seconds": 1801, "since": "2026-09-17T00:00:00+00:00"},
+        {"name": "zai-quota", "age_seconds": None, "since": ""},
+        {"name": "", "age_seconds": 10, "since": ""},  # dropped: no name
+        "not a dict",
+    ]
+    result = clean_collector_ages(rows)
+    assert result == [
+        {"name": "goat", "age_seconds": 60.0, "since": "2026-09-17T00:00:00+00:00", "alarm": False},
+        {"name": "codex", "age_seconds": 1801.0, "since": "2026-09-17T00:00:00+00:00", "alarm": True},
+        {"name": "zai-quota", "age_seconds": None, "since": "", "alarm": True},
+    ]
+
+
+def test_clean_collector_ages_recomputes_alarm_rather_than_trusting_a_baked_flag():
+    """The review finding this row must not repeat: a stale overlay must not freeze a
+    collector row as "not alarmed" forever just because it looked fine when built."""
+    rows = [{"name": "goat", "age_seconds": 9999, "since": "t", "alarm": False}]
+    assert clean_collector_ages(rows)[0]["alarm"] is True
+
+
+def test_clean_collector_ages_defaults_to_empty_without_an_overlay():
+    assert project({"accounts": []}, [])["collector_ages"] == []
+
+
+def test_clean_disk_free_keeps_state_and_bytes_never_invents_a_missing_reading():
+    result = clean_disk_free({"path": "/System/Volumes/Data", "free_bytes": 5.0, "state": "red", "reason": "low"})
+    assert result == {"state": "red", "free_bytes": 5.0, "reason": "low"}
+    assert "path" not in result
+
+
+def test_clean_disk_free_keeps_a_failed_check_visible():
+    result = clean_disk_free({"path": "/x", "free_bytes": None, "state": "alarm", "reason": "df failed: boom"})
+    assert result == {"state": "alarm", "free_bytes": None, "reason": "df failed: boom"}
+
+
+def test_clean_disk_free_rejects_bad_shapes():
+    assert clean_disk_free(None) is None
+    assert clean_disk_free({"state": "unknown"}) is None
+
+
+def test_clean_disk_free_defaults_to_none_without_an_overlay():
+    assert project({"accounts": []}, [])["disk_free"] is None
 
 
 def test_clean_failures_bounds_the_log_tail_and_drops_unknown_kinds():
