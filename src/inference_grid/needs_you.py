@@ -25,6 +25,10 @@ adds the rest of 02-A1's open half, all of it read-only:
 - `memory_row` -- 02-A8 (the WindowServer watchdog kill, 2026-09-18): swap used and the
   top three processes by resident memory, amber past the 02-A9 concurrency gate's own
   `gate_swap_gb` threshold, red at 2x that.
+- `this_week_row` -- 02-C2/C4/C5 (2026-09-18): the same four weekly numbers as
+  `inference-grid report --week` (unattended-land rate, failure rate, quota use,
+  subscription cost per landed packet), compacted for the dashboard's own "This week"
+  section rather than the full markdown page.
 
 `needs_you()` combines all of the above with `operator_queue.build_overlay` into one
 dict for both the `inference-grid needs-you` command and the capacity dashboard.
@@ -541,6 +545,29 @@ def memory_row(swap_run=None, ps_run=None, gate_config_path=None, amber_gb=None)
     return {"swap_gb": swap_gb, "state": state, "top_processes": top, "reason": reason}
 
 
+def this_week_row(ledger, week=None, subscriptions=None, quota_use=None, now=None):
+    """02-C2/C4/C5: the weekly report's own numbers, compacted for the dashboard --
+    unattended-land rate (numerator/denominator), overall failure rate against the
+    2026-09-17 baseline, quota use and subscription cost per landed packet.
+
+    `subscriptions`/`quota_use` are the same already-resolved inputs `report.report()`
+    takes (see its own docstring) -- this row does no filesystem or provider I/O of its
+    own; `operator_lists()` (deployments/local/overlay_build.py) supplies them the same
+    way it supplies every other config-driven row here.
+    """
+    from .report import report as compute_report
+
+    rep = compute_report(ledger, week=week, subscriptions=subscriptions, quota_use=quota_use, now=now)
+    return {
+        "unattended_land_rate": rep["unattended_land_rate"],
+        "unattended_land_count": rep["unattended_land_count"],
+        "packets_landed": rep["packets_landed"],
+        "failure_rate": rep["failure_rate_overall"],
+        "quota_use": rep["quota_use"],
+        "subscription_costs": rep["subscription_costs"],
+    }
+
+
 def needs_you(
     ledger,
     board_dirs=(),
@@ -561,6 +588,8 @@ def needs_you(
     memory_ps_run=None,
     memory_gate_config_path=None,
     memory_amber_gb=None,
+    this_week_subscriptions=None,
+    this_week_quota_use=None,
     now=None,
 ):
     """Everything the operator needs to see, read-only.
@@ -586,6 +615,11 @@ def needs_you(
     Memory: `memory_row` always runs (swap and top processes are cheap reads);
     `memory_swap_run`/`memory_ps_run` exist only for tests to inject fixtures instead of
     shelling out to `sysctl`/`ps`.
+
+    This week (02-C2/C4/C5): `this_week_row` always runs against `ledger`;
+    `this_week_subscriptions`/`this_week_quota_use` are the same already-resolved inputs
+    `report.report()` takes, absent by default (every number degrades to "unrecorded"
+    rather than a guess, same as the weekly report itself).
     """
     overlay = build_overlay(
         ledger,
@@ -628,5 +662,11 @@ def needs_you(
         ps_run=memory_ps_run,
         gate_config_path=memory_gate_config_path,
         amber_gb=memory_amber_gb,
+    )
+    overlay["this_week"] = this_week_row(
+        ledger,
+        subscriptions=this_week_subscriptions,
+        quota_use=this_week_quota_use,
+        now=now,
     )
     return overlay

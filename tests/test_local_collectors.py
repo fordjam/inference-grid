@@ -1219,6 +1219,68 @@ class OverlayBuildTests(unittest.TestCase):
         result = overlay.operator_lists({"database_url": "not-a-real-scheme://nope"})
         self.assertIsNone(result["memory"])
 
+    def test_operator_lists_wires_this_week_through_injected_subscriptions_and_quota(self):
+        """02-C2/C4/C5: the dashboard's overlay build must show the same weekly numbers
+        `inference-grid report --week` computes -- injected here rather than reading the
+        operator's real files, same seam as memory's swap/RSS runners above."""
+        from inference_grid.ledger import Ledger, digest
+
+        tmp = self.enterContext(_TmpDir())
+        db_url = "sqlite:///" + str(tmp.path / "board.sqlite")
+        ledger = Ledger(db_url)
+        ledger.initialize()
+        ledger.configure_account("acct", 2, {"five_hour": 10, "weekly": 20}, time.time() + 600, ["m1"])
+        ledger.submit(
+            "t1",
+            "p",
+            dict(
+                authorized=True,
+                model="m1",
+                family="fam",
+                argv=["/bin/true"],
+                workspace="/tmp/t1",
+                timeout=1,
+                output_bytes=100,
+                inputs={},
+                manifest_sha256=digest({}),
+            ),
+        )
+        aid, gen = ledger.claim("t1", "acct", {"five_hour": 1, "weekly": 1})
+        ledger.start(aid, gen)
+        receipt = dict(
+            status="completed",
+            finish_reason="stop",
+            actual_model="m1",
+            manifest_sha256=digest({}),
+            artifacts=[{"path": "a.txt", "sha256": "a" * 64}],
+        )
+        ledger.finish(aid, gen, receipt)
+        ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+        config = {
+            "database_url": db_url,
+            "this_week_subscriptions": {"Z.ai": {"account": "acct", "weekly_cost_usd": 3.23}},
+            "this_week_quota_use": {"Z.ai": {"used_percent": 92, "window": "weekly"}},
+        }
+        result = overlay.operator_lists(config)
+        self.assertEqual(result["this_week"]["packets_landed"], 1)
+        self.assertEqual(result["this_week"]["unattended_land_rate"], 1.0)
+        self.assertEqual(
+            result["this_week"]["subscription_costs"],
+            [
+                {
+                    "subscription": "Z.ai",
+                    "weekly_cost_usd": 3.23,
+                    "landed_packets": 1,
+                    "cost_per_landed_packet_usd": 3.23,
+                }
+            ],
+        )
+        self.assertEqual(result["this_week"]["quota_use"][0]["used_percent"], 92)
+
+    def test_operator_lists_this_week_defaults_to_none_when_the_package_is_unavailable(self):
+        result = overlay.operator_lists({"database_url": "not-a-real-scheme://nope"})
+        self.assertIsNone(result["this_week"])
+
 
 def make_board_db(path, attempt_rows=(), event_rows=()):
     """A throwaway board.sqlite with just the two tables capacity_panel reads.

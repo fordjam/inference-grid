@@ -418,6 +418,272 @@ def test_report_command_refuses_a_non_markdown_out_path(ledger, tmp_path):
     assert not target.exists()
 
 
+# --- 02-C2/C4/C5: numerator/denominator, failure rate, quota use, subscription cost ---
+
+
+def test_unattended_land_count_is_the_numerator_beside_the_rate(ledger):
+    now = time.time()
+    aid1, gen1 = submit_and_claim(ledger, "t1")
+    receipt1 = finish(ledger, aid1, gen1)
+    ledger.accept(aid1, digest(receipt1), "operator-attested-independent", "approved")
+
+    aid2, gen2 = submit_and_claim(ledger, "t2")
+    ledger.start(aid2, gen2)
+    ledger.hold(aid2, "ambiguous")
+    ledger.resolve(aid2, "consumed", "confirmed it ran", "james")
+    with ledger.tx() as con:
+        from sqlalchemy import update
+
+        from inference_grid.ledger import attempts as attempts_table
+
+        con.execute(
+            update(attempts_table).where(attempts_table.c.id == aid2).values(state="accepted")
+        )
+
+    out = report(ledger, now=now + 10)
+    assert out["packets_landed"] == 2
+    assert out["unattended_land_count"] == 1
+    assert out["unattended_land_rate"] == 0.5
+
+
+def test_unattended_land_count_is_none_without_any_landed_packet(ledger):
+    assert report(ledger, now=time.time() + 10)["unattended_land_count"] is None
+
+
+def test_failure_rate_per_lane_and_overall(ledger):
+    now = time.time()
+    aid, gen = submit_and_claim(ledger, "t1")
+    finish(ledger, aid, gen)  # completed
+
+    aid2, gen2 = submit_and_claim(ledger, "t2")
+    ledger.start(aid2, gen2)
+    ledger.hold(aid2, "bad output")
+    ledger.resolve(aid2, "consumed", "provider ran", "james")  # failed
+
+    aid3, gen3 = submit_and_claim(ledger, "t3")
+    ledger.start(aid3, gen3)
+    ledger.hold(aid3, "ambiguous")
+    ledger.resolve(aid3, "released", "nothing ran", "james")  # abandoned
+
+    out = report(ledger, now=now + 10)
+    assert out["failure_rate_by_lane"] == {
+        "fam/m1": {"failed_or_abandoned": 2, "attempts": 3, "rate": 2 / 3}
+    }
+    assert out["failure_rate_overall"] == {
+        "failed_or_abandoned": 2,
+        "attempts": 3,
+        "rate": 2 / 3,
+        "baseline_2026_09_17": 0.176,
+    }
+
+
+def test_failure_rate_overall_is_none_with_zero_attempts(ledger):
+    out = report(ledger, now=time.time() + 10)
+    assert out["failure_rate_by_lane"] == {}
+    assert out["failure_rate_overall"] == {
+        "failed_or_abandoned": 0,
+        "attempts": 0,
+        "rate": None,
+        "baseline_2026_09_17": 0.176,
+    }
+
+
+def test_quota_use_is_a_sorted_passthrough_of_the_argument(ledger):
+    out = report(
+        ledger,
+        quota_use={
+            "Z.ai": {
+                "used_percent": 100,
+                "numerator": 10000,
+                "denominator": 10000,
+                "window": "weekly",
+                "observed_at": "2026-09-18T14:35:10Z",
+            },
+            "Go": {"used_percent": 92.3, "window": "weekly"},
+        },
+        now=time.time() + 10,
+    )
+    assert out["quota_use"] == [
+        {
+            "subscription": "Go",
+            "used_percent": 92.3,
+            "numerator": None,
+            "denominator": None,
+            "window": "weekly",
+            "observed_at": None,
+        },
+        {
+            "subscription": "Z.ai",
+            "used_percent": 100,
+            "numerator": 10000,
+            "denominator": 10000,
+            "window": "weekly",
+            "observed_at": "2026-09-18T14:35:10Z",
+        },
+    ]
+
+
+def test_quota_use_is_empty_without_the_argument(ledger):
+    assert report(ledger, now=time.time() + 10)["quota_use"] == []
+
+
+def test_subscription_cost_per_landed_packet(ledger):
+    now = time.time()
+    for name in ("t1", "t2"):
+        aid, gen = submit_and_claim(ledger, name)
+        receipt = finish(ledger, aid, gen)
+        ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+
+    out = report(
+        ledger,
+        subscriptions={
+            "Z.ai": {"account": "acct", "weekly_cost_usd": 14.0 / (52 / 12)},
+            "Codex": {"account": None, "weekly_cost_usd": 0.0},
+            "Max": {"account": "no-such-account", "weekly_cost_usd": None},
+        },
+        now=now + 10,
+    )
+    zai = next(c for c in out["subscription_costs"] if c["subscription"] == "Z.ai")
+    assert zai["landed_packets"] == 2
+    assert zai["cost_per_landed_packet_usd"] == pytest.approx((14.0 / (52 / 12)) / 2)
+    codex = next(c for c in out["subscription_costs"] if c["subscription"] == "Codex")
+    assert codex == {
+        "subscription": "Codex",
+        "weekly_cost_usd": 0.0,
+        "landed_packets": 0,
+        "cost_per_landed_packet_usd": None,
+    }
+    mx = next(c for c in out["subscription_costs"] if c["subscription"] == "Max")
+    assert mx == {
+        "subscription": "Max",
+        "weekly_cost_usd": None,
+        "landed_packets": 0,
+        "cost_per_landed_packet_usd": None,
+    }
+
+
+def test_subscription_cost_sums_landed_packets_across_a_list_of_accounts(ledger):
+    now = time.time()
+    ledger.configure_account(
+        "zai-account", 1, {"five_hour": 10, "weekly": 20}, time.time() + 600, ["m1"]
+    )
+    ledger.configure_account(
+        "zcode-account", 1, {"five_hour": 10, "weekly": 20}, time.time() + 600, ["m1"]
+    )
+    aid1, gen1 = submit_and_claim(ledger, "t1", account="zai-account")
+    receipt1 = finish(ledger, aid1, gen1)
+    ledger.accept(aid1, digest(receipt1), "operator-attested-independent", "approved")
+    aid2, gen2 = submit_and_claim(ledger, "t2", account="zcode-account")
+    receipt2 = finish(ledger, aid2, gen2)
+    ledger.accept(aid2, digest(receipt2), "operator-attested-independent", "approved")
+
+    out = report(
+        ledger,
+        subscriptions={"Z.ai": {"account": ["zai-account", "zcode-account"], "weekly_cost_usd": 3.23}},
+        now=now + 10,
+    )
+    zai = next(c for c in out["subscription_costs"] if c["subscription"] == "Z.ai")
+    assert zai["landed_packets"] == 2
+    assert zai["cost_per_landed_packet_usd"] == pytest.approx(3.23 / 2)
+
+
+def test_subscription_cost_is_empty_without_the_argument(ledger):
+    assert report(ledger, now=time.time() + 10)["subscription_costs"] == []
+
+
+def test_render_markdown_includes_c4_c5_sections(ledger):
+    now = time.time()
+    aid, gen = submit_and_claim(ledger, "t1")
+    ledger.start(aid, gen)
+    ledger.hold(aid, "bad output")
+    ledger.resolve(aid, "consumed", "provider ran", "james")  # failed
+
+    out = report(
+        ledger,
+        subscriptions={"Z.ai": {"account": "acct", "weekly_cost_usd": 3.23}},
+        quota_use={"Z.ai": {"used_percent": 100, "window": "weekly"}},
+        now=now + 10,
+    )
+    document = render_markdown(out)
+    assert "## Failure rate (C4: failed + abandoned ÷ attempts)" in document
+    assert "Overall: **1** of **1**" in document
+    assert "baseline: 17.6%" in document
+    assert "## Quota use per subscription (C5)" in document
+    assert "100% (provider-reported; raw units unrecorded)" in document
+    assert "## Subscription cost per landed packet (C5)" in document
+    assert "$3.23" in document
+
+
+def test_report_command_loads_default_subscriptions_and_quota_use(ledger, tmp_path, monkeypatch):
+    from inference_grid import cli
+
+    monkeypatch.setattr(cli, "DEFAULT_SUBSCRIPTIONS_PATH", tmp_path / "no-subscriptions.json")
+    monkeypatch.setattr(cli, "DEFAULT_CAPACITY_OBSERVATIONS_DIR", tmp_path / "no-capacity-dir")
+    now = time.time()
+    for name in ("t1", "t2"):
+        aid, gen = submit_and_claim(ledger, name, account="acct")
+        receipt = finish(ledger, aid, gen)
+        ledger.accept(aid, digest(receipt), "operator-attested-independent", "approved")
+    document, _written = cli.report_command(ledger, out=str(tmp_path / "out.md"))
+    # "acct" isn't any of the default subscriptions' accounts, so every default
+    # subscription reports 0 landed packets and "unrecorded" cost -- never a guess.
+    assert "Codex" in document
+    assert "unrecorded (no price on file)" in document
+
+
+def test_load_quota_use_reads_the_weekly_window_from_observation_files(tmp_path):
+    import json as jsonlib
+
+    from inference_grid.cli import _load_quota_use
+
+    (tmp_path / "zai-observation.json").write_text(
+        jsonlib.dumps(
+            {
+                "observed_at": "2026-09-18T14:35:10Z",
+                "windows": [
+                    {"id": "five_hour", "used_percent": 0},
+                    {
+                        "id": "weekly",
+                        "used_percent": 100,
+                        "remaining_units": 0,
+                        "plan_units": 10000,
+                    },
+                ],
+            }
+        )
+    )
+    out = _load_quota_use(None, capacity_dir=tmp_path)
+    assert out == {
+        "Z.ai": {
+            "used_percent": 100,
+            "numerator": 10000,
+            "denominator": 10000,
+            "window": "weekly",
+            "observed_at": "2026-09-18T14:35:10Z",
+        }
+    }
+
+
+def test_load_quota_use_ignores_a_missing_directory(tmp_path):
+    from inference_grid.cli import _load_quota_use
+
+    assert _load_quota_use(None, capacity_dir=tmp_path / "does-not-exist") == {}
+
+
+def test_load_subscriptions_converts_monthly_to_weekly_by_default(monkeypatch):
+    from pathlib import Path
+
+    from inference_grid import cli
+
+    monkeypatch.setattr(cli, "DEFAULT_SUBSCRIPTIONS_PATH", Path("/no/such/file.json"))
+    out = cli._load_subscriptions(None)
+    assert out["Z.ai"]["account"] == ["zai", "zcode"]
+    assert out["Z.ai"]["weekly_cost_usd"] == pytest.approx(14.0 / (52 / 12))
+    assert out["Max"]["account"] is None
+    assert out["Max"]["weekly_cost_usd"] is None
+    assert out["Codex"]["weekly_cost_usd"] == 0.0
+
+
 def test_report_week_label_uses_the_windows_start_not_its_end(ledger):
     # The Monday 07:00 scheduled run's own case: `end` (now) has already crossed into
     # the new ISO week, but the report's content is entirely the week before it -- the
@@ -445,10 +711,22 @@ def test_render_markdown_never_crashes_on_an_empty_window():
         "resolved": [],
         "packets_landed": 0,
         "unattended_land_rate": None,
+        "unattended_land_count": None,
         "claude_max_share": None,
         "cost_per_landed_packet_usd": {},
+        "failure_rate_by_lane": {},
+        "failure_rate_overall": {
+            "failed_or_abandoned": 0,
+            "attempts": 0,
+            "rate": None,
+            "baseline_2026_09_17": 0.176,
+        },
+        "quota_use": [],
+        "subscription_costs": [],
     }
     document = render_markdown(empty)
     assert "no attempts settled" in document
     assert "nothing held right now" in document
     assert "no prices on file" in document
+    assert "no capacity observations on file" in document
+    assert "no subscriptions configured" in document

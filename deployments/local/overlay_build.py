@@ -429,6 +429,7 @@ def operator_lists(config):
     try:
         if config.get("package_src"):
             sys.path.insert(0, str(config["package_src"]))
+        from inference_grid.cli import _load_quota_use, _load_subscriptions
         from inference_grid.ledger import Ledger
         from inference_grid.needs_you import default_collector_paths, needs_you
 
@@ -464,6 +465,12 @@ def operator_lists(config):
             # disk, so a test can inject stubbed sysctl/ps runners without shelling out.
             memory_swap_run=config.get("memory_swap_run"),
             memory_ps_run=config.get("memory_ps_run"),
+            # 02-C2/C4/C5: read the operator's own subscriptions.json/observation files
+            # by default, same as `inference-grid report --week` -- a config override
+            # (test-only, or an operator who wants the report's exact --json values
+            # instead) still wins when given.
+            this_week_subscriptions=_load_subscriptions(config.get("this_week_subscriptions")),
+            this_week_quota_use=_load_quota_use(config.get("this_week_quota_use")),
         )
     except Exception as exc:  # noqa: BLE001 — the overlay must still be written
         return {
@@ -476,6 +483,7 @@ def operator_lists(config):
             "collector_ages": [],
             "disk_free": None,
             "memory": None,
+            "this_week": None,
             "operator_error": type(exc).__name__,
         }
 
