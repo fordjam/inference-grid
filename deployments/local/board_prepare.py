@@ -50,6 +50,35 @@ def _ts(iso):
     return datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
 
+def clamp_percent(value):
+    """Clamp a used-percent reading into the readiness classifier's [0, 100] range.
+
+    A provider's own accounting can legitimately report over 100% (a burst against a
+    rolling window) or drift negative; the classifier refuses anything outside [0, 100]
+    (``lane_readiness``'s schema is deliberately strict). Returns ``(clamped, raw)``
+    where ``raw`` is the original value, only when it differed from the clamp, so the
+    caller can keep it on the record without feeding it to the classifier.
+    """
+    v = float(value)
+    if v > 100:
+        return 100.0, v
+    if v < 0:
+        return 0.0, v
+    return v, None
+
+
+def record_lane_safe(ledger, lane, record):
+    """record_lane, but a Refused for one lane's record is printed and skipped, not
+    raised: a single bad reading must block that lane, never the whole board."""
+    try:
+        state = ledger.record_lane(lane, record)["state"]
+    except Refused as exc:
+        print(lane, "refused:", exc)
+        return None
+    print(lane, state)
+    return state
+
+
 def configure(config, ledger):
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
     lanes = {}
@@ -59,10 +88,14 @@ def configure(config, ledger):
         ).read_text()
     )
     zt = _ts(quota["observed_at"])
-    zrem = {
-        window: ZAI_PLAN[window] * (100 - quota[window + "_used_percent"]) / 100
-        for window in ("five_hour", "weekly")
-    }
+    zai_used = {}
+    zai_raw = {}
+    for window in ("five_hour", "weekly"):
+        clamped, raw = clamp_percent(quota[window + "_used_percent"])
+        zai_used[window] = clamped
+        if raw is not None:
+            zai_raw[window] = raw
+    zrem = {window: ZAI_PLAN[window] * (100 - zai_used[window]) / 100 for window in zai_used}
     zai_valid = ZAI_API_VALID if quota.get("source") == "api" else ZAI_ATTESTED_VALID
     # the Z.ai plan serves both the zai headless lane and the zcode lane
     for lane in ("zai", "zcode"):
@@ -78,28 +111,36 @@ def configure(config, ledger):
             )
         except Refused as exc:
             print(lane, "account", exc)
-        lanes[lane] = {
+        record = {
             "provider": lane,
             "auth": "ok",
             "quota_observed_at": zt,
             "quota_freshness_seconds": zai_valid,
-            "used_percent_max": float(
-                max(quota["five_hour_used_percent"], quota["weekly_used_percent"])
-            ),
+            "used_percent_max": max(zai_used.values()),
             "admission_limit_percent": admission_limit(config),
             "cooldown_until": None,
             "qualification": "qualified",
             "blocked_until": None,
             "blocker": None,
         }
+        if zai_raw:
+            record["raw_used_percent_max"] = max(zai_raw.values())
+        lanes[lane] = record
     go = json.loads(
         Path(config.get("go_live_path", DEFAULT_DIR / "go-live-observation.json")).read_text()
     )
     gt = _ts(go["observed_at"])
+    go_used = {}
+    go_raw = {}
+    for w in go["windows"]:
+        clamped, raw = clamp_percent(w["used_percent"])
+        go_used[w["id"]] = clamped
+        if raw is not None:
+            go_raw[w["id"]] = raw
     grem = {
-        w["id"]: GO_WINDOW_UNITS[w["id"]] * (1 - (w["used_percent"] + 1) / 100)
-        for w in go["windows"]
-        if w["id"] in GO_WINDOW_UNITS
+        wid: max(0.0, GO_WINDOW_UNITS[wid] * (1 - (go_used[wid] + 1) / 100))
+        for wid in go_used
+        if wid in GO_WINDOW_UNITS
     }
     try:
         ledger.configure_account(
@@ -118,19 +159,23 @@ def configure(config, ledger):
     go_lane = {
         "provider": "go",
         "auth": "ok" if go.get("owner_verified") else "unknown",
-        "quota_observed_at": gt,
+        # No counted window means no usage was actually observed: leave the lane
+        # unobserved (stale) rather than reading a None used_percent_max as "ready".
+        "quota_observed_at": gt if go_used else None,
         "quota_freshness_seconds": GO_VALID,
-        "used_percent_max": float(max(w["used_percent"] for w in go["windows"])),
+        "used_percent_max": max(go_used.values()) if go_used else None,
         "admission_limit_percent": admission_limit(config),
         "cooldown_until": None,
         "qualification": "qualified",
         "blocked_until": None,
         "blocker": None,
     }
+    if go_raw:
+        go_lane["raw_used_percent_max"] = max(go_raw.values())
     for entry in go_lanes(config):
         lanes[entry["lane"]] = dict(go_lane, provider=entry["lane"])
     for lane, record in lanes.items():
-        print(lane, ledger.record_lane(lane, record)["state"])
+        record_lane_safe(ledger, lane, record)
     configure_goat(config, ledger, now)
     print("zcode window", flash_window(now))
 
@@ -151,24 +196,34 @@ def observation_record(config, obs, window_units, valid):
     record's ``quota_observed_at`` is None when the file is missing, not ok, or carries no
     counted window; ``observed`` is the file's own timestamp, the freshness test's other
     operand; ``used`` is the per-window used-percent map the account's remaining units
-    come from.
+    come from, clamped into [0, 100] (see ``clamp_percent``) so a burst-over-quota or
+    drifted-negative reading never reaches the readiness classifier's strict schema; the
+    record carries the un-clamped high-water mark as ``raw_used_percent_max`` when it
+    differed.
     """
     observed = _ts(obs["observed_at"]) if obs else None
     if window_units is None:
-        used = {
+        raw_used = {
             w["id"]: w["used_percent"]
             for w in (obs or {}).get("windows", [])
             if isinstance(w.get("used_percent"), (int, float))
             and not isinstance(w["used_percent"], bool)
         }
     else:
-        used = {
+        raw_used = {
             w["id"]: w["used_percent"]
             for w in (obs or {}).get("windows", [])
             if w.get("id") in window_units
             and isinstance(w["used_percent"], (int, float))
             and not isinstance(w["used_percent"], bool)
         }
+    used = {}
+    raw_over = {}
+    for wid, value in raw_used.items():
+        clamped, raw = clamp_percent(value)
+        used[wid] = clamped
+        if raw is not None:
+            raw_over[wid] = raw
     ok = obs is not None and obs.get("status") == "ok" and used
     record = {
         "auth": "ok",
@@ -181,6 +236,8 @@ def observation_record(config, obs, window_units, valid):
         "blocked_until": None,
         "blocker": None,
     }
+    if raw_over:
+        record["raw_used_percent_max"] = float(max(raw_over.values()))
     return record, observed, used
 
 
@@ -213,7 +270,7 @@ def configure_observation(
         except Refused as exc:
             print(account, exc)
     for lane in lane_ids:
-        print(lane, ledger.record_lane(lane, dict(record, provider=lane))["state"])
+        record_lane_safe(ledger, lane, dict(record, provider=lane))
 
 
 GO_LANES_DEFAULT = [{"lane": "go", "model": "glm-5.3-flash"}, {"lane": "go-kimi", "model": "kimi-k3"}]

@@ -121,7 +121,9 @@ ACTIVE = ("queued", "dispatching", "held")
 DEFAULT_ACCOUNTS = ()
 # Per-model routing metadata a lane record may carry beyond the readiness classifier's
 # fixed key set; stripped before classification, stored with the record.
-LANE_RECORD_METADATA = ("unsupported_until",)
+# ``raw_used_percent_max``: the un-clamped used-percent board_prepare observed before
+# clamping into the classifier's strict [0, 100] schema (see board_prepare.clamp_percent).
+LANE_RECORD_METADATA = ("unsupported_until", "raw_used_percent_max")
 # B8: names `resolve()` refuses as an `operator` attestation — every machine identity
 # code in this repository has ever resolved a hold as, plus the generic terms an
 # automated caller would reach for first. Not exhaustive by design (a determined caller
