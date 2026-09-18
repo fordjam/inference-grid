@@ -301,6 +301,47 @@ def clean_disk_free(row):
     return entry
 
 
+MEMORY_STATES = {"ok", "amber", "red"}
+
+
+def clean_memory(row):
+    """Sanitize the 02-A8 memory row: swap used and the top three processes by resident
+    memory, state one of "ok"/"amber"/"red". Unknown keys are stripped; a row with an
+    unrecognized state is dropped entirely, never partially trusted.
+    """
+    if not isinstance(row, dict) or row.get("state") not in MEMORY_STATES:
+        return None
+    swap = row.get("swap_gb")
+    entry = {
+        "state": row["state"],
+        "swap_gb": float(swap)
+        if type(swap) in (int, float) and not isinstance(swap, bool) and swap >= 0
+        else None,
+    }
+    reason = row.get("reason")
+    entry["reason"] = reason[:400] if isinstance(reason, str) else ""
+    clean_top = []
+    top = row.get("top_processes")
+    if isinstance(top, list):
+        for p in top[:3]:
+            if not isinstance(p, dict):
+                continue
+            comm = p.get("comm")
+            if not isinstance(comm, str) or not comm.strip():
+                continue
+            rss = p.get("rss_gb")
+            clean_top.append(
+                {
+                    "comm": comm[:200],
+                    "rss_gb": float(rss)
+                    if type(rss) in (int, float) and not isinstance(rss, bool) and rss >= 0
+                    else None,
+                }
+            )
+    entry["top_processes"] = clean_top
+    return entry
+
+
 def clean_disk_usage(usage):
     """Sanitize 02-A1's `~/.grid-workspaces` reading: two byte counts, never the path.
 
@@ -426,6 +467,7 @@ def project(raw, overlays=()):
     # "scorecard": [...], "operator": [...], "accepted_work": [...], "boards": [...],
     # "heartbeats": [...], "disk_usage": {...}, "failures": [...], "collector_ages": [...],
     # "disk_free": {...}};
+    # "heartbeats": [...], "disk_usage": {...}, "failures": [...], "memory": {...}};
     # the boards list is local-only (task ids are project names) and carried for the local
     # page; overlay attempts replace
     # the upstream activity list when present, the scorecard (per model routing evidence) and
@@ -445,6 +487,7 @@ def project(raw, overlays=()):
     overlay_failures = overlays.get("failures") if isinstance(overlays, dict) else None
     overlay_collector_ages = overlays.get("collector_ages") if isinstance(overlays, dict) else None
     overlay_disk_free = overlays.get("disk_free") if isinstance(overlays, dict) else None
+    overlay_memory = overlays.get("memory") if isinstance(overlays, dict) else None
     accounts = {}
     for a in [*raw.get("accounts", []), *overlay_accounts]:
         if not isinstance(a, dict) or a.get("provider") not in PROVIDERS:
@@ -501,6 +544,7 @@ def project(raw, overlays=()):
         failures=clean_failures(overlay_failures),
         collector_ages=clean_collector_ages(overlay_collector_ages),
         disk_free=clean_disk_free(overlay_disk_free),
+        memory=clean_memory(overlay_memory),
         served_at=datetime.now(timezone.utc).isoformat(),
     )
 

@@ -4,6 +4,8 @@ and failed/held rows with a log tail and a text suggestion."""
 import json
 import time
 
+import pytest
+
 from inference_grid.ledger import Ledger, digest
 from inference_grid.needs_you import (
     cached_disk_usage_row,
@@ -15,6 +17,7 @@ from inference_grid.needs_you import (
     failure_rows,
     heartbeat_rows,
     land_request_rows,
+    memory_row,
     needs_you,
 )
 
@@ -322,13 +325,18 @@ def test_failure_rows_ignores_other_states(tmp_path):
 # --- needs_you: the combined overlay ---
 
 
+NO_SWAP = lambda: "vm.swapusage: total = 2048.00M  used = 100.00M  free = 1948.00M  (encrypted)"  # noqa: E731
+NO_PS = lambda: "  PID   RSS COMM\n    1  1000 launchd\n"  # noqa: E731
+
+
 def test_needs_you_folds_land_requests_and_data_status_into_operator(tmp_path):
     ledger = make_ledger(tmp_path)
     board = write_board(tmp_path, [{"id": "p1", "category": "packet", "state": "passed"}])
     status = tmp_path / "forward_status.json"
     status.write_text(json.dumps({"engine_recorded": False}))
     # workspace_root is explicit and never the real ~/.grid-workspaces: tests stay on
-    # fixtures, never the operator's moving data cache.
+    # fixtures, never the operator's moving data cache. Same for the memory readings:
+    # a fixture sysctl/ps output, never the real machine.
     out = needs_you(
         ledger,
         board_dirs=[board],
@@ -336,6 +344,9 @@ def test_needs_you_folds_land_requests_and_data_status_into_operator(tmp_path):
         workspace_root=tmp_path / "workspaces",
         collector_paths={},
         disk_df_run=lambda path: 999 * 1024**3,
+        memory_swap_run=NO_SWAP,
+        memory_ps_run=NO_PS,
+        memory_amber_gb=4.0,
     )
     assert any(r["kind"] == "land_request" and r["id"] == "p1" for r in out["operator"])
     assert any(r["kind"] == "data_status" and r["id"] == "forward" for r in out["operator"])
@@ -344,6 +355,7 @@ def test_needs_you_folds_land_requests_and_data_status_into_operator(tmp_path):
     assert out["failures"] == []
     assert out["collector_ages"] == []
     assert out["disk_free"]["state"] == "ok"
+    assert out["memory"]["state"] == "ok"
 
 
 def test_needs_you_reports_no_disk_reading_without_root_or_status_path(tmp_path):
@@ -351,7 +363,7 @@ def test_needs_you_reports_no_disk_reading_without_root_or_status_path(tmp_path)
     # workspace_root nor workspace_status_path given means "no reading", not a walk of
     # the real default ~/.grid-workspaces.
     ledger = make_ledger(tmp_path)
-    out = needs_you(ledger, collector_paths={}, disk_df_run=lambda path: 999 * 1024**3)
+    out = needs_you(ledger, collector_paths={}, disk_df_run=lambda path: 999 * 1024**3, memory_swap_run=NO_SWAP, memory_ps_run=NO_PS, memory_amber_gb=4.0)
     assert out["disk_usage"] == {
         "root": None,
         "exists": False,
@@ -445,3 +457,106 @@ def test_attempt_dir_never_crashes_on_an_empty_task_or_attempt_id(tmp_path):
     assert _attempt_dir(tmp_path, "t1", "") is None
     assert _attempt_dir(None, "t1", "a1") is None
     assert _attempt_dir(tmp_path, "/etc/passwd", "a1") is None
+
+
+# --- memory_row: 02-A8 (the WindowServer watchdog kill, 2026-09-18) ---
+
+PS_HEADER = "  PID   RSS COMM\n"
+
+
+def ps_output(*procs):
+    """`procs`: (pid, rss_kb, comm) tuples, formatted like real `ps -eo pid,rss,comm`."""
+    lines = [f"{pid:5d} {rss:5d} {comm}" for pid, rss, comm in procs]
+    return PS_HEADER + "\n".join(lines) + "\n"
+
+
+def swap_output(used_mb):
+    return f"vm.swapusage: total = 8192.00M  used = {used_mb:.2f}M  free = 1000.00M  (encrypted)"
+
+
+def test_memory_row_reports_ok_under_the_amber_threshold():
+    row = memory_row(
+        swap_run=lambda: swap_output(1024),  # 1 GB used
+        ps_run=lambda: ps_output((1, 500000, "launchd")),
+        amber_gb=4.0,
+    )
+    assert row["state"] == "ok"
+    assert row["swap_gb"] == pytest.approx(1.0)
+    assert row["reason"] == ""
+
+
+def test_memory_row_amber_at_the_threshold():
+    row = memory_row(swap_run=lambda: swap_output(4 * 1024), ps_run=lambda: ps_output(), amber_gb=4.0)
+    assert row["state"] == "amber"
+
+
+def test_memory_row_red_at_2x_and_names_the_top_process():
+    # 9 GB swap, amber default 4 -> red at 8: the exact drill 02-A8's measure names.
+    row = memory_row(
+        swap_run=lambda: swap_output(9 * 1024),
+        ps_run=lambda: ps_output(
+            (100, 6_000_000, "Messages"), (200, 2_000_000, "python3"), (300, 500_000, "launchd")
+        ),
+        amber_gb=4.0,
+    )
+    assert row["state"] == "red"
+    assert row["swap_gb"] == pytest.approx(9.0)
+    assert [p["comm"] for p in row["top_processes"]] == ["Messages", "python3", "launchd"]
+    assert row["top_processes"][0]["rss_gb"] == pytest.approx(6_000_000 / (1024 * 1024))
+    assert "Messages" in row["reason"]
+
+
+def test_memory_row_top_processes_bounded_to_three():
+    row = memory_row(
+        swap_run=lambda: swap_output(100),
+        ps_run=lambda: ps_output(
+            (1, 100, "a"), (2, 400, "b"), (3, 300, "c"), (4, 200, "d")
+        ),
+        amber_gb=4.0,
+    )
+    assert [p["comm"] for p in row["top_processes"]] == ["b", "c", "d"]
+
+
+def test_memory_row_a_broken_sysctl_call_alarms_not_vanishes():
+    def raise_sysctl():
+        raise OSError("sysctl not found")
+
+    row = memory_row(swap_run=raise_sysctl, ps_run=lambda: ps_output(), amber_gb=4.0)
+    assert row["state"] == "amber"
+    assert row["swap_gb"] is None
+    assert "sysctl failed" in row["reason"]
+
+
+def test_memory_row_unparsable_swap_output_alarms():
+    row = memory_row(swap_run=lambda: "garbage", ps_run=lambda: ps_output(), amber_gb=4.0)
+    assert row["state"] == "amber"
+    assert row["swap_gb"] is None
+
+
+def test_memory_row_a_broken_ps_call_still_reports_swap():
+    def raise_ps():
+        raise OSError("ps not found")
+
+    row = memory_row(swap_run=lambda: swap_output(1024), ps_run=raise_ps, amber_gb=4.0)
+    assert row["state"] == "ok"
+    assert row["top_processes"] == []
+
+
+def test_memory_row_default_amber_reads_the_gate_config(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"gate_swap_gb": 2.0}))
+    row = memory_row(
+        swap_run=lambda: swap_output(3 * 1024),  # 3 GB: amber at threshold 2, red at 4
+        ps_run=lambda: ps_output(),
+        gate_config_path=config,
+    )
+    assert row["state"] == "amber"
+
+
+def test_memory_row_missing_gate_config_falls_back_to_default(tmp_path):
+    row = memory_row(
+        swap_run=lambda: swap_output(1024),
+        ps_run=lambda: ps_output(),
+        gate_config_path=tmp_path / "absent.json",
+    )
+    assert row["state"] == "ok"  # 1 GB < the built-in 4 GB default

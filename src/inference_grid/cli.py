@@ -511,6 +511,8 @@ def needs_you_command(
     disk_path=None,
     disk_alarm_bytes=None,
     disk_red_bytes=None,
+    memory_gate_config_path=None,
+    memory_amber_gb=None,
 ):
     from .needs_you import DEFAULT_WORKSPACE_ROOT, needs_you as render
 
@@ -535,6 +537,8 @@ def needs_you_command(
         disk_path=disk_path,
         disk_alarm_bytes=disk_alarm_bytes,
         disk_red_bytes=disk_red_bytes,
+        memory_gate_config_path=memory_gate_config_path,
+        memory_amber_gb=memory_amber_gb,
     )
 
 

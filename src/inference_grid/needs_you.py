@@ -22,6 +22,9 @@ adds the rest of 02-A1's open half, all of it read-only:
   alarms rather than vanishing.
 - `collector_age_rows` -- 02-A1/C3: `heartbeat_rows`'s own reading for the four named
   collector-observation files, plus an explicit alarm past 30 minutes.
+- `memory_row` -- 02-A8 (the WindowServer watchdog kill, 2026-09-18): swap used and the
+  top three processes by resident memory, amber past the 02-A9 concurrency gate's own
+  `gate_swap_gb` threshold, red at 2x that.
 
 `needs_you()` combines all of the above with `operator_queue.build_overlay` into one
 dict for both the `inference-grid needs-you` command and the capacity dashboard.
@@ -29,6 +32,7 @@ dict for both the `inference-grid needs-you` command and the capacity dashboard.
 
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -428,6 +432,115 @@ def failure_rows(ledger, packets_root=None, log_bytes=DEFAULT_LOG_BYTES):
     return sorted(rows, key=lambda r: (r["kind"], r["id"]))
 
 
+# 02-A9's own concurrency-gate config, read here only for its `gate_swap_gb` threshold
+# so this row's amber/red bands always agree with what actually refuses a launch.
+DEFAULT_GATE_CONFIG_PATH = Path.home() / ".local/share/inference-grid-capacity/config.json"
+DEFAULT_MEMORY_AMBER_GB = 4.0
+
+
+def _run_sysctl_swapusage():
+    result = subprocess.run(
+        ["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=10, check=True
+    )
+    return result.stdout
+
+
+_SWAP_USED_RE = re.compile(r"used\s*=\s*([\d.]+)([MGmg])")
+
+
+def _parse_swap_used_gb(output):
+    """The "used" field of `vm.swapusage`'s output (e.g. "used = 604.25M"), in GB."""
+    match = _SWAP_USED_RE.search(output or "")
+    if not match:
+        return None
+    value, unit = float(match.group(1)), match.group(2).upper()
+    return value / 1024 if unit == "M" else value
+
+
+def _run_ps_rss():
+    result = subprocess.run(
+        ["ps", "-eo", "pid,rss,comm"], capture_output=True, text=True, timeout=10, check=True
+    )
+    return result.stdout
+
+
+def _top_processes_by_rss(output, limit=3):
+    """The `limit` heaviest rows out of `ps -eo pid,rss,comm` output, RSS in GB. A
+    malformed line (the header, or fewer than 3 fields) is skipped rather than
+    crashing the whole reading."""
+    rows = []
+    for line in (output or "").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid_text, rss_text, comm = parts
+        try:
+            pid, rss_kb = int(pid_text), int(rss_text)
+        except ValueError:
+            continue
+        rows.append({"pid": pid, "comm": comm.strip(), "rss_gb": rss_kb / (1024 * 1024)})
+    rows.sort(key=lambda r: r["rss_gb"], reverse=True)
+    return rows[:limit]
+
+
+def _read_memory_amber_gb(gate_config_path=None):
+    """`gate_swap_gb` from 02-A9's concurrency-gate config (default 4 GB). Missing or
+    unreadable config, or a bad key, falls back to the default -- this is a display
+    threshold, never a launch decision, so a broken config file must not blank the row.
+    """
+    path = Path(gate_config_path) if gate_config_path else DEFAULT_GATE_CONFIG_PATH
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return DEFAULT_MEMORY_AMBER_GB
+    value = data.get("gate_swap_gb") if isinstance(data, dict) else None
+    if type(value) in (int, float) and not isinstance(value, bool) and value > 0:
+        return float(value)
+    return DEFAULT_MEMORY_AMBER_GB
+
+
+def memory_row(swap_run=None, ps_run=None, gate_config_path=None, amber_gb=None):
+    """02-A8 (the WindowServer watchdog kill, 2026-09-18): swap used and the top three
+    processes by resident memory, `{swap_gb, state, top_processes, reason}` -- state one
+    of "ok" / "amber" (>= `gate_swap_gb`, default 4) / "red" (>= 2x that). Red also names
+    the heaviest process in `reason`, so the row is legible without reading the list.
+
+    `swap_run`/`ps_run` are operator-injectable (tests stub them instead of shelling out
+    to `sysctl`/`ps`), same shape as 02-A1/C3's `disk_free_row`. A failed or unparsable
+    `sysctl` call reports state "amber" with the failure as its reason -- a broken check
+    must alarm, never read as "ok" or vanish from the page.
+    """
+    amber = amber_gb if amber_gb is not None else _read_memory_amber_gb(gate_config_path)
+    red = amber * 2
+    swap_run = swap_run or _run_sysctl_swapusage
+    ps_run = ps_run or _run_ps_rss
+    try:
+        swap_gb = _parse_swap_used_gb(swap_run())
+    except Exception as exc:  # noqa: BLE001 -- a broken swap check must alarm, not vanish
+        return {
+            "swap_gb": None,
+            "state": "amber",
+            "top_processes": [],
+            "reason": f"sysctl failed: {exc}",
+        }
+    if swap_gb is None:
+        return {
+            "swap_gb": None,
+            "state": "amber",
+            "top_processes": [],
+            "reason": "vm.swapusage returned an unparsable reading",
+        }
+    try:
+        top = _top_processes_by_rss(ps_run())
+    except Exception:  # noqa: BLE001 -- the swap reading itself is still good
+        top = []
+    state = "red" if swap_gb >= red else "amber" if swap_gb >= amber else "ok"
+    reason = ""
+    if state == "red" and top:
+        reason = f"top process: {top[0]['comm']} ({top[0]['rss_gb']:.1f} GB)"
+    return {"swap_gb": swap_gb, "state": state, "top_processes": top, "reason": reason}
+
+
 def needs_you(
     ledger,
     board_dirs=(),
@@ -444,6 +557,10 @@ def needs_you(
     disk_alarm_bytes=None,
     disk_red_bytes=None,
     disk_df_run=None,
+    memory_swap_run=None,
+    memory_ps_run=None,
+    memory_gate_config_path=None,
+    memory_amber_gb=None,
     now=None,
 ):
     """Everything the operator needs to see, read-only.
@@ -466,6 +583,9 @@ def needs_you(
     four files 02-A1/C3 names -- rather than reporting nothing, since those are this
     repo's own known collector-output defaults, not invented. `disk_path` defaults to
     the Data volume; `disk_df_run` is operator-injectable (tests stub `df`).
+    Memory: `memory_row` always runs (swap and top processes are cheap reads);
+    `memory_swap_run`/`memory_ps_run` exist only for tests to inject fixtures instead of
+    shelling out to `sysctl`/`ps`.
     """
     overlay = build_overlay(
         ledger,
@@ -502,5 +622,11 @@ def needs_you(
     )
     overlay["disk_free"] = disk_free_row(
         disk_path, alarm_bytes=disk_alarm_bytes, red_bytes=disk_red_bytes, run=disk_df_run
+    )
+    overlay["memory"] = memory_row(
+        swap_run=memory_swap_run,
+        ps_run=memory_ps_run,
+        gate_config_path=memory_gate_config_path,
+        amber_gb=memory_amber_gb,
     )
     return overlay
