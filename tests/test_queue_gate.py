@@ -71,7 +71,7 @@ def test_read_state_parses_swap_disk_pytest_and_runs():
             "claude -p": (0, "111\n"),
             "codex exec": (1, ""),
         },
-        ps_commands={"111": "caffeinate -i claude -p row text --model sonnet"},
+        ps_commands={"111": "claude -p row text --model sonnet"},
     )
     state = gate.read_state(run)
     assert state["swap_gb"] == pytest.approx(0.59, abs=0.01)
@@ -122,7 +122,40 @@ def test_read_state_counts_a_caffeinate_wrapped_claude_launch():
             "df -g": (0, DF_HEALTHY),
             "claude -p": (0, "111\n"),  # pgrep -f matches the full command line
         },
-        ps_commands={"111": "caffeinate -i claude -p run the row --model sonnet"},
+        ps_commands={"111": "claude -p run the row --model sonnet"},
+    )
+    assert gate.read_state(run)["running_runs"] == 1
+
+
+def test_read_state_counts_a_caffeinate_launch_once_not_twice():
+    """caffeinate forks and execs, so one `caffeinate -i claude -p ...` launch is two
+    processes (verified in review). Only the claude child counts, or every run
+    would be counted twice and `gate_max_runs=2` would silently allow one."""
+    run = fake_run(
+        {
+            "vm.swapusage": (0, SWAP_LOW),
+            "df -g": (0, DF_HEALTHY),
+            "claude -p": (0, "100\n101\n"),
+        },
+        ps_commands={
+            "100": "caffeinate -i claude -p run the row --model sonnet",
+            "101": "claude -p run the row --model sonnet",
+        },
+    )
+    assert gate.read_state(run)["running_runs"] == 1
+
+
+def test_read_state_counts_a_pid_matched_by_both_patterns_once():
+    """A claude prompt whose text mentions "codex exec" (dispatch templates do) is
+    returned by both pgreps; it is one run."""
+    run = fake_run(
+        {
+            "vm.swapusage": (0, SWAP_LOW),
+            "df -g": (0, DF_HEALTHY),
+            "claude -p": (0, "111\n"),
+            "codex exec": (0, "111\n"),
+        },
+        ps_commands={"111": "claude -p never run codex exec here --model sonnet"},
     )
     assert gate.read_state(run)["running_runs"] == 1
 
@@ -149,9 +182,10 @@ def test_read_state_ignores_a_shell_whose_text_merely_mentions_claude_p():
 
 
 def test_is_headless_run_process_shapes():
-    assert gate._is_headless_run_process("caffeinate -i claude -p hello")
-    assert gate._is_headless_run_process("/usr/bin/caffeinate -i -s /opt/homebrew/bin/claude -p x")
+    assert gate._is_headless_run_process("claude -p hello")
+    assert gate._is_headless_run_process("/opt/homebrew/bin/claude -p x --model sonnet")
     assert gate._is_headless_run_process("codex exec --model gpt-5.6-luna x")
+    assert not gate._is_headless_run_process("caffeinate -i claude -p hello")  # parent; child counts
     assert not gate._is_headless_run_process("claude --output-format stream-json")
     assert not gate._is_headless_run_process("bash -c caffeinate -i claude -p x")
 
@@ -292,7 +326,7 @@ def test_main_exits_one_and_names_every_condition_when_blocked(tmp_path, capsys)
         },
         ps_commands={
             "222": "/path/.venv/bin/python -m pytest -q -x",
-            "111": "caffeinate -i claude -p row text --model sonnet",
+            "111": "claude -p row text --model sonnet",
         },
     )
     code = gate.main(["--config", str(tmp_path / "absent.json")], run=run)

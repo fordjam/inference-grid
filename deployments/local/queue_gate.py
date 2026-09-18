@@ -127,9 +127,11 @@ _HEADLESS_RUN_PATTERNS = ("claude -p", "codex exec")
 # headless run anywhere the count was 1, the match being the operator's own shell.
 # So every matched pid is cross-checked against its real command line, and only a
 # process whose executable is claude/codex (optionally wrapped by caffeinate) counts.
-_HEADLESS_EXEC_RE = re.compile(
-    r"^(?:\S*/)?(?:caffeinate(?:\s+-\S+)*\s+)?(?:\S*/)?(?:claude\s+-p|codex\s+exec)\b"
-)
+# caffeinate forks and execs, so a `caffeinate -i claude -p ...` launch shows as
+# two processes: the caffeinate parent and the `claude -p ...` child (verified in
+# review). Counting both would double every run, so only the child counts: the
+# executable itself must be claude or codex, never a wrapper.
+_HEADLESS_EXEC_RE = re.compile(r"^(?:\S*/)?(?:claude\s+-p|codex\s+exec)\b")
 
 
 def _is_headless_run_process(command):
@@ -137,12 +139,16 @@ def _is_headless_run_process(command):
 
 
 def _headless_run_count(run):
-    count = 0
+    # One pid can match several patterns (a claude prompt whose text mentions
+    # "codex exec" is hit by both pgreps), so pids are collected into a set first.
+    pids = set()
     for pattern in _HEADLESS_RUN_PATTERNS:
-        for pid in _pgrep_pids(run, pattern):
-            rc, command = run(["ps", "-o", "command=", "-p", pid])
-            if rc == 0 and _is_headless_run_process(command):
-                count += 1
+        pids.update(_pgrep_pids(run, pattern))
+    count = 0
+    for pid in sorted(pids):
+        rc, command = run(["ps", "-o", "command=", "-p", pid])
+        if rc == 0 and _is_headless_run_process(command):
+            count += 1
     return count
 
 
